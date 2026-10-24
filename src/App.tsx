@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import logo from "../brand/musikore-logo-color.svg";
+import logo from "../brand/tunekore-logo-color.svg";
 import {
   engineVersion,
   listOutputs,
@@ -105,7 +105,7 @@ export default function App() {
   return (
     <main className="app">
       <header className="top">
-        <img src={logo} alt="musiKore" className="logo" />
+        <img src={logo} alt="tuneKore" className="logo" />
         <span className="version">engine {version || "…"}</span>
       </header>
 

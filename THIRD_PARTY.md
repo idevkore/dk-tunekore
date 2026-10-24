@@ -1,6 +1,6 @@
 # Third-party software
 
-Every dependency musiKore builds on, with its licence. The rule (`CLAUDE.md`):
+Every dependency tuneKore builds on, with its licence. The rule (`CLAUDE.md`):
 MIT, BSD, Apache-2.0, zlib, ISC or public domain. MPL-2.0 only for unmodified
 files. Nothing GPL, AGPL or LGPL goes into the app.
 
@@ -11,7 +11,7 @@ MIT). Update this file in the same PR that adds a dependency.
 
 ## Engine and app shell (Rust), direct dependencies
 
-One Cargo workspace: `engine/` (`musikore-engine`) and `src-tauri/` (`musikore`).
+One Cargo workspace: `engine/` (`tunekore-engine`) and `src-tauri/` (`tunekore`).
 
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
@@ -62,5 +62,5 @@ we ship.
 
 ## Our own
 
-The musiKore name, logo and app icon (`brand/`) and all source in this repo
+The tuneKore name, logo and app icon (`brand/`) and all source in this repo
 belong to devKore.

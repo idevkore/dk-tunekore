@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "musiKore",
+  "productName": "tuneKore",
   "version": "0.1.0",
-  "identifier": "com.devkore.musikore",
+  "identifier": "com.devkore.tunekore",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "musiKore",
+        "title": "tuneKore",
         "width": 900,
         "height": 640,
         "minWidth": 640,

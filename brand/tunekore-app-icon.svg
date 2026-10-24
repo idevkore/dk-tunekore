@@ -1,5 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="musiKore">
-<title>musiKore</title>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="tuneKore">
+<title>tuneKore</title>
 <rect id="tile" x="100" y="100" width="824" height="824" rx="185.4" fill="#121217"/>
 <path id="K" fill="#8051FF" d="M591.304 319.421 398.762 511.963 591.304 704.579H446.876L254.334 511.963L446.876 319.421ZM361.018 704.579H240.08V584.122ZM240.549 440.359V319.421H360.55Z"/>
 <path id="chevron" fill="#B7FF00" d="M591.304 319.421 783.92 511.963 591.304 704.579 519.09 632.337 639.418 511.963 519.09 391.635Z"/>

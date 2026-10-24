@@ -1,45 +1,47 @@
-# musiKore brand
+# tuneKore brand
 
-The musiKore logo is the devKore wordmark with "dev" replaced by "musi". "Kore"
-is the original devkore.com wordmark (`DK.Web/public/images/brand/logo-kore-wordmark-tight.svg`):
-the cut K, the "o" and "e" cut back 3.5 units clear of the chevrons, and the
-lime chevron. Open `preview.html` to see everything on dark and light grounds.
+The tuneKore logo is **TUNE** in capitals followed by the K› icon: "TUNE K›".
+The name is written tuneKore in text. The logo was rebranded from musiKore on
+2026-10-24. Open `preview.html` to see everything on dark and light grounds.
 
 | File | Use |
 | --- | --- |
-| `musikore-logo-color.svg` | Main logo, on dark grounds (musi in light) |
-| `musikore-logo-color-on-light.svg` | Main logo, on light grounds (musi in ink) |
-| `musikore-logo-white.svg`, `musikore-logo-ink.svg` | One-color versions |
-| `musikore-mark.svg` | The K› icon, the same on dark and light grounds |
-| `musikore-app-icon.svg` | App icon: the K› icon on an ink tile, on Apple's 1024 grid (824 tile) |
-| `musikore-app-icon-light.svg` | The same icon on a white tile, as an alternative |
-| `app-icon/musiKore.icns` | macOS app icon, built from `musikore-app-icon.svg` |
-| `musikore-favicon.svg` | Small square tile for web and docs |
+| `tunekore-logo-color.svg` | Main logo, on dark grounds (TUNE in light) |
+| `tunekore-logo-color-on-light.svg` | Main logo, on light grounds (TUNE in ink) |
+| `tunekore-logo-white.svg`, `tunekore-logo-ink.svg` | One-color versions |
+| `tunekore-mark.svg` | The K› icon, the same on dark and light grounds |
+| `tunekore-app-icon.svg` | App icon: the K› icon on an ink tile, on Apple's 1024 grid (824 tile) |
+| `tunekore-app-icon-light.svg` | The same icon on a white tile, as an alternative |
+| `app-icon/tuneKore.icns` | macOS app icon, built from `tunekore-app-icon.svg` |
+| `tunekore-favicon.svg` | Small square tile for web and docs |
 | `png/` | PNG exports of the above |
 
 ## Colors
 
 | Name | Value | Role |
 | --- | --- | --- |
-| Ink | `#121217` | Ground, and "musi" on light |
-| Light | `#F7F7F8` | "musi" on dark |
-| Violet | `#8051FF` | Kore and the K |
+| Ink | `#121217` | Ground, and TUNE on light |
+| Light | `#F7F7F8` | TUNE on dark |
+| Violet | `#8051FF` | The K |
 | Lime | `#B7FF00` | The chevron only |
 
-## How the letters are built
+## How TUNE is built
 
-No font is used, so the letters belong to the brand. The "ore" letters match no
-open font closely, so "musi" is drawn from them:
+No font is used, so the letters belong to the brand. They are drawn as plain
+geometry, matched to the K:
 
-- **m** is the "r"'s stem, junction and shoulder, turned down into a right stem,
-  twice. The second arch meets the first in a V.
-- **u** is that arch turned 180°, so its bottom-right spur matches the "d".
-- **s** follows the "e": thin horizontals (5.75), heavy sides (8.5) and
-  vertical cuts at both ends.
-- **i** has the K's corner triangle as its dot, cut from the stem by the same
-  3.5 gap the "o" and "e" have. Its top lines up with the K.
-- Spacing: 3.4 between straight sides, 2.9 next to a round side, and 3.5 (the
-  cut width) between the "i" and the K.
+- **Cap height** is the K's height (31.236 units).
+- **Vertical strokes** are 8.9 units, the same as the devKore wordmark's
+  stems. **Horizontal strokes** are 7.0.
+- **U** has the same rounded bottom as the wordmark's "o", with the same small
+  overshoot below the baseline.
+- **N** has a straight diagonal from the top of its left stem to the foot of
+  its right stem.
+- **Spacing:** 2.4 after the T (its bar already leaves air), 3.4 between the
+  other letters, and 3.5, the K's cut width, between the E and the K›.
+
+`source/glyphs.py` also holds the earlier lowercase letters (m, u, s, i) from
+the musiKore logo, in case a lowercase mark is wanted later.
 
 ## The K› icon
 
@@ -66,7 +68,7 @@ Then re-export the app icon (`rsvg-convert` is in Homebrew's `librsvg`;
 `iconutil` comes with macOS):
 
 ```bash
-cd brand && mkdir -p app-icon/musiKore.iconset && for s in 16 32 128 256 512; do rsvg-convert -w $s musikore-app-icon.svg -o app-icon/musiKore.iconset/icon_${s}x${s}.png; rsvg-convert -w $((s*2)) musikore-app-icon.svg -o app-icon/musiKore.iconset/icon_${s}x${s}@2x.png; done && iconutil -c icns app-icon/musiKore.iconset -o app-icon/musiKore.icns
+cd brand && mkdir -p app-icon/tuneKore.iconset && for s in 16 32 128 256 512; do rsvg-convert -w $s tunekore-app-icon.svg -o app-icon/tuneKore.iconset/icon_${s}x${s}.png; rsvg-convert -w $((s*2)) tunekore-app-icon.svg -o app-icon/tuneKore.iconset/icon_${s}x${s}@2x.png; done && iconutil -c icns app-icon/tuneKore.iconset -o app-icon/tuneKore.icns
 ```
 
 The PNGs in `png/` are exported the same way: logos at 2400 px wide, marks at

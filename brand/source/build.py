@@ -1,4 +1,4 @@
-"""Writes the musiKore logo, the K> icon and the app icons into brand/."""
+"""Writes the tuneKore logo (TUNE plus the K> icon), the icon and the app icons into brand/."""
 import os, sys
 from glyphs import *
 
@@ -7,16 +7,11 @@ INK, LIGHT, VIOLET, LIME, WHITE = "#121217", "#F7F7F8", "#8051FF", "#B7FF00", "#
 GAP_STEM, GAP_ROUND = 3.4, 2.9
 
 def layout():
-    m = glyph_m(); u = glyph_u(); s = glyph_s(); i = glyph_i()
+    """TUNE in capitals, then the K> icon, one cut-width apart."""
     x = 0.0; parts = []
-    parts.append(move(m, x)); x = bounds(m)[2] + GAP_STEM
-    parts.append(move(u, x)); x += bounds(u)[2] + GAP_ROUND
-    parts.append(move(s, x - bounds(s)[0])); x += bounds(s)[2] - bounds(s)[0] + GAP_ROUND
-    parts.append(move(i, x)); x += bounds(i)[2] + CUT
-    musi = U(*parts)
-    v, l = kore()
-    dx = x - 2.568
-    return musi, move(v, dx, -0.115), move(l, dx, -0.115)
+    for g, gap in [(cap_T(), 2.4), (cap_U(), 3.4), (cap_N(), 3.4), (cap_E(), CUT)]:
+        parts.append(move(g, x)); x += bounds(g)[2] + gap
+    return U(*parts), x
 
 def svg(view, body, title, w=None):
     x0, y0, x1, y1 = view
@@ -29,17 +24,6 @@ def svg(view, body, title, w=None):
 def path(id_, fill, p): return f'<path id="{id_}" fill="{fill}" d="{d_of(p)}"/>\n'
 
 os.makedirs(OUT, exist_ok=True)
-musi, kv, kl = layout()
-b = bounds(U(musi, kv, kl)); view = (0, 0, b[2], max(b[3], 31.77))
-variants = {
-    "musikore-logo-color": (LIGHT, VIOLET, LIME),          # on dark grounds
-    "musikore-logo-color-on-light": (INK, VIOLET, LIME),
-    "musikore-logo-white": (WHITE, WHITE, WHITE),
-    "musikore-logo-ink": (INK, INK, INK),
-}
-for name, (c1, c2, c3) in variants.items():
-    body = path("musi", c1, musi) + path("Kore", c2, kv) + path("chevron", c3, kl)
-    open(f"{OUT}/{name}.svg", "w").write(svg(view, body, "musiKore"))
 
 # K> icon: the devKore icon-v2 shapes (DK.Web/brand/devkore/icon-v2) without the
 # lime sliver in the K. The violet K's chevron sits over the lime chevron, leaving a
@@ -54,7 +38,7 @@ def mark_at(scale, tx, ty):
     t = (scale, 0, 0, scale, tx, ty)
     return path("K", VIOLET, xf(KV, t)) + path("chevron", LIME, xf(ARROW, t))
 
-open(f"{OUT}/musikore-mark.svg", "w").write(svg((0, 0, mb[2], mb[3]), mark_at(1, 0, 0), "musiKore"))
+open(f"{OUT}/tunekore-mark.svg", "w").write(svg((0, 0, mb[2], mb[3]), mark_at(1, 0, 0), "tuneKore"))
 
 def tile_icon(name, ground):
     # Apple's 1024 grid: 824 rounded tile, mark 66% of the tile wide (as in devKore's tile), centered
@@ -62,17 +46,29 @@ def tile_icon(name, ground):
     body = (f'<rect id="tile" x="100" y="100" width="824" height="824" rx="185.4" fill="{ground}"/>\n'
             + mark_at(s, 512 - mb[2]*s/2, 512 - mb[3]*s/2))
     open(f"{OUT}/{name}.svg", "w").write(
-        '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="musiKore">\n'
-        f'<title>musiKore</title>\n{body}</svg>\n')
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" role="img" aria-label="tuneKore">\n'
+        f'<title>tuneKore</title>\n{body}</svg>\n')
 
-tile_icon("musikore-app-icon", INK)
-tile_icon("musikore-app-icon-light", WHITE)
+tile_icon("tunekore-app-icon", INK)
+tile_icon("tunekore-app-icon-light", WHITE)
 
 # Favicon: full-bleed rounded square, mark 76% wide
 s2 = 76 / mb[2]
 fav = f'<rect id="tile" width="100" height="100" rx="18" fill="{INK}"/>\n' + mark_at(s2, 50 - mb[2]*s2/2, 50 - mb[3]*s2/2)
-open(f"{OUT}/musikore-favicon.svg", "w").write(
-    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100" fill="none" role="img" aria-label="musiKore">\n'
-    f'<title>musiKore</title>\n{fav}</svg>\n')
-print("logo view", [round(v, 3) for v in view], "mark", [round(v, 3) for v in mb])
-print(ascii(U(musi, kv, kl), step=0.75, yr=(-1, 33)))
+open(f"{OUT}/tunekore-favicon.svg", "w").write(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100" fill="none" role="img" aria-label="tuneKore">\n'
+    f'<title>tuneKore</title>\n{fav}</svg>\n')
+
+# tuneKore logo: TUNE, then the K> icon
+tune, x_k = layout()
+lk_v, lk_l = move(KV, x_k), move(ARROW, x_k)
+b = bounds(U(tune, lk_v, lk_l)); view = (0, 0, b[2], max(b[3], 31.79))
+variants = {
+    "tunekore-logo-color": (LIGHT, VIOLET, LIME),          # on dark grounds
+    "tunekore-logo-color-on-light": (INK, VIOLET, LIME),
+    "tunekore-logo-white": (WHITE, WHITE, WHITE),
+    "tunekore-logo-ink": (INK, INK, INK),
+}
+for name, (c1, c2, c3) in variants.items():
+    body = path("TUNE", c1, tune) + path("K", c2, lk_v) + path("chevron", c3, lk_l)
+    open(f"{OUT}/{name}.svg", "w").write(svg(view, body, "tuneKore"))
