@@ -18,7 +18,7 @@ test tone with a level meter. Nothing else yet.
 
 ## Build and run
 
-You need Rust, CMake, Node 24 and Xcode's command line tools (macOS).
+You need Rust, Node 24 and Xcode's command line tools (macOS).
 
 ```bash
 npm install
@@ -26,9 +26,10 @@ npm run tauri dev
 ```
 
 `npm run tauri build -- --bundles app` makes `musiKore.app` in
-`src-tauri/target/release/bundle/macos/`. The C++ engine in `engine/` is built
-by `src-tauri/build.rs` with CMake. Its first build downloads RtAudio, pinned by
-SHA256. `ctest` for the engine alone: `cmake -S engine -B build && cmake --build build && ctest --test-dir build`.
+`target/release/bundle/macos/`. The repo is one Cargo workspace: the audio
+engine is the `musikore-engine` crate in `engine/`, and the Tauri shell in
+`src-tauri/` depends on it. To test the engine alone (it plays a short tone on
+the default output unless `CI` is set): `cargo test -p musikore-engine`.
 
 - [`docs/PLAN.md`](docs/PLAN.md): the stack, architecture, roadmap, plugin
   support, stems and cross-platform path
