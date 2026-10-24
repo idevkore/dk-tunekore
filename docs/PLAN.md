@@ -317,8 +317,38 @@ Bass and Others:
 | Ship with no built-in model and let users run a model they supply | None | Weak product |
 
 The model sits behind a `Separator` interface, so it can be swapped without
-touching the Analyzer. Until this is decided, Demucs runs on Nate's machine
-only and is never bundled.
+touching the Analyzer.
+
+**Decision (Nate, 2026-10-24): the first path.**
+
+- **Phase 1 builds on Demucs (htdemucs)**, running on Nate's Mac only. The
+  weights are downloaded on that machine and never committed, bundled or
+  shipped. Spleeter was also checked and isn't a clean fallback: its code is
+  MIT, but its weights carry no license.
+- **Before musiKore ships to anyone,** a licensed on-device model replaces
+  Demucs behind `Separator`. Two vendors are being contacted now, since deals
+  like this take weeks:
+
+| Vendor | What they offer | Contact | Status |
+| --- | --- | --- | --- |
+| AudioShake | Local Inference SDK: on-device separation for macOS, Windows, iOS and Android, with no cloud calls | info@audioshake.ai, or Contact sales on audioshake.ai/products/sdk | Inquiry drafted, not sent |
+| Music AI (Moises) | The model Ableton licensed for Live 12.3. Its public offer is a cloud API with SDKs; on-device licensing isn't advertised, so ask. | Sales contact on music.ai | Inquiry drafted, not sent |
+
+What to ask both:
+
+- Can the model run fully on-device in a desktop app (macOS first, then
+  Windows and Linux)?
+- Which stems are offered (at least vocals, drums, bass, other), and is there
+  a fast and a high-quality mode?
+- How is it priced: per seat, royalty, revenue share or a flat fee? Is there a
+  startup tier?
+- Is there an evaluation build to compare against Demucs on the same songs?
+- What is the integration surface (C/C++ or Rust-friendly library, model
+  format), and which hardware accelerators does it use (Core ML, Metal,
+  DirectML, CUDA)?
+
+Update the table as replies come in. The vendor is chosen by the end of
+Phase 1, so it can be in place before Phase 8 (Windows) at the latest.
 
 ## 7. Cross-platform path
 
