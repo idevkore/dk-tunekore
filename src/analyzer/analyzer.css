@@ -38,8 +38,8 @@ button:disabled { cursor: default; opacity: 0.5; }
 .bar .sub { color: var(--dim); font-size: 12.5px; }
 
 .body { flex: 1; display: flex; min-height: 0; }
-.side { width: 340px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--line); padding: 18px; display: flex; flex-direction: column; gap: 20px; overflow-y: auto; }
-.group { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.side { width: 340px; flex-shrink: 0; background: var(--side); border-right: 1px solid var(--line); padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+.group { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .group h2, .group legend, .later .label { margin: 0 0 2px; padding: 0; font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); }
 
 .song-card { border-radius: 12px; background: #1c1c24; border: 1px solid #2a2a34; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
@@ -52,7 +52,7 @@ button:disabled { cursor: default; opacity: 0.5; }
 .drop strong { color: var(--text); font-size: 14px; }
 .drop:hover:not(:disabled) { border-color: var(--violet); }
 
-.card { display: flex; gap: 10px; padding: 10px 12px; border-radius: 12px; border: 1px solid #2a2a34; background: var(--card); cursor: pointer; }
+.card { display: flex; gap: 10px; padding: 8px 12px; border-radius: 12px; border: 1px solid #2a2a34; background: var(--card); cursor: pointer; }
 .card.on { border: 1.5px solid var(--violet); background: #1c1a26; }
 .card.off { cursor: default; opacity: 0.75; }
 .card input { margin: 2px 0 0; accent-color: var(--violet); }
