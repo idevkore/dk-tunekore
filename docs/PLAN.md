@@ -202,7 +202,7 @@ something to release.
 Phase 1 comes first, as asked. It needs only the shell, the audio output and
 the stem worker, so it ships before plugin hosting.
 
-## 5. Plugins: what "support Serum, Arturia and Splice" means
+## 5. Plugins and hardware: what "support Serum, Arturia and Splice" means
 
 On this Mac every plugin is installed as both AU and VST3, with no CLAP:
 
@@ -213,17 +213,37 @@ On this Mac every plugin is installed as both AU and VST3, with no CLAP:
 - **Native Instruments:** Kontakt 7, Massive, Reaktor 6, Guitar Rig 7, Solid
   Bus Comp, Komplete Kontrol, Maschine 2
 
+Nate's Splice account (Apps & Plugins, 2026-10-24) also has these. Only Serum
+and Serum 2 are installed so far:
+
+| Splice app | Version | What it is | Status |
+| --- | --- | --- | --- |
+| Instrument | 2.5.4 | Splice's own instrument, with preset libraries | Not installed |
+| Sounds Plugin | 0.15.0 beta | Browse Splice sounds, Search with Sound and Variations inside a DAW | Not installed |
+| Astra | 1.2.7 | Synthesizer and sequencer | Not installed |
+| Beatmaker | 1.3.1 | Drums and sequencer | Not installed |
+| Bridge | 5.1.1 | Plays Splice previews in the DAW's key and tempo | Not installed |
+| Serum | 1.368 | Rent-to-Own, now owned | Installed |
+| Serum 2 | 2.1.5 | Rent-to-Own, now owned | Installed |
+
+Serum and Serum 2 show as owned, so their licenses no longer depend on Splice.
+The other Splice apps install as ordinary plugins. Check their formats (AU,
+VST3) once they're installed. Astra and Beatmaker sequence to the host's clock,
+and may send MIDI out, so the host must route a plugin's MIDI output to other
+tracks.
+
 | Plugin | macOS | Windows | Linux |
 | --- | --- | --- | --- |
 | Serum 1 | AU, VST3 | VST3 | Only through yabridge (Wine), with a workaround |
 | Serum 2 (Splice Rent-to-Own) | AU, VST3 | VST3 | Native VST3 public beta since Aug 2026. Unknown whether a Rent-to-Own license unlocks it. |
 | Arturia V Collection 11 | AU, VST3 | VST3 | None. yabridge is stuck on Wine 9.21, so activation is hit or miss. |
 | Native Instruments | AU, VST3 | VST3 | None. Native Access 2 fails under Wine. |
-| Splice Bridge, Splice Sounds plugin | AU, VST3 | VST3 | None |
+| Splice Instrument, Astra, Beatmaker, Bridge, Sounds Plugin | AU, VST3 (to confirm) | VST3 | None |
 
 **Phase 2 test list** (in order): Serum 2, Serum, Analog Lab V, one heavy V
 instrument (Jup-8 V4), Kontakt 7 (multiple outputs), Guitar Rig 7 (effect),
-Solid Bus Comp (sidechain), Splice Bridge.
+Solid Bus Comp (sidechain), Splice Instrument, Astra and Beatmaker (synced to
+the host's clock), Splice Bridge.
 
 **Splice** support comes in three layers:
 
@@ -241,6 +261,23 @@ Solid Bus Comp (sidechain), Splice Bridge.
 3. **In-app catalog search, like Live 12.3.** Splice has no public API. Live,
    Studio One and Pro Tools each did a partnership deal. That is a business
    conversation for later, not a coding task.
+
+**Hardware.** Nate will send a list of the hardware musiKore needs to work with.
+Until then, this is what any host needs:
+
+- **Audio interfaces:** any CoreAudio device on macOS, ASIO and WASAPI on
+  Windows, and ALSA, JACK and PipeWire on Linux.
+- **MIDI keyboards and controllers:** class-compliant USB MIDI through CoreMIDI
+  (and the Windows and Linux equivalents), plus MIDI learn to map any knob or
+  fader to a parameter.
+- **MIDI out and clock:** send notes and MIDI clock to external synths and
+  drum machines, and compensate for their latency.
+- **Control surfaces:** devices with their own protocol (for example Komplete
+  Kontrol or Maschine keyboards) need a script per device. Support comes per
+  device, from the list.
+
+Each item on the list gets a row here: device, connection, what it should
+control, and the phase it lands in.
 
 ## 6. The Analyzer and stems
 
