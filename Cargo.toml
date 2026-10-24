@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["engine", "src-tauri"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.90"
+license = "UNLICENSED"
+publish = false
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true
+
+# Audio and DSP code runs too slowly unoptimized to test by ear.
+[profile.dev.package.musikore-engine]
+opt-level = 2

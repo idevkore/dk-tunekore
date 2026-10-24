@@ -21,7 +21,7 @@ function meterPosition(peak: number): number {
 export default function App() {
   const [version, setVersion] = useState("");
   const [devices, setDevices] = useState<OutputDevice[]>([]);
-  const [deviceId, setDeviceId] = useState<number | null>(null);
+  const [deviceId, setDeviceId] = useState<string | null>(null);
   const [frequency, setFrequency] = useState(DEFAULT_HZ);
   const [playing, setPlaying] = useState(false);
   const [level, setLevel] = useState(0);
@@ -89,7 +89,7 @@ export default function App() {
     }
   }
 
-  async function changeDevice(id: number) {
+  async function changeDevice(id: string) {
     setDeviceId(id);
     if (!playing) return;
     try {
@@ -115,7 +115,7 @@ export default function App() {
           <select
             aria-label="Output device"
             value={deviceId ?? ""}
-            onChange={(e) => void changeDevice(Number(e.target.value))}
+            onChange={(e) => void changeDevice(e.target.value)}
             disabled={devices.length === 0}
           >
             {devices.length === 0 && <option value="">No output devices</option>}

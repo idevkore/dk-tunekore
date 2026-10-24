@@ -1,0 +1,12 @@
+[package]
+name = "musikore-engine"
+version = "0.1.0"
+description = "musiKore's audio engine"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+cpal = "0.18.2"
+serde = { version = "1", features = ["derive"] }

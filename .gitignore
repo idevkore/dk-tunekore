@@ -5,3 +5,4 @@ brand/app-icon/*.iconset/
 node_modules/
 dist/
 /build/
+/target/

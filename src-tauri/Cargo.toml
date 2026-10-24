@@ -3,10 +3,10 @@ name = "musikore"
 version = "0.1.0"
 description = "musiKore: a lightweight DAW by devKore"
 authors = ["devKore"]
-edition = "2021"
-rust-version = "1.90"
-license = "UNLICENSED"
-publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
 
 [lib]
 name = "musikore_lib"
@@ -14,15 +14,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
-cmake = "0.1"
 
 [dependencies]
+musikore-engine = { path = "../engine" }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "s"
-strip = true
