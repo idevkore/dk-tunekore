@@ -364,7 +364,7 @@ Demucs:
 
 **Phase 1 results (2026-10-24, Nate's MacBook Pro, M1 Pro, 16 GB).** Both
 models ran through the app's own path (decode, worker, checks) with
-`stems/tools/compare.py`; the stems are in `~/Music/musiKore analyzer
+`stems/tools/compare.py`; the stems are in `~/Music/tuneKore analyzer
 comparison/` for listening. Fast is `htdemucs` and `sam-audio-small`; Best is
 `htdemucs_ft` and `sam-audio-base`. `sam-audio-large` (14.9 GB of weights)
 doesn't fit in 16 GB.
@@ -382,9 +382,9 @@ doesn't fit in 16 GB.
 | Quantum Love (3:13, MP3) | Demucs Fast | 15 s | 12.6× faster | 1.2 GB | 29.8 dB | 0 | no reference stems | |
 | | Demucs Best | 57 s | 3.4× faster | 1.2 GB | 20.8 dB | 0 | | |
 | | SAM Fast | 18 min 47 s | 5.8× slower | 6.5 GB | exact | 0 | | |
-| 4:00 song (Quantum Love looped) | Demucs Fast | 25 s | | 1.2 GB | 29.8 dB | 0 | | |
-| | Demucs Best | 101 s | | 1.2 GB | 20.5 dB | 0 | | |
-| | SAM Fast | SAM_4MIN | | | exact | 0 | | |
+| 4:00 song (Quantum Love looped) | Demucs Fast | 28 s | 8.7× faster | 1.2 GB | 29.8 dB | 0 | | |
+| | Demucs Best | 98 s | 2.5× faster | 1.2 GB | 20.6 dB | 0 | | |
+| | SAM Fast | 21 min 43 s | 5.4× slower | 6.4 GB | exact | 0 | | |
 
 - **Test songs.** No multitrack recordings we have the rights to were on
   the Mac, so `stems/tools/make_test_song.py` synthesises songs from
@@ -396,11 +396,11 @@ doesn't fit in 16 GB.
   than about Demucs. Real multitracks (Nate's own sessions) are the next test.
 - **By ear:** waiting on Nate. Each model's stems of Quantum Love, and of the
   test songs with their reference stems, are in the comparison folder.
-- **Phase 1 checks.** Demucs passes both: a 4-minute song in 25 s in Fast
+- **Phase 1 checks.** Demucs passes both: a 4-minute song in 28 s in Fast
   mode (target: under 2 minutes), stems sample-aligned, summing back to the
   song at 30 dB (Fast) and 21 dB (Best). SAM Audio's stems are aligned and
-  sum back exactly, but Fast mode takes about 6× the song's length: about
-  SAM_4MIN_SHORT for 4 minutes. It fails the speed target on this Mac.
+  sum back exactly, but Fast mode takes 5 to 6 times the song's length: 22 minutes
+  for 4 minutes. It fails the speed target on this Mac.
 - **Why SAM Audio is slow here.** It generates each stem with a 12-layer
   (small) or 16-layer (base) transformer, 32 evaluations per chunk, then
   decodes it with a large audio codec at 48 kHz. On the M1 Pro's GPU the
