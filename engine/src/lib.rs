@@ -1,4 +1,4 @@
-//! musiKore's audio engine: output devices and a test tone (Phase 0).
+//! tuneKore's audio engine: output devices and a test tone (Phase 0).
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`) come from
 //! one thread at a time; callers serialize them. `set_tone` and `take_peak`

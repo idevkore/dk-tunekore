@@ -1,6 +1,6 @@
-# DK.musiKore
+# DK.tuneKore
 
-musiKore is devKore's lightweight Ableton-style DAW: a platform for our own
+tuneKore is devKore's lightweight Ableton-style DAW: a platform for our own
 instruments, effects and tools, owned outright. macOS first, then Windows and
 Linux. Owner: Nate Soria. Tracker: `idevkore/kore-issues` (sidebar group KORE).
 
@@ -21,11 +21,11 @@ Linux. Owner: Nate Soria. Tracker: `idevkore/kore-issues` (sidebar group KORE).
   - Live, its manual (the Ableton Knowledge connector), its behavior and the
     app itself are fair game for ideas, including study with reverse
     engineering tools. Nate decided this on 2026-10-23.
-  - What stays out of musiKore:
+  - What stays out of tuneKore:
     - Live's code: nothing pasted or translated from a decompiler.
     - Its graphics, presets, samples, Packs and device names.
     - Anything that touches Live's license check.
-  - Keep reverse engineering notes outside this repo, and write musiKore's
+  - Keep reverse engineering notes outside this repo, and write tuneKore's
     code from our own descriptions of what Live does.
 - **Names.** No "Ableton", "Live", "Push", "Session View" or "VST" in product,
   feature or UI names. Ours are Clip Grid, Timeline, Library, Analyzer.

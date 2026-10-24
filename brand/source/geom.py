@@ -1,4 +1,4 @@
-"""Path helpers for building the musiKore marks: SVG path strings in and out,
+"""Path helpers for building the tuneKore marks: SVG path strings in and out,
 boolean ops, transforms, and a text preview so shapes can be checked without images."""
 import math
 import pathops

@@ -1,4 +1,4 @@
-use musikore_engine::{Engine, Meter, OutputDevice};
+use tunekore_engine::{Engine, Meter, OutputDevice};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{async_runtime::spawn_blocking, Emitter, Manager, State};
@@ -31,7 +31,7 @@ fn audio(state: &Shared<'_>) -> &'static Mutex<Audio> {
 
 #[tauri::command]
 fn engine_version() -> &'static str {
-    musikore_engine::VERSION
+    tunekore_engine::VERSION
 }
 
 #[tauri::command]
@@ -108,5 +108,5 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![engine_version, list_outputs, start_tone, stop_tone])
         .run(tauri::generate_context!())
-        .expect("error while running musiKore");
+        .expect("error while running tuneKore");
 }
