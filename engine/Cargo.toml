@@ -9,4 +9,6 @@ publish.workspace = true
 
 [dependencies]
 cpal = "0.18.2"
+rtrb = "0.4.0"
+rubato = "5.0.1"
 serde = { version = "1", features = ["derive"] }
