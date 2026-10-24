@@ -25,6 +25,15 @@ const PEAKS: usize = 1200;
 #[derive(Default)]
 pub struct Analyzer(Mutex<Inner>);
 
+impl Analyzer {
+    /// Cancels the running job, if there is one.
+    pub fn cancel_job(&self) {
+        if let Some((_, cancel)) = self.0.lock().unwrap().job.as_ref() {
+            cancel.cancel();
+        }
+    }
+}
+
 #[derive(Default)]
 struct Inner {
     song: Option<Arc<Loaded>>,
@@ -106,14 +115,22 @@ pub fn open_analyzer(app: AppHandle) -> Result<(), String> {
         w.unminimize().ok();
         return w.set_focus().map_err(|e| e.to_string());
     }
-    WebviewWindowBuilder::new(&app, "analyzer", WebviewUrl::App("analyzer.html".into()))
+    let window = WebviewWindowBuilder::new(&app, "analyzer", WebviewUrl::App("analyzer.html".into()))
         .title("musiKore Analyzer")
         .inner_size(1200.0, 760.0)
         .min_inner_size(900.0, 600.0)
         .background_color(tauri::window::Color(18, 18, 23, 255))
         .build()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // Closing the window stops the stems playing and any job in progress.
+    let handle = app.clone();
+    window.on_window_event(move |e| {
+        if let tauri::WindowEvent::Destroyed = e {
+            handle.state::<Player>().set_playing(false);
+            handle.state::<Analyzer>().cancel_job();
+        }
+    });
+    Ok(())
 }
 
 #[tauri::command]
@@ -249,9 +266,7 @@ pub fn analyzer_separate(
 
 #[tauri::command]
 pub fn analyzer_cancel(state: State<'_, Analyzer>) {
-    if let Some((_, cancel)) = state.0.lock().unwrap().job.as_ref() {
-        cancel.cancel();
-    }
+    state.cancel_job();
 }
 
 /// Plays or pauses, opening the output first if nothing has opened it.

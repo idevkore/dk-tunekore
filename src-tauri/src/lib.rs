@@ -141,6 +141,12 @@ pub fn run() {
             analyzer::analyzer_track,
             analyzer::analyzer_export,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running musiKore");
+        .build(tauri::generate_context!())
+        .expect("error while building musiKore")
+        .run(|app, event| {
+            // Don't leave a stem worker running after the app quits.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<analyzer::Analyzer>().cancel_job();
+            }
+        });
 }

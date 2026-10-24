@@ -23,6 +23,7 @@ import json
 import os
 import resource
 import sys
+import threading
 import time
 import traceback
 
@@ -95,7 +96,21 @@ def run(req: dict, events: Events) -> dict:
     }
 
 
+def exit_with_parent() -> None:
+    """Stops the worker if the app goes away (quit or crash) mid-job."""
+    parent = os.getppid()
+
+    def watch() -> None:
+        while True:
+            time.sleep(1)
+            if os.getppid() != parent:
+                os._exit(1)
+
+    threading.Thread(target=watch, daemon=True).start()
+
+
 def main() -> int:
+    exit_with_parent()
     events = Events()
     if "--list" in sys.argv:
         events.send("backends", backends=list_backends())

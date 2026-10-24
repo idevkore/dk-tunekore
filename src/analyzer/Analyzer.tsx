@@ -279,6 +279,7 @@ export default function Analyzer() {
 
           <fieldset className="group" disabled={busy}>
             <legend>Model</legend>
+            {backends.length === 0 && !error && <span className="card-note">Checking which models this Mac has…</span>}
             {backends.map((b) => (
               <label key={b.id} className={"card" + (backend === b.id ? " on" : "") + (b.available ? "" : " off")}>
                 <input type="radio" name="backend" checked={backend === b.id} disabled={!b.available} onChange={() => setBackend(b.id)} />
