@@ -9,21 +9,22 @@ and lets you work on one stem at a time.
 
 Written 2026-10-23. The licensing facts were checked on the web that day; the
 Ableton behavior comes from Ableton's own manual and release notes. Sources are
-at the end.
+at the end. On 2026-10-24 the engine moved from C++ to Rust after a plugin
+hosting test (see "Why Rust" below).
 
 ## 1. Decisions
 
 | Area | Choice | Why |
 | --- | --- | --- |
-| Engine | Our own C++20 engine, built with CMake | Plugin SDKs are C and C++, and the audio thread needs no garbage collector. Every line is ours. |
+| Engine | Our own engine in Rust: the `musikore-engine` crate, in one Cargo workspace with the shell | No garbage collector on the audio thread, memory safety in our own code, and one language and build from the engine to the shell. Plugin hosting from Rust is proven on Serum 1 and 2 (see "Why Rust"). Every line is ours. |
 | UI | TypeScript and React in the system webview, with Canvas and WebGL for the timeline, waveforms and meters | Fast to build and change, and it matches the stack Nate already works in. The UI never runs on the audio thread. |
-| App shell | Tauri 2 (MIT/Apache) | Windows, menus, dialogs, installers, signing and auto-update on all three OSes, with a small app size. A thin Rust layer connects it to the engine. |
-| Plugin formats | VST3 everywhere and Audio Units on macOS. CLAP later. No VST2. | The VST3 SDK has been MIT since 3.8 (Oct 2025). Steinberg no longer licenses VST2 to new hosts. All of Nate's plugins ship as VST3 and AU; none ship CLAP. |
-| Audio and MIDI I/O | RtAudio and RtMidi (MIT-style) | CoreAudio, WASAPI, ASIO, ALSA, JACK and PulseAudio behind one API |
-| Audio files | dr_libs and stb_vorbis (public domain), plus the OS decoders for AAC/M4A | No LGPL dependency to manage |
-| Time-stretch | Signalsmith Stretch (MIT) | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
-| Resampling | r8brain-free (MIT) | |
-| Stems | A separate worker process running ONNX Runtime (MIT), on Core ML on Apple silicon | The model is still open: see section 6. |
+| App shell | Tauri 2 (MIT/Apache) | Windows, menus, dialogs, installers, signing and auto-update on all three OSes, with a small app size. Its Rust commands call the engine crate directly. |
+| Plugin formats | VST3 everywhere and Audio Units on macOS. CLAP later. No VST2. Hosted through the `vst3` crate (MIT/Apache bindings to the SDK) and `objc2-audio-toolbox` (Zlib/MIT/Apache). | The VST3 SDK has been MIT since 3.8 (Oct 2025). Steinberg no longer licenses VST2 to new hosts. All of Nate's plugins ship as VST3 and AU; none ship CLAP. |
+| Audio and MIDI I/O | cpal (Apache-2.0) and midir (MIT) | CoreAudio, WASAPI, ASIO, ALSA and JACK behind one API |
+| Audio files | Symphonia (MPL-2.0, used unmodified) for WAV, AIFF, FLAC, MP3 and Ogg, plus the OS decoders for AAC/M4A | Pure Rust, and no LGPL dependency to manage |
+| Time-stretch | Signalsmith Stretch (MIT), through a thin binding to its C++ header | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
+| Resampling | rubato (MIT/Apache) | Pure Rust. r8brain-free (MIT, C++) is the backup. |
+| Stems | A separate worker process running ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML on Apple silicon | The model is still open: see section 6. |
 | Project files | Our own format: a `.mkore` folder with `project.json`, `audio/` and `plugins/` | We read Ableton `.als` files later, if ever; we never copy the format. |
 
 ### Why not JUCE
@@ -46,14 +47,38 @@ as well as its own ($35 to $300 a seat a month, or GPL), and the core of the
 product wouldn't be ours.
 
 **Fallback.** If plugin hosting eats more than its share of Phase 2, JUCE's
-plugin layer can go behind our `PluginHost` interface. That decision would cost
-a JUCE license, not a rewrite.
+plugin layer can go behind our `PluginHost` interface, as a small C++ library
+with a C interface. That decision would cost a JUCE license, not a rewrite.
+
+### Why Rust
+
+The first plan chose C++, because hosting VST3 and AU editors from Rust looked
+like the least proven path. On 2026-10-24 a test host in Rust settled it
+(idevkore/kore-issues#24, branch `nate/chore/rust-hosting-spike`,
+`spike/FINDINGS.md`):
+
+- Serum 2 and Serum 1 loaded as VST3 and as AU. Their editors opened in native
+  windows, they played notes at 120 BPM with transport sent every block, and
+  their state saved and restored. Callbacks used under 10% of their budget.
+- It took about 1,000 lines of Rust. Writing by hand what the SDK's C++
+  hosting helpers would provide (messages, attribute lists, streams, event
+  lists) was the bulk of it, and it was not hard.
+- Analog Lab V and Jup-8 V4 failed, but Apple's `auval` fails them the same
+  way, so the cause is their licensing on that Mac, not Rust.
+- **One thing Rust can't do:** catch a C++ exception that a plugin throws. It
+  aborts the process. Every call into a plugin therefore goes through a few
+  lines of C++ that catch it and return an error, or the plugin runs out of
+  process.
+
+The plugin-boundary code is `unsafe` either way. What Rust adds is safety in
+everything we write on our side of it (document, graph, queues), and one
+toolchain for the engine and the shell.
 
 ### Other options considered
 
 | Option | Verdict |
 | --- | --- |
-| Rust engine (cpal, clack, `vst3` crate) | Permissive and safe, but hosting VST3 and AU editors from Rust is the least proven path. Plugin hosting is the riskiest part of this project, so it goes where the reference code is. |
+| C++20 engine (CMake, RtAudio) | The first choice, and Phase 0's first draft. It puts us next to the SDKs' reference code, but adds a second language, a CMake build and a C bridge to the Rust shell. The hosting test showed Rust doesn't need that. |
 | Electron | Same UI idea as ours, but a heavy app |
 | Swift / AppKit only | Best on a Mac, but it closes off Windows and Linux |
 | Qt | LGPL obligations or a costly commercial license, and a C++ UI |
@@ -65,9 +90,9 @@ flowchart LR
   subgraph App["musiKore app (one process)"]
     UI["UI: TypeScript + React<br/>in the system webview"]
     Shell["Tauri shell (Rust):<br/>windows, menus, files, updates"]
-    Engine["Engine (C++20):<br/>document, transport, audio graph,<br/>plugin host, plugin windows"]
+    Engine["Engine (Rust crate):<br/>document, transport, audio graph,<br/>plugin host, plugin windows"]
     UI <-- "commands and state events;<br/>binary channels for meters and peaks" --> Shell
-    Shell <-- "C++ bridge" --> Engine
+    Shell <-- "Rust calls" --> Engine
   end
   Scanner["Plugin scanner<br/>(helper process)"]
   Stems["Stem worker<br/>(helper process, ONNX Runtime)"]
@@ -93,8 +118,8 @@ flowchart LR
   with launch quantization. Plugins get tempo, position and play state every
   block. Serum's synced LFOs and Splice Bridge depend on this.
 - **Real-time rules.** No allocation, locks, logging or file I/O on the audio
-  thread. Clang's RealtimeSanitizer (`-fsanitize=realtime`) enforces this in
-  the debug build and in CI.
+  thread. LLVM's RealtimeSanitizer, through the `rtsan-standalone` crate
+  (Apache-2.0), enforces this in the debug build and in CI.
 - **Long audio.** Files stream from disk with read-ahead. Short samples are
   cached in RAM.
 
@@ -103,8 +128,9 @@ flowchart LR
 - **Scanning** runs in a helper process, so a plugin that crashes during the
   scan can't take down the app (Live has done this since 10.1). Results are
   cached and rescanned on demand.
-- **VST3.** We build on the SDK's hosting helpers (module loading,
-  `IComponent`, `IAudioProcessor`, `IEditController`, `IPlugView`). We
+- **VST3.** Through the `vst3` crate's bindings, with our own host-side
+  classes in place of the SDK's C++ hosting helpers (module loading, host
+  context, messages, streams, event lists; see "Why Rust"). We
   implement `IPluginFactory3::setHostContext`, which Serum 2's Linux build
   requires. We support event lists, parameter changes, the process context,
   sidechain and extra output buses (Kontakt), and state through
@@ -112,6 +138,8 @@ flowchart LR
 - **Audio Units.** Through AudioToolbox. AUv2 loads in process; AUv3 can load
   out of process. Editors come from `kAudioUnitProperty_CocoaUI` or
   `requestViewController`.
+- **C++ exceptions** thrown by a plugin are caught by a small C++ shim around
+  each plugin call, since Rust can't catch them.
 - **Editors** open in their own native windows, as in Live. They float over the
   main window, and their titles follow the track name.
 - **Automation.** Each plugin parameter can be automated sample-accurately in
@@ -129,7 +157,7 @@ flowchart LR
   small JSON messages. The engine answers with state events, and the UI keeps a
   read-only mirror of the document.
 - **Fast data** (meters at 30 Hz, the playhead) goes over binary channels.
-- **Waveform peaks** are computed in C++ and fetched from a custom
+- **Waveform peaks** are computed in the engine and fetched from a custom
   `musikore://peaks/...` URL.
 
 ## 3. What we take from Ableton, and in what order
@@ -308,7 +336,7 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 | Risk | What we do |
 | --- | --- |
 | Plugin quirks (threading, editor sizing, state) | Test the list in section 5 from Phase 2. Keep JUCE's plugin layer as a paid fallback. |
-| Audio dropouts from our own code | Real-time rules plus RealtimeSanitizer in CI. An offline render test compares projects to reference WAVs. |
+| Audio dropouts from our own code | Real-time rules plus RealtimeSanitizer (`rtsan-standalone`) in CI. An offline render test compares projects to reference WAVs. |
 | Webview UI slows down on big sets | Canvas/WebGL drawing, virtualized lists, binary channels. Profile at 100 tracks in Phase 3. |
 | No commercial stem model | Decide in Phase 1. Budget for a license, or plan the data for our own. |
 | Splice catalog needs a deal | Ship the local-folder layer. Approach Splice once there are users. |
@@ -321,7 +349,7 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
    `nate/...`.
 3. **Run Phase 0:**
    - Tauri app with the musiKore icon
-   - CMake engine library linked through the bridge
+   - Rust engine crate called from the Tauri shell
    - Device list and test tone
    - CI on macOS, plus Windows and Linux compile jobs
 4. **With Live 12.3 Suite installed,** split the same three songs in Live and,

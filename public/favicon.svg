@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100" fill="none" role="img" aria-label="musiKore">
+<title>musiKore</title>
+<rect id="tile" width="100" height="100" rx="18" fill="#121217"/>
+<path id="K" fill="#8051FF" d="M61.083 23.088 34.175 49.995 61.083 76.912H40.899L13.992 49.995L40.899 23.088ZM28.901 76.912H12V60.079ZM12.065 39.988V23.088H28.835Z"/>
+<path id="chevron" fill="#B7FF00" d="M61.083 23.088 88 49.995 61.083 76.912 50.991 66.817 67.806 49.995 50.991 33.179Z"/>
+</svg>

@@ -1,0 +1,44 @@
+:root {
+  --ink: #121217;
+  --panel: #1b1b23;
+  --line: #2b2b37;
+  --light: #f7f7f8;
+  --muted: #9a9aa8;
+  --violet: #8051ff;
+  --lime: #b7ff00;
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body { background: var(--ink); color: var(--light); }
+
+.app { max-width: 720px; margin: 0 auto; padding: 28px 24px; display: grid; gap: 18px; }
+.top { display: flex; align-items: center; justify-content: space-between; }
+.logo { height: 34px; }
+.version { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; display: grid; gap: 14px; }
+.panel h2 { margin: 0; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+.row { display: flex; align-items: center; gap: 12px; }
+
+select, button { font: inherit; color: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--ink); padding: 9px 12px; }
+select { flex: 1; min-width: 0; }
+button { cursor: pointer; font-weight: 600; }
+button:disabled, select:disabled { opacity: 0.5; cursor: default; }
+button.ghost:hover { border-color: var(--violet); }
+button.play, button.stop { min-width: 84px; border-color: transparent; }
+button.play { background: var(--violet); }
+button.stop { background: var(--lime); color: var(--ink); }
+:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+
+.freq { flex: 1; display: grid; gap: 4px; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.freq input { width: 100%; accent-color: var(--violet); }
+
+.meter { height: 12px; background: var(--ink); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+.meter-fill { height: 100%; width: 100%; transform-origin: left; background: linear-gradient(90deg, var(--violet) 0%, var(--violet) 70%, var(--lime) 100%); transition: transform 40ms linear; }
+.meter-scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: -6px; }
+
+.error { margin: 0; padding: 10px 14px; border-radius: 8px; background: #3a1620; border: 1px solid #6b2434; color: #ffb3c0; font-size: 13px; }

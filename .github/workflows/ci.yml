@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # macOS is the shipping platform: full build, tests and the .app bundle.
+  # Windows and Linux only have to compile and link until Phases 8 and 9.
+  build:
+    name: build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libasound2-dev: cpal's ALSA backend
+          sudo apt-get install -y build-essential pkg-config libasound2-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev
+
+      - run: npm ci
+      - run: npm run typecheck
+        if: runner.os == 'macOS'
+      - name: Licences
+        if: runner.os == 'macOS'
+        run: npm run licenses
+      - run: npm run build
+
+      - name: Engine tests
+        run: cargo test -p musikore-engine --locked
+
+      - name: All Rust tests
+        if: runner.os == 'macOS'
+        run: cargo test --workspace --locked
+
+      - name: Build the app
+        if: runner.os != 'macOS'
+        run: cargo build --workspace --locked
+
+      - name: Build the macOS app bundle
+        if: runner.os == 'macOS'
+        run: npx tauri build --bundles app
+
+      - uses: actions/upload-artifact@v5
+        if: runner.os == 'macOS'
+        with:
+          name: musiKore-macos-app
+          path: target/release/bundle/macos/musiKore.app
+          retention-days: 7
