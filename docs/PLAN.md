@@ -24,7 +24,7 @@ hosting test (see "Why Rust" below).
 | Audio files | Symphonia (MPL-2.0, used unmodified) for WAV, AIFF, FLAC, MP3 and Ogg, plus the OS decoders for AAC/M4A | Pure Rust, and no LGPL dependency to manage |
 | Time-stretch | Signalsmith Stretch (MIT), through a thin binding to its C++ header | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
 | Resampling | rubato (MIT/Apache) | Pure Rust. r8brain-free (MIT, C++) is the backup. |
-| Stems | A separate worker process running ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML on Apple silicon | The model is still open: see section 6. |
+| Stems | A separate worker process behind a `Separator` interface. Phase 1: Python and PyTorch on Metal, run from the repo on Nate's Mac (`stems/`). To ship: the chosen model in ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML, or a vendor's SDK | Both candidate models are PyTorch research code, and SAM Audio (a flow-matching transformer) doesn't export to ONNX as it is. Prototyping in PyTorch lets us choose the model first. See section 6. |
 | Project files | Our own format: a `.mkore` folder with `project.json`, `audio/` and `plugins/` | We read Ableton `.als` files later, if ever; we never copy the format. |
 
 ### Why not JUCE
@@ -95,7 +95,7 @@ flowchart LR
     Shell <-- "Rust calls" --> Engine
   end
   Scanner["Plugin scanner<br/>(helper process)"]
-  Stems["Stem worker<br/>(helper process, ONNX Runtime)"]
+  Stems["Stem worker<br/>(helper process; Phase 1: Python + PyTorch)"]
   Engine --> Scanner
   Engine --> Stems
   Engine <--> Audio["Audio and MIDI devices"]
@@ -360,6 +360,76 @@ Demucs:
   enough matters.
 - How well "other" works. SAM Audio pulls out what a prompt names, so "other"
   is likely the mix minus the three named stems.
+
+**Phase 1 results (2026-10-24, Nate's MacBook Pro, M1 Pro, 16 GB).** Both
+models ran through the app's own path (decode, worker, checks) with
+`stems/tools/compare.py`; the stems are in `~/Music/musiKore analyzer
+comparison/` for listening. Fast is `htdemucs` and `sam-audio-small`; Best is
+`htdemucs_ft` and `sam-audio-base`. `sam-audio-large` (14.9 GB of weights)
+doesn't fit in 16 GB.
+
+| Song | Model, mode | Time | × real time | Peak GPU memory | Stems sum to the song | Lag | SDR vocals / drums / bass / other (dB) | Mean |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Test song A (60 s) | Demucs Fast | 7.7 s | 7.8× faster | 1.2 GB | 29.6 dB | 0 | 0.7 / 19.8 / 17.0 / −7.4 | 7.5 |
+| | Demucs Best | 25 s | 2.4× faster | 1.2 GB | 20.9 dB | 0 | 0.3 / 21.2 / 18.1 / −7.4 | 8.1 |
+| | SAM Fast | 5 min 38 s | 5.6× slower | 5.5 GB | exact | 0 | 15.2 / 7.9 / 8.8 / 0.6 | 8.1 |
+| | SAM Best | 23 min 27 s | 23× slower | 8.4 GB | exact | 0 | 10.7 / 7.6 / 8.8 / −1.2 | 6.5 |
+| Test song B (60 s) | Demucs Fast | 7.4 s | 8.1× faster | 1.2 GB | 29.5 dB | 0 | 1.6 / 19.2 / 18.6 / −5.1 | 8.6 |
+| | Demucs Best | 20 s | 3.0× faster | 1.2 GB | 21.7 dB | 0 | 1.0 / 20.3 / 19.3 / −5.6 | 8.8 |
+| | SAM Fast | 5 min 9 s | 5.2× slower | 5.4 GB | exact | 0 | 9.7 / 8.1 / 9.0 / −0.2 | 6.6 |
+| | SAM Best | 61 min | 61× slower | 8.4 GB | exact | 0 | 5.9 / 7.6 / 7.3 / −1.0 | 4.9 |
+| Quantum Love (3:13, MP3) | Demucs Fast | 15 s | 12.6× faster | 1.2 GB | 29.8 dB | 0 | no reference stems | |
+| | Demucs Best | 57 s | 3.4× faster | 1.2 GB | 20.8 dB | 0 | | |
+| | SAM Fast | 18 min 47 s | 5.8× slower | 6.5 GB | exact | 0 | | |
+| 4:00 song (Quantum Love looped) | Demucs Fast | 25 s | | 1.2 GB | 29.8 dB | 0 | | |
+| | Demucs Best | 101 s | | 1.2 GB | 20.5 dB | 0 | | |
+| | SAM Fast | SAM_4MIN | | | exact | 0 | | |
+
+- **Test songs.** No multitrack recordings we have the rights to were on
+  the Mac, so `stems/tools/make_test_song.py` synthesises songs from
+  oscillators and noise: drums, a bass line, chords and arpeggio, and a
+  formant-synthesised sung vowel line. We own every stem, so SDR is exact,
+  but the sounds are simpler than real instruments and voices: treat these
+  scores as a sanity check, not a benchmark. Demucs takes the synthetic voice
+  for "other" (vocals near 0 dB), which says more about the synthetic voice
+  than about Demucs. Real multitracks (Nate's own sessions) are the next test.
+- **By ear:** waiting on Nate. Each model's stems of Quantum Love, and of the
+  test songs with their reference stems, are in the comparison folder.
+- **Phase 1 checks.** Demucs passes both: a 4-minute song in 25 s in Fast
+  mode (target: under 2 minutes), stems sample-aligned, summing back to the
+  song at 30 dB (Fast) and 21 dB (Best). SAM Audio's stems are aligned and
+  sum back exactly, but Fast mode takes about 6× the song's length: about
+  SAM_4MIN_SHORT for 4 minutes. It fails the speed target on this Mac.
+- **Why SAM Audio is slow here.** It generates each stem with a 12-layer
+  (small) or 16-layer (base) transformer, 32 evaluations per chunk, then
+  decodes it with a large audio codec at 48 kHz. On the M1 Pro's GPU the
+  small transformer takes 0.53 s per evaluation of a 20 s chunk, whether in
+  half precision or with the three stems batched, so a stem costs about
+  23 s of compute per 20 s of audio. Three stems at once over 30 s chunks ran
+  out of GPU memory, so the worker does one stem and one 20 s chunk at a
+  time. Base is about 4× slower still and swaps on 16 GB. A Mac with more
+  GPU and memory (an M-series Max or Ultra) would close part of the gap, not
+  all of it.
+- **How SAM Audio fits a DAW.** It works on mono audio and generates new
+  audio rather than masking the mix, with an inaudible watermark added by
+  its decoder. The worker uses its output only as a guide: soft masks built
+  from it cut all four stems out of the original stereo mix, so they keep
+  the stereo image and phase, line up to the sample and sum back to the song
+  exactly. "Other" is what the three named stems leave.
+- **Quality, as far as the synthetic songs show.** SAM Audio finds the voice
+  far better (10–15 dB against Demucs's 1 dB) but separates drums and bass
+  much worse (8–9 dB against 17–21 dB). Base scores below small on both
+  songs.
+
+**Recommendation.** SAM Audio doesn't replace Demucs as Phase 1 tested it:
+in Fast mode it's 45 to 75 times slower than Demucs on this Mac, and weaker on drums and bass. What it
+does well (pulling out a voice, or any sound a prompt names) could still make
+it worth shipping for one job, such as a "vocals only" or "find this sound"
+tool, run in the background. For the four-stem split, plan on a licensed
+model (AudioShake, Music AI) unless a test on real multitracks changes the
+picture. Shipping SAM Audio at all still needs Nate's licence exception (see
+`CLAUDE.md`) and a confirmation of `perception-models`'s licence (its README
+says Apache-2.0, its package metadata says FAIR Noncommercial).
 
 **The other open models checked**, none of which can ship:
 
