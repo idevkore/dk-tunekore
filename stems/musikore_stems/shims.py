@@ -48,6 +48,13 @@ def _have(name: str) -> bool:
 
 def install() -> None:
     import torch
+    # transformers caches which optional packages exist the first time it
+    # asks; let it ask before the stand-ins exist, so it sees them as absent
+    # rather than half-installed.
+    import transformers.utils.import_utils as tu
+
+    tu.is_torchcodec_available()
+    tu.is_torchaudio_available()
 
     if not _have("torchaudio"):
         functional = _module("torchaudio.functional", resample=_missing("torchaudio.functional.resample"))

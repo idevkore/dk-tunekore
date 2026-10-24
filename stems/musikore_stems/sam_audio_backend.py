@@ -13,7 +13,8 @@ and bass, then cut all four stems from the mix with soft masks (see
 - Weights live in this Mac's Hugging Face cache, never in the repo.
 
 The model works on mono audio at 48 kHz, so the song is mixed to mono and
-split into chunks (30 s, with a 2 s crossfade) to keep attention cheap.
+split into chunks (20 s, with a 2 s crossfade), one stem at a time, to fit
+in a 16 GB Mac's GPU memory.
 The decoder adds an inaudible watermark to what it generates; the masked
 stems are cut from the original mix, so they carry little of it.
 """
@@ -33,7 +34,7 @@ from .separator import Progress, Separator, torch_device
 MODELS = {"fast": "facebook/sam-audio-small", "best": "facebook/sam-audio-base"}
 PROMPTS = {"vocals": "vocals", "drums": "drums", "bass": "bass"}
 SAMPLE_RATE = 48_000
-CHUNK_SECONDS = 30.0
+CHUNK_SECONDS = 20.0
 OVERLAP_SECONDS = 2.0
 # The model's own default: midpoint steps of 1/16, two evaluations each.
 STEP_SIZE = 2 / 32
@@ -77,40 +78,43 @@ class SamAudioSeparator(Separator):
         mono48 = julius.resample_frac(mono, sample_rate, SAMPLE_RATE) if sample_rate != SAMPLE_RATE else mono
         n = mono48.shape[-1]
 
-        starts = chunk_starts(n, int(CHUNK_SECONDS * SAMPLE_RATE), int(OVERLAP_SECONDS * SAMPLE_RATE))
         chunk = int(CHUNK_SECONDS * SAMPLE_RATE)
         ramp = int(OVERLAP_SECONDS * SAMPLE_RATE)
+        starts = chunk_starts(n, chunk, ramp)
         names = list(PROMPTS)
         acc = torch.zeros(len(names), n)
         weight = torch.zeros(n)
+        for i, start in enumerate(starts):
+            weight[start:start + chunk] += fade_weights(min(chunk, n - start), ramp, i == 0, i == len(starts) - 1)
 
+        # One stem and one chunk at a time: generating several at once ran
+        # out of GPU memory in the decoder on a 16 GB Mac.
         evals_per_chunk = 2 * round(1 / STEP_SIZE)
-        total = len(starts) * evals_per_chunk
+        total = len(names) * len(starts) * evals_per_chunk
         calls = [0]
+        stage = [names[0]]
         inner_forward = model.forward
 
         def counted_forward(*args, **kwargs):
             out = inner_forward(*args, **kwargs)
             calls[0] += 1
-            progress("separate", 0.1 + 0.8 * min(calls[0] / total, 1.0))
+            progress(stage[0], 0.1 + 0.8 * min(calls[0] / total, 1.0))
             return out
 
         model.forward = counted_forward  # the ODE solver calls self.forward
         torch.manual_seed(0)
-        progress("separate", 0.1)
-        for i, start in enumerate(starts):
-            seg = mono48[start:start + chunk]
-            batch = processor(descriptions=[PROMPTS[k] for k in names], audios=[seg[None]] * len(names)).to(device)
-            with torch.inference_mode():
-                res = model.separate(batch, predict_spans=False, reranking_candidates=1,
-                                     ode_opt={"method": "midpoint", "options": {"step_size": STEP_SIZE}})
-            w = fade_weights(seg.shape[-1], ramp, first=i == 0, last=i == len(starts) - 1)
-            for j in range(len(names)):
-                est = res.target[j].float().reshape(-1).cpu()[: seg.shape[-1]]
+        for j, name in enumerate(names):
+            stage[0] = name
+            progress(name, 0.1 + 0.8 * calls[0] / total)
+            for i, start in enumerate(starts):
+                seg = mono48[start:start + chunk]
+                batch = processor(descriptions=[PROMPTS[name]], audios=[seg[None]]).to(device)
+                est = separate_target(model, batch)[: seg.shape[-1]]
+                w = fade_weights(seg.shape[-1], ramp, first=i == 0, last=i == len(starts) - 1)
                 acc[j, start:start + est.shape[-1]] += est * w[: est.shape[-1]]
-            weight[start:start + seg.shape[-1]] += w
-            if device.type == "mps":
-                torch.mps.empty_cache()
+                del batch
+                if device.type == "mps":
+                    torch.mps.empty_cache()
         model.forward = inner_forward
         acc /= weight.clamp(min=1e-8)
 
@@ -128,6 +132,33 @@ class SamAudioSeparator(Separator):
             stems["other"] = mix - sum(stems.values())
             return stems
         return mask_from_mix(mix, estimates)
+
+
+def separate_target(model, batch):
+    """SAMAudio.separate for one prompt, decoding only the target.
+
+    The model generates the target and the residual together; `separate`
+    then decodes both. We only use the target, and decoding is a fifth of
+    the time, so this skips the residual's decode. Same ODE, same steps.
+    """
+    import torch
+    from torchdiffeq import odeint
+
+    with torch.inference_mode():
+        args = model._get_forward_args(batch, candidates=1)
+        features = args["audio_features"]
+        half = features.shape[-1] // 2  # target and residual are stacked on the channels
+
+        def field(t, x):
+            return model.forward(noisy_audio=x, time=t.expand(x.size(0)), **args)
+
+        noise = torch.randn_like(features)
+        states = odeint(field, noise, torch.tensor([0.0, 1.0], device=noise.device),
+                        method="midpoint", options={"step_size": STEP_SIZE})
+        target = states[-1].transpose(1, 2)[:, :half]
+        wav = model.audio_codec.decode(target)
+        size = int(model.audio_codec.feature_idx_to_wav_idx(batch.sizes)[0])
+        return wav.reshape(-1)[:size].float().cpu()
 
 
 def chunk_starts(n: int, chunk: int, overlap: int) -> list[int]:
