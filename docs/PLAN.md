@@ -317,8 +317,84 @@ Bass and Others:
 | Ship with no built-in model and let users run a model they supply | None | Weak product |
 
 The model sits behind a `Separator` interface, so it can be swapped without
-touching the Analyzer. Until this is decided, Demucs runs on Nate's machine
-only and is never bundled.
+touching the Analyzer.
+
+**Decision (Nate, 2026-10-24): the first path.**
+
+- **Phase 1 builds on Demucs (htdemucs)**, running on Nate's Mac only. The
+  weights are downloaded on that machine and never committed, bundled or
+  shipped.
+- **Phase 1 also tests SAM Audio** against Demucs (details below). If its
+  quality and speed hold up on Nate's Mac, it could ship without a paid
+  vendor.
+- **Before musiKore ships to anyone,** a model we have the right to ship
+  replaces Demucs behind `Separator`: SAM Audio if it passes, otherwise a
+  licensed vendor model. The vendors are being contacted now, in parallel,
+  since deals like this take weeks.
+
+**SAM Audio (candidate).** Meta's general sound separator, released December
+2025 (github.com/facebookresearch/sam-audio). It isolates whatever a prompt
+names ("vocals", "drums"), with small, base and large checkpoints. Of every
+open separation model checked on 2026-10-24, it is the only one whose weights
+carry a license that allows shipping them.
+
+| SAM License (dated 2025-11-19) | What it means for musiKore |
+| --- | --- |
+| A worldwide, royalty-free license to use, copy, modify and redistribute, and to make derivative works. It sets no revenue or user cap and doesn't restrict commercial use. | We can bundle it and charge for musiKore. |
+| Redistributing it requires including a copy of the license. | musiKore ships the license text with the model. |
+| No reverse engineering the model, and no prohibited uses such as military or warfare. | No effect on a DAW |
+| Meta can end the license if we breach it, and we would then have to delete the model. | Stick to the terms. |
+| We own the derivative works we make, but Meta keeps ownership of SAM itself. | Fine-tuned versions are ours to use under the same license. |
+| The checkpoints are gated: request access on Hugging Face before downloading. | Nate requests access. |
+
+The SAM License is Meta's own, not one of the open licenses `CLAUDE.md`
+allows, so shipping SAM Audio needs Nate's explicit exception there.
+
+**What Phase 1 tests**, on the same songs and the same Mac, SAM Audio against
+Demucs:
+
+- Separation quality on four stems (vocals, drums, bass, other), by listening
+  and by SDR scores on test tracks we have the rights to.
+- Speed and memory on Apple silicon. The README targets NVIDIA GPUs and says
+  nothing about Apple silicon, so the smallest checkpoint that sounds good
+  enough matters.
+- How well "other" works. SAM Audio pulls out what a prompt names, so "other"
+  is likely the mix minus the three named stems.
+
+**The other open models checked**, none of which can ship:
+
+- **Spleeter:** MIT code, but no license on its weights.
+- **Open-Unmix `umxl`:** non-commercial weights (CC BY-NC-SA 4.0).
+- **Open-Unmix `umxhq` and `umx`:** no stated weights license, trained on
+  non-commercial data, and weaker (about 6 dB SDR against about 9 for
+  Demucs).
+- **Community RoFormer checkpoints:** no documented source or training data.
+- **Demucs re-uploads tagged "MIT":** Hugging Face license tags are written by
+  the uploader, and Demucs's author says its weights are for research only.
+
+**Vendors** (the fallback if SAM Audio falls short):
+
+| Vendor | What they offer | Contact | Status |
+| --- | --- | --- | --- |
+| AudioShake | Local Inference SDK: on-device separation for macOS, Windows, iOS and Android, with no cloud calls | info@audioshake.ai, or Contact sales on audioshake.ai/products/sdk | Inquiry drafted, not sent |
+| Music AI (Moises) | The model Ableton licensed for Live 12.3. Its public offer is a cloud API with SDKs; on-device licensing isn't advertised, so ask. | Sales contact on music.ai | Inquiry drafted, not sent |
+
+What to ask both:
+
+- Can the model run fully on-device in a desktop app (macOS first, then
+  Windows and Linux)?
+- Which stems are offered (at least vocals, drums, bass, other), and is there
+  a fast and a high-quality mode?
+- How is it priced: per seat, royalty, revenue share or a flat fee? Is there a
+  startup tier?
+- Is there an evaluation build to compare against Demucs on the same songs?
+- What is the integration surface (C/C++ or Rust-friendly library, model
+  format), and which hardware accelerators does it use (Core ML, Metal,
+  DirectML, CUDA)?
+
+Update the table as replies come in. The shipping model, SAM Audio or a
+vendor's, is chosen by the end of Phase 1, so it can be in place before
+Phase 8 (Windows) at the latest.
 
 ## 7. Cross-platform path
 
