@@ -1,7 +1,7 @@
 [package]
-name = "musikore"
+name = "tunekore"
 version = "0.1.0"
-description = "musiKore: a lightweight DAW by devKore"
+description = "tuneKore: a lightweight DAW by devKore"
 authors = ["devKore"]
 edition.workspace = true
 rust-version.workspace = true
@@ -9,16 +9,16 @@ license.workspace = true
 publish.workspace = true
 
 [lib]
-name = "musikore_lib"
+name = "tunekore_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 
 [dependencies]
-musikore-engine = { path = "../engine" }
+tunekore-engine = { path = "../engine" }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 tauri-plugin-dialog = "2.8.3"
-musikore-analyzer = { version = "0.1.0", path = "../analyzer" }
+tunekore-analyzer = { version = "0.1.0", path = "../analyzer" }
 serde_json = "1.0.154"

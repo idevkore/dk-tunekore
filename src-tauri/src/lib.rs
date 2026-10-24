@@ -1,6 +1,6 @@
 mod analyzer;
 
-use musikore_engine::{Engine, Meter, OutputDevice};
+use tunekore_engine::{Engine, Meter, OutputDevice};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{async_runtime::spawn_blocking, Emitter, Manager, State};
@@ -43,7 +43,7 @@ fn audio(state: &Shared<'_>) -> &'static Mutex<Audio> {
 
 #[tauri::command]
 fn engine_version() -> &'static str {
-    musikore_engine::VERSION
+    tunekore_engine::VERSION
 }
 
 #[tauri::command]
@@ -142,7 +142,7 @@ pub fn run() {
             analyzer::analyzer_export,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building musiKore")
+        .expect("error while building tuneKore")
         .run(|app, event| {
             // Don't leave a stem worker running after the app quits.
             if let tauri::RunEvent::Exit = event {

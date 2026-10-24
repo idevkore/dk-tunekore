@@ -27,7 +27,7 @@ import types
 
 def _missing(name: str):
     def fail(*_args, **_kwargs):
-        raise RuntimeError(f"{name} is not installed in musiKore's stem worker")
+        raise RuntimeError(f"{name} is not installed in tuneKore's stem worker")
 
     return fail
 
@@ -37,7 +37,7 @@ def _module(name: str, **attrs) -> types.ModuleType:
     # Some libraries call importlib.util.find_spec on it, which needs a spec.
     mod.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
     mod.__dict__.update(attrs)
-    mod.__musikore_shim__ = True
+    mod.__tunekore_shim__ = True
     sys.modules[name] = mod
     return mod
 
@@ -63,7 +63,7 @@ def install() -> None:
     if not _have("torchcodec"):
         class _Codec:
             def __init__(self, *_a, **_k):
-                raise RuntimeError("torchcodec is not installed in musiKore's stem worker")
+                raise RuntimeError("torchcodec is not installed in tuneKore's stem worker")
 
         decoders = _module("torchcodec.decoders", AudioDecoder=_Codec, VideoDecoder=_Codec)
         encoders = _module("torchcodec.encoders", AudioEncoder=_Codec)
@@ -78,7 +78,7 @@ def install() -> None:
 
         class _Unavailable:
             def __init__(self, *_a, **_k):
-                raise RuntimeError("audiotools is not installed in musiKore's stem worker")
+                raise RuntimeError("audiotools is not installed in tuneKore's stem worker")
 
         ml = _module("audiotools.ml", BaseModel=BaseModel)
         _module("audiotools", ml=ml, AudioSignal=_Unavailable, STFTParams=_Unavailable)

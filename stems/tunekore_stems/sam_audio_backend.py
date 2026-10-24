@@ -6,8 +6,8 @@ and bass, then cut all four stems from the mix with soft masks (see
 
 - Fast: `facebook/sam-audio-small` (5.1 GB). Best: `facebook/sam-audio-base`
   (7.7 GB). `sam-audio-large` (14.9 GB in float32) doesn't fit in this Mac's
-  16 GB with everything else running. MUSIKORE_SAM_FAST_MODEL and
-  MUSIKORE_SAM_BEST_MODEL pick other checkpoints (e.g. the `-tv` ones).
+  16 GB with everything else running. TUNEKORE_SAM_FAST_MODEL and
+  TUNEKORE_SAM_BEST_MODEL pick other checkpoints (e.g. the `-tv` ones).
 - The checkpoints are gated. Nate logs in with `hf auth login`; the worker
   only reads the cached login through huggingface_hub and never sees it.
 - Weights live in this Mac's Hugging Face cache, never in the repo.
@@ -41,7 +41,7 @@ STEP_SIZE = 2 / 32
 
 
 def model_id(mode: str) -> str:
-    return os.environ.get(f"MUSIKORE_SAM_{mode.upper()}_MODEL", MODELS[mode])
+    return os.environ.get(f"TUNEKORE_SAM_{mode.upper()}_MODEL", MODELS[mode])
 
 
 class SamAudioSeparator(Separator):
@@ -60,7 +60,7 @@ class SamAudioSeparator(Separator):
             import sam_audio  # noqa: F401
         except ImportError as e:
             return f"SAM Audio is not installed in the stem worker ({e.name})"
-        if get_token() is None and not os.environ.get("MUSIKORE_SAM_OFFLINE"):
+        if get_token() is None and not os.environ.get("TUNEKORE_SAM_OFFLINE"):
             return "log in to Hugging Face first: stems/.venv/bin/hf auth login"
         return None
 
@@ -126,7 +126,7 @@ class SamAudioSeparator(Separator):
         estimates = {k: acc[j].numpy() for j, k in enumerate(names)}
 
         progress("other", 0.92)
-        if os.environ.get("MUSIKORE_SAM_STEREO", "mask") == "raw":
+        if os.environ.get("TUNEKORE_SAM_STEREO", "mask") == "raw":
             # The model's own output: mono, and "other" is the mix minus the rest.
             stems = {k: np.repeat(v[None], channels, 0) for k, v in estimates.items()}
             stems["other"] = mix - sum(stems.values())

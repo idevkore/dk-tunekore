@@ -1,6 +1,6 @@
 """A separator with no model, for tests: fixed shares of the mix.
 
-Listed only when MUSIKORE_STEMS_TEST=1, so the app never offers it.
+Listed only when TUNEKORE_STEMS_TEST=1, so the app never offers it.
 """
 
 from __future__ import annotations

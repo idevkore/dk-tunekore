@@ -1,6 +1,6 @@
 //! Runs the stem worker (`stems/`, Python) as a child process, one per job.
 //!
-//! The protocol is JSON lines; see `stems/musikore_stems/worker.py`. A job is
+//! The protocol is JSON lines; see `stems/tunekore_stems/worker.py`. A job is
 //! cancelled by killing its process, so a stuck or crashed model only ever
 //! fails that one job.
 
@@ -23,16 +23,16 @@ pub struct WorkerConfig {
 }
 
 impl WorkerConfig {
-    /// `MUSIKORE_STEMS_DIR` and `MUSIKORE_STEMS_PYTHON` override the defaults:
+    /// `TUNEKORE_STEMS_DIR` and `TUNEKORE_STEMS_PYTHON` override the defaults:
     /// `stems/` next to this crate, and the virtualenv `uv sync` makes there.
     pub fn locate() -> Result<Self, String> {
-        let dir = std::env::var_os("MUSIKORE_STEMS_DIR")
+        let dir = std::env::var_os("TUNEKORE_STEMS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../stems"));
-        let python = std::env::var_os("MUSIKORE_STEMS_PYTHON")
+        let python = std::env::var_os("TUNEKORE_STEMS_PYTHON")
             .map(PathBuf::from)
             .unwrap_or_else(|| dir.join(".venv/bin/python"));
-        if !dir.join("musikore_stems/worker.py").exists() {
+        if !dir.join("tunekore_stems/worker.py").exists() {
             return Err(format!("no stem worker in {}", dir.display()));
         }
         if !python.exists() {
@@ -46,7 +46,7 @@ impl WorkerConfig {
 
     fn command(&self) -> Command {
         let mut cmd = Command::new(&self.python);
-        cmd.args(["-u", "-m", "musikore_stems.worker"]).current_dir(&self.dir).env("PYTHONUNBUFFERED", "1");
+        cmd.args(["-u", "-m", "tunekore_stems.worker"]).current_dir(&self.dir).env("PYTHONUNBUFFERED", "1");
         cmd
     }
 }

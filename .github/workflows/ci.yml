@@ -56,7 +56,7 @@ jobs:
       - run: npm run build
 
       - name: Engine and Analyzer tests
-        run: cargo test -p musikore-engine -p musikore-analyzer --locked
+        run: cargo test -p tunekore-engine -p tunekore-analyzer --locked
 
       - name: All Rust tests
         if: runner.os == 'macOS'
@@ -73,6 +73,6 @@ jobs:
       - uses: actions/upload-artifact@v5
         if: runner.os == 'macOS'
         with:
-          name: musiKore-macos-app
-          path: target/release/bundle/macos/musiKore.app
+          name: tuneKore-macos-app
+          path: target/release/bundle/macos/tuneKore.app
           retention-days: 7

@@ -1,4 +1,4 @@
-//! musiKore's audio engine: output devices, a test tone (Phase 0) and the
+//! tuneKore's audio engine: output devices, a test tone (Phase 0) and the
 //! Analyzer's stem player (Phase 1).
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`, `load_clip`)

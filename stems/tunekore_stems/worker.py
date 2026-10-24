@@ -1,9 +1,9 @@
 """The stem worker process. The app starts one per job and kills it to cancel.
 
-    python -m musikore_stems.worker --list
+    python -m tunekore_stems.worker --list
         One line: {"event": "backends", "backends": [...]}
 
-    python -m musikore_stems.worker
+    python -m tunekore_stems.worker
         Reads one JSON request from stdin:
           {"input": "/tmp/job/mix.f32", "channels": 2, "frames": 10584000,
            "sample_rate": 44100, "backend": "demucs", "mode": "fast",

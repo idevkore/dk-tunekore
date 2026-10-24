@@ -3,7 +3,7 @@
 //! export them.
 //!
 //! The model itself sits behind the worker's `Separator` interface
-//! (`stems/musikore_stems/separator.py`), so the app never depends on which
+//! (`stems/tunekore_stems/separator.py`), so the app never depends on which
 //! model runs.
 
 mod decode;

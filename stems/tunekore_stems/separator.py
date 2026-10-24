@@ -40,10 +40,10 @@ class Separator(ABC):
 
 
 def torch_device():
-    """MPS on Apple silicon, else CPU. MUSIKORE_STEMS_DEVICE overrides it."""
+    """MPS on Apple silicon, else CPU. TUNEKORE_STEMS_DEVICE overrides it."""
     import torch
 
-    want = os.environ.get("MUSIKORE_STEMS_DEVICE")
+    want = os.environ.get("TUNEKORE_STEMS_DEVICE")
     if want:
         return torch.device(want)
     if torch.backends.mps.is_available():
@@ -84,7 +84,7 @@ def backends() -> dict[str, type[Separator]]:
     from .sam_audio_backend import SamAudioSeparator
 
     classes: list[type[Separator]] = [DemucsSeparator, SamAudioSeparator]
-    if os.environ.get("MUSIKORE_STEMS_TEST") == "1":
+    if os.environ.get("TUNEKORE_STEMS_TEST") == "1":
         from .test_backend import TestSeparator
 
         classes.append(TestSeparator)

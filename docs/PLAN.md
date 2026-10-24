@@ -1,6 +1,6 @@
-# musiKore plan
+# tuneKore plan
 
-musiKore is a lightweight Ableton-style DAW that devKore owns outright: a
+tuneKore is a lightweight Ableton-style DAW that devKore owns outright: a
 platform to build our own instruments, effects and tools on. It runs on macOS
 first, then Windows, then Linux. It hosts the plugins Nate already owns (Serum 1
 and 2 through Splice Rent-to-Own, Arturia V Collection, Native Instruments). The
@@ -10,13 +10,14 @@ and lets you work on one stem at a time.
 Written 2026-10-23. The licensing facts were checked on the web that day; the
 Ableton behavior comes from Ableton's own manual and release notes. Sources are
 at the end. On 2026-10-24 the engine moved from C++ to Rust after a plugin
-hosting test (see "Why Rust" below).
+hosting test (see "Why Rust" below). The same day the product was renamed
+from musiKore to tuneKore; the logo is "TUNE K›".
 
 ## 1. Decisions
 
 | Area | Choice | Why |
 | --- | --- | --- |
-| Engine | Our own engine in Rust: the `musikore-engine` crate, in one Cargo workspace with the shell | No garbage collector on the audio thread, memory safety in our own code, and one language and build from the engine to the shell. Plugin hosting from Rust is proven on Serum 1 and 2 (see "Why Rust"). Every line is ours. |
+| Engine | Our own engine in Rust: the `tunekore-engine` crate, in one Cargo workspace with the shell | No garbage collector on the audio thread, memory safety in our own code, and one language and build from the engine to the shell. Plugin hosting from Rust is proven on Serum 1 and 2 (see "Why Rust"). Every line is ours. |
 | UI | TypeScript and React in the system webview, with Canvas and WebGL for the timeline, waveforms and meters | Fast to build and change, and it matches the stack Nate already works in. The UI never runs on the audio thread. |
 | App shell | Tauri 2 (MIT/Apache) | Windows, menus, dialogs, installers, signing and auto-update on all three OSes, with a small app size. Its Rust commands call the engine crate directly. |
 | Plugin formats | VST3 everywhere and Audio Units on macOS. CLAP later. No VST2. Hosted through the `vst3` crate (MIT/Apache bindings to the SDK) and `objc2-audio-toolbox` (Zlib/MIT/Apache). | The VST3 SDK has been MIT since 3.8 (Oct 2025). Steinberg no longer licenses VST2 to new hosts. All of Nate's plugins ship as VST3 and AU; none ship CLAP. |
@@ -87,7 +88,7 @@ toolchain for the engine and the shell.
 
 ```mermaid
 flowchart LR
-  subgraph App["musiKore app (one process)"]
+  subgraph App["tuneKore app (one process)"]
     UI["UI: TypeScript + React<br/>in the system webview"]
     Shell["Tauri shell (Rust):<br/>windows, menus, files, updates"]
     Engine["Engine (Rust crate):<br/>document, transport, audio graph,<br/>plugin host, plugin windows"]
@@ -158,14 +159,14 @@ flowchart LR
   read-only mirror of the document.
 - **Fast data** (meters at 30 Hz, the playhead) goes over binary channels.
 - **Waveform peaks** are computed in the engine and fetched from a custom
-  `musikore://peaks/...` URL.
+  `tunekore://peaks/...` URL.
 
 ## 3. What we take from Ableton, and in what order
 
 We copy the workflow, never the code, art, names or content. The names column
 below is ours.
 
-| Live (manual) | musiKore name | When |
+| Live (manual) | tuneKore name | When |
 | --- | --- | --- |
 | Stem separation (12.3, Suite) | Analyzer → Stems | Phase 1 |
 | Plug-in devices, plug-in windows, rescan | Plugins | Phase 2 |
@@ -178,7 +179,7 @@ below is ours.
 | Splice in the browser (12.3) | Library → Splice | Phase 6 (local folder); full search needs a partnership |
 | Warping, warp markers, auto-warp, warp modes | Warp | Phase 7 |
 | Live Projects, Collect All and Save, File Manager | Projects | Phase 3, grows over time |
-| Racks, Drum Racks, built-in instruments and effects | Our own devices | Later. This is where musiKore becomes ours. |
+| Racks, Drum Racks, built-in instruments and effects | Our own devices | Later. This is where tuneKore becomes ours. |
 
 ## 4. Roadmap
 
@@ -253,7 +254,7 @@ the host's clock), Splice Bridge.
    moves to the Xfer account and Splice isn't needed at all.
 2. **Samples.**
    - The Splice app downloads to `~/Splice`. The Library adds it as a place.
-   - Dragging a sample from the Splice app into musiKore works like any file
+   - Dragging a sample from the Splice app into tuneKore works like any file
      drop.
    - Splice Bridge and the new Splice Sounds plugin are ordinary VST3/AU
      plugins, so they work once Phase 2 does, as long as we send tempo and
@@ -262,7 +263,7 @@ the host's clock), Splice Bridge.
    Studio One and Pro Tools each did a partnership deal. That is a business
    conversation for later, not a coding task.
 
-**Hardware.** Nate will send a list of the hardware musiKore needs to work with.
+**Hardware.** Nate will send a list of the hardware tuneKore needs to work with.
 Until then, this is what any host needs:
 
 - **Audio interfaces:** any CoreAudio device on macOS, ASIO and WASAPI on
@@ -327,7 +328,7 @@ touching the Analyzer.
 - **Phase 1 also tests SAM Audio** against Demucs (details below). If its
   quality and speed hold up on Nate's Mac, it could ship without a paid
   vendor.
-- **Before musiKore ships to anyone,** a model we have the right to ship
+- **Before tuneKore ships to anyone,** a model we have the right to ship
   replaces Demucs behind `Separator`: SAM Audio if it passes, otherwise a
   licensed vendor model. The vendors are being contacted now, in parallel,
   since deals like this take weeks.
@@ -338,10 +339,10 @@ names ("vocals", "drums"), with small, base and large checkpoints. Of every
 open separation model checked on 2026-10-24, it is the only one whose weights
 carry a license that allows shipping them.
 
-| SAM License (dated 2025-11-19) | What it means for musiKore |
+| SAM License (dated 2025-11-19) | What it means for tuneKore |
 | --- | --- |
-| A worldwide, royalty-free license to use, copy, modify and redistribute, and to make derivative works. It sets no revenue or user cap and doesn't restrict commercial use. | We can bundle it and charge for musiKore. |
-| Redistributing it requires including a copy of the license. | musiKore ships the license text with the model. |
+| A worldwide, royalty-free license to use, copy, modify and redistribute, and to make derivative works. It sets no revenue or user cap and doesn't restrict commercial use. | We can bundle it and charge for tuneKore. |
+| Redistributing it requires including a copy of the license. | tuneKore ships the license text with the model. |
 | No reverse engineering the model, and no prohibited uses such as military or warfare. | No effect on a DAW |
 | Meta can end the license if we breach it, and we would then have to delete the model. | Stick to the terms. |
 | We own the derivative works we make, but Meta keeps ownership of SAM itself. | Fine-tuned versions are ours to use under the same license. |
@@ -498,11 +499,11 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
     including study with reverse engineering tools. Live's EULA (§5.1)
     prohibits reverse engineering; studying it anyway is Nate's call, made
     2026-10-23.
-  - What stays out of musiKore:
+  - What stays out of tuneKore:
     - Live's code: nothing pasted or translated from a decompiler.
     - Its graphics, presets, samples, Packs and device names.
     - Anything that touches Live's license check.
-  - Reverse engineering notes live outside this repo, and musiKore's code is
+  - Reverse engineering notes live outside this repo, and tuneKore's code is
     written from our own descriptions. That keeps the record that the code is
     ours.
   - `.als` files are gzipped XML, so a future importer can read them directly.
@@ -511,8 +512,8 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 - **Patent watch:** Ableton's US 8,822,803 covers Push's in-key pad layout.
   Don't build an in-key pad mode for controllers until it's checked. Nothing
   turned up against clip launching itself (Bitwig, Reason and others ship it).
-- **Brand:** the logo is drawn from the devKore wordmark with no font, and the
-  app icon is devKore's K› icon (`brand/README.md`).
+- **Brand:** the logo is TUNE in capitals plus devKore's K› icon, drawn with no
+  font, and the app icon is the K› icon (`brand/README.md`).
 
 ## 9. Risks
 
@@ -531,12 +532,12 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 2. **Create the repo** (private) and its `kore-issues` item, with branches named
    `nate/...`.
 3. **Run Phase 0:**
-   - Tauri app with the musiKore icon
+   - Tauri app with the tuneKore icon
    - Rust engine crate called from the Tauri shell
    - Device list and test tone
    - CI on macOS, plus Windows and Linux compile jobs
 4. **With Live 12.3 Suite installed,** split the same three songs in Live and,
-   later, in musiKore, to compare quality and speed. Study Live as described
+   later, in tuneKore, to compare quality and speed. Study Live as described
    in section 8.
 
 ## Sources

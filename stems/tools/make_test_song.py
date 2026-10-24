@@ -22,7 +22,7 @@ import numpy as np
 from scipy.signal import butter, lfilter
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from musikore_stems.rawio import write_wav16  # noqa: E402
+from tunekore_stems.rawio import write_wav16  # noqa: E402
 
 SR = 44_100
 MINOR = [0, 2, 3, 5, 7, 8, 10]

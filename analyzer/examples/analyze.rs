@@ -1,7 +1,7 @@
 //! Runs the Analyzer on a song from the command line and prints the Phase 1
 //! checks as JSON. Used for the model comparison in docs/PLAN.md section 6.
 //!
-//!     cargo run --release -p musikore-analyzer --example analyze -- \
+//!     cargo run --release -p tunekore-analyzer --example analyze -- \
 //!         song.mp3 --backend demucs --mode fast --out ~/stems/song
 //!
 //! With --out it also writes the four stems as WAV files there.
@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use musikore_analyzer::{check, decode_file, export_wav, separate, Cancel, WorkerConfig};
+use tunekore_analyzer::{check, decode_file, export_wav, separate, Cancel, WorkerConfig};
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -69,7 +69,7 @@ fn main() {
 }
 
 fn tempdir() -> PathBuf {
-    let d = std::env::temp_dir().join(format!("musikore-analyze-{}", std::process::id()));
+    let d = std::env::temp_dir().join(format!("tunekore-analyze-{}", std::process::id()));
     std::fs::create_dir_all(&d).unwrap();
     d
 }

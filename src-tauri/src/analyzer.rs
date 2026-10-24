@@ -8,11 +8,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use musikore_analyzer::{
+use tunekore_analyzer::{
     check, decode_file, export_wav, list_backends, peaks, rms_db, separate, BackendInfo, Cancel, Checks, JobError,
     Song, Stems, WavFormat, WorkerConfig, STEM_NAMES,
 };
-use musikore_engine::{Player, Source};
+use tunekore_engine::{Player, Source};
 use serde::Serialize;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder};
@@ -116,7 +116,7 @@ pub fn open_analyzer(app: AppHandle) -> Result<(), String> {
         return w.set_focus().map_err(|e| e.to_string());
     }
     let window = WebviewWindowBuilder::new(&app, "analyzer", WebviewUrl::App("analyzer.html".into()))
-        .title("musiKore Analyzer")
+        .title("tuneKore Analyzer")
         .inner_size(1200.0, 760.0)
         .min_inner_size(900.0, 600.0)
         .background_color(tauri::window::Color(18, 18, 23, 255))

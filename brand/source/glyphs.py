@@ -1,4 +1,5 @@
-"""musi glyphs built from the devKore wordmark's own strokes (dev coordinates, y down)."""
+"""tuneKore letters: the TUNE capitals, plus the earlier lowercase musi letters
+built from the devKore wordmark's own strokes (dev coordinates, y down)."""
 import math
 from geom import *
 
@@ -117,3 +118,32 @@ def kore():
 def k_only():
     sh = lambda pts, dx: [(x + dx, y) for x, y in pts]
     return U(poly(CHEV), poly(TRI_TOP), poly(TRI_BOT))
+
+# ---- TUNE: capitals for the tuneKore logo, cap height and weight matched to the K
+CAP = 31.236      # the K's height
+STEM = 8.9        # vertical strokes, as in the lowercase
+BAR = 7.0         # horizontal strokes
+
+def cap_T(w=27.0):
+    x0 = (w - STEM) / 2
+    return U(rect(0, 0, w, BAR), rect(x0, 0, x0 + STEM, CAP))
+
+def cap_U(w=27.4, ym=13.0):
+    a = w / 2; yb = CAP + 0.55; h = yb - ym           # bowl bottom overshoots like the o
+    ai = a - STEM; yi = yb - 6.4; hi = yi - ym
+    d = (f"M0 0 H{STEM} V{ym} "
+         f"C{STEM} {ym + 0.5304*hi} {a - 0.709*ai} {yi} {a} {yi} "
+         f"C{a + 0.709*ai} {yi} {w - STEM} {ym + 0.5304*hi} {w - STEM} {ym} "
+         f"V0 H{w} V{ym} "
+         f"C{w} {ym + 0.6337*h} {w - 0.4323*a} {yb} {a} {yb} "
+         f"C{0.4323*a} {yb} 0 {ym + 0.6337*h} 0 {ym} Z")
+    return P(d)
+
+def cap_N(w=28.4, diag=10.6):
+    return U(rect(0, 0, STEM, CAP), rect(w - STEM, 0, w, CAP),
+             poly([(0, 0), (diag, 0), (w, CAP), (w - diag, CAP)]))
+
+def cap_E(w=23.0, mid=21.0):
+    y1 = (CAP - BAR) / 2
+    return U(rect(0, 0, STEM, CAP), rect(0, 0, w, BAR),
+             rect(0, y1, mid, y1 + BAR), rect(0, CAP - BAR, w, CAP))

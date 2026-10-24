@@ -1,7 +1,7 @@
 [project]
-name = "musikore-stems"
+name = "tunekore-stems"
 version = "0.1.0"
-description = "musiKore's stem worker: splits a song into vocals, drums, bass and other"
+description = "tuneKore's stem worker: splits a song into vocals, drums, bass and other"
 requires-python = "==3.13.*"
 license = "LicenseRef-Proprietary"
 # Pinned. Run `uv lock` after changing one, and record it in THIRD_PARTY.md.
@@ -43,7 +43,7 @@ perception-models = { git = "https://github.com/facebookresearch/perception_mode
 # These packages list far more than the code we run imports. Their real lists
 # pull in LGPL audio I/O (lameenc, libsndfile through soundfile), FFmpeg
 # (torchcodec), a non-commercial model (ImageBind) and training tools. We
-# install them with only what inference needs; `musikore_stems/shims.py`
+# install them with only what inference needs; `tunekore_stems/shims.py`
 # stands in for the three modules they import but never call on our path.
 [[tool.uv.dependency-metadata]]
 name = "demucs"

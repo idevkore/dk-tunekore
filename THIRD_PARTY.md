@@ -1,6 +1,6 @@
 # Third-party software
 
-Every dependency musiKore builds on, with its licence. The rule (`CLAUDE.md`):
+Every dependency tuneKore builds on, with its licence. The rule (`CLAUDE.md`):
 MIT, BSD, Apache-2.0, zlib, ISC or public domain. MPL-2.0 only for unmodified
 files. Nothing GPL, AGPL or LGPL goes into the app.
 
@@ -11,8 +11,8 @@ MIT). Update this file in the same PR that adds a dependency.
 
 ## Engine, Analyzer and app shell (Rust), direct dependencies
 
-One Cargo workspace: `engine/` (`musikore-engine`), `analyzer/`
-(`musikore-analyzer`) and `src-tauri/` (`musikore`).
+One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
+(`tunekore-analyzer`) and `src-tauri/` (`tunekore`).
 
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
@@ -67,7 +67,7 @@ and which never reach the app.
 
 `stems/` is the Analyzer's worker process for Phase 1. It runs from this
 checkout's virtualenv (`uv sync --extra sam`) and is not part of the app
-bundle. Before musiKore ships, the separator it ships with replaces it (see
+bundle. Before tuneKore ships, the separator it ships with replaces it (see
 `docs/PLAN.md` section 6), so these are recorded for the record and for that
 decision, not as shipped code. Versions are pinned in `stems/pyproject.toml`
 and locked in `stems/uv.lock` (Python 3.13).
@@ -103,7 +103,7 @@ never installed: `lameenc` (LAME, LGPL), `descript-audiotools` (brings
 `soundfile`, i.e. libsndfile, LGPL), `torchcodec` (FFmpeg), `torchaudio`,
 `imagebind` (CC BY-NC-SA 4.0, a non-commercial model used only for video
 re-ranking), `laion-clap`, `audiobox_aesthetics` and `xformers`.
-`stems/musikore_stems/shims.py` stands in for the four of them the code imports
+`stems/tunekore_stems/shims.py` stands in for the four of them the code imports
 without calling on our path; anything that really calls one fails loudly.
 
 **Model weights**, downloaded to this Mac's Hugging Face cache
@@ -128,5 +128,5 @@ we ship.
 
 ## Our own
 
-The musiKore name, logo and app icon (`brand/`) and all source in this repo
+The tuneKore name, logo and app icon (`brand/`) and all source in this repo
 belong to devKore.

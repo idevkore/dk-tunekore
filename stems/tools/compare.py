@@ -25,8 +25,8 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from musikore_stems.rawio import read_wav  # noqa: E402
-from musikore_stems.separator import STEMS  # noqa: E402
+from tunekore_stems.rawio import read_wav  # noqa: E402
+from tunekore_stems.separator import STEMS  # noqa: E402
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 ANALYZE = os.path.join(REPO, "target", "release", "examples", "analyze")
@@ -54,7 +54,7 @@ def main() -> None:
     ap.add_argument("--runs", nargs="+", default=["demucs:fast", "demucs:best", "sam-audio:fast", "sam-audio:best"])
     a = ap.parse_args()
     if not os.path.exists(ANALYZE):
-        sys.exit("build it first: cargo build --release -p musikore-analyzer --example analyze")
+        sys.exit("build it first: cargo build --release -p tunekore-analyzer --example analyze")
     os.makedirs(a.results, exist_ok=True)
     path = os.path.join(a.results, "results.json")
     results = json.load(open(path)) if os.path.exists(path) else []

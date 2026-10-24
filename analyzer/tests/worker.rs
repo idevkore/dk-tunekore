@@ -1,10 +1,10 @@
 //! The app → worker → stems path, with the worker's model-free test backend.
 //! Skips when the stem worker isn't set up (as on CI's build jobs).
 
-use musikore_analyzer::{check, separate, Cancel, JobError, Song, WorkerConfig};
+use tunekore_analyzer::{check, separate, Cancel, JobError, Song, WorkerConfig};
 
 fn config() -> Option<WorkerConfig> {
-    std::env::set_var("MUSIKORE_STEMS_TEST", "1");
+    std::env::set_var("TUNEKORE_STEMS_TEST", "1");
     match WorkerConfig::locate() {
         Ok(c) => Some(c),
         Err(e) => {

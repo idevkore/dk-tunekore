@@ -15,5 +15,5 @@ opt-level = "s"
 strip = true
 
 # Audio and DSP code runs too slowly unoptimized to test by ear.
-[profile.dev.package.musikore-engine]
+[profile.dev.package.tunekore-engine]
 opt-level = 2

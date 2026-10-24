@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open } from "@tauri-apps/plugin-dialog";
-import logo from "../../brand/musikore-logo-color.svg";
+import logo from "../../brand/tunekore-logo-color.svg";
 import Waveform from "./Waveform";
 import * as api from "./api";
 import type { Backend, Finished, SongInfo } from "./api";
@@ -242,7 +242,7 @@ export default function Analyzer() {
   return (
     <div className={"analyzer" + (dragging ? " dragging" : "")}>
       <header className="bar">
-        <img src={logo} alt="musiKore" className="bar-logo" />
+        <img src={logo} alt="tuneKore" className="bar-logo" />
         <h1>Analyzer</h1>
         <span className="sub">Split a song into stems</span>
       </header>

@@ -45,13 +45,13 @@ pub fn decode_file(path: &Path) -> Result<Song, String> {
     }
     let mut format = symphonia::default::get_probe()
         .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
-        .map_err(|e| format!("not an audio file musiKore can read ({e})"))?;
+        .map_err(|e| format!("not an audio file tuneKore can read ({e})"))?;
     let track = format.default_track(TrackType::Audio).ok_or("the file has no audio track")?;
     let params = track.codec_params.as_ref().and_then(|p| p.audio()).ok_or("the audio track has no codec parameters")?;
     let Some(codec) =
         symphonia::default::get_codecs().get_audio_decoder(params.codec).map(|d| d.codec.info.short_name.to_uppercase())
     else {
-        return Err(format!("musiKore can't decode this file's codec ({}); WAV, AIFF, FLAC, MP3, AAC and ALAC work", params.codec));
+        return Err(format!("tuneKore can't decode this file's codec ({}); WAV, AIFF, FLAC, MP3, AAC and ALAC work", params.codec));
     };
     let bits = params.bits_per_sample;
     let mut decoder = symphonia::default::get_codecs()

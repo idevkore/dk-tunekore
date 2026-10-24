@@ -5,7 +5,7 @@ failed job never touches the app or the audio thread. The app starts one
 worker per job and kills it to cancel. Phase 1 runs it from this folder on
 Nate's Mac; it is not bundled into the app.
 
-- `musikore_stems/separator.py`: the `Separator` interface. Every model sits
+- `tunekore_stems/separator.py`: the `Separator` interface. Every model sits
   behind it and returns vocals, drums, bass and other with the song's exact
   channels, length and sample rate.
 - `demucs_backend.py`: Demucs. Fast is `htdemucs`, Best is `htdemucs_ft`.
@@ -41,13 +41,13 @@ for T5. Never commit, bundle or ship them.
 
 ```bash
 cd stems && uv run pytest -q tests    # no weights needed
-cargo test -p musikore-analyzer       # app → worker path, with a test backend
+cargo test -p tunekore-analyzer       # app → worker path, with a test backend
 ```
 
 ## Compare models
 
 ```bash
-cargo build --release -p musikore-analyzer --example analyze
+cargo build --release -p tunekore-analyzer --example analyze
 cd stems
 .venv/bin/python tools/make_test_song.py /tmp/songs/synth-a --bpm 120 --seed 1
 .venv/bin/python tools/compare.py /tmp/results /tmp/songs/synth-a ~/Music/song.mp3

@@ -14,15 +14,15 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from musikore_stems.mixing import mask_from_mix  # noqa: E402
-from musikore_stems.rawio import read_planar, read_wav, write_planar, write_wav16  # noqa: E402
-from musikore_stems.sam_audio_backend import chunk_starts, fade_weights  # noqa: E402
-from musikore_stems.separator import STEMS, conform  # noqa: E402
+from tunekore_stems.mixing import mask_from_mix  # noqa: E402
+from tunekore_stems.rawio import read_planar, read_wav, write_planar, write_wav16  # noqa: E402
+from tunekore_stems.sam_audio_backend import chunk_starts, fade_weights  # noqa: E402
+from tunekore_stems.separator import STEMS, conform  # noqa: E402
 
 
 def worker(*args, stdin: str = "", env: dict | None = None):
-    e = {**os.environ, "MUSIKORE_STEMS_TEST": "1", **(env or {})}
-    p = subprocess.run([sys.executable, "-m", "musikore_stems.worker", *args], input=stdin, cwd=ROOT,
+    e = {**os.environ, "TUNEKORE_STEMS_TEST": "1", **(env or {})}
+    p = subprocess.run([sys.executable, "-m", "tunekore_stems.worker", *args], input=stdin, cwd=ROOT,
                        capture_output=True, text=True, env=e, timeout=120)
     return p.returncode, [json.loads(line) for line in p.stdout.splitlines()], p.stderr
 
