@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["engine", "src-tauri"]
+members = ["engine", "analyzer", "src-tauri"]
 
 [workspace.package]
 edition = "2021"

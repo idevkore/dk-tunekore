@@ -8,6 +8,7 @@ import {
   stopTone,
   type OutputDevice,
 } from "./engine";
+import { openAnalyzer } from "./analyzer/api";
 
 const DEFAULT_HZ = 440;
 
@@ -108,6 +109,16 @@ export default function App() {
         <img src={logo} alt="tuneKore" className="logo" />
         <span className="version">engine {version || "…"}</span>
       </header>
+
+      <section className="panel">
+        <h2>Analyzer</h2>
+        <div className="row">
+          <p className="lead">Split a song into vocals, drums, bass and other.</p>
+          <button className="play" onClick={() => openAnalyzer().catch((e) => setError(String(e)))}>
+            Open the Analyzer
+          </button>
+        </div>
+      </section>
 
       <section className="panel">
         <h2>Audio output</h2>

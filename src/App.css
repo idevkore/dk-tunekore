@@ -23,6 +23,7 @@ body { background: var(--ink); color: var(--light); }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; display: grid; gap: 14px; }
 .panel h2 { margin: 0; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
 .row { display: flex; align-items: center; gap: 12px; }
+.lead { margin: 0; flex: 1; color: var(--muted); }
 
 select, button { font: inherit; color: inherit; border-radius: 8px; border: 1px solid var(--line); background: var(--ink); padding: 9px 12px; }
 select { flex: 1; min-width: 0; }

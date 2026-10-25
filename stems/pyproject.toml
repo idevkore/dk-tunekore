@@ -1,0 +1,32 @@
+[project]
+name = "tunekore-stems"
+version = "0.1.0"
+description = "tuneKore's stem worker: splits a song into vocals, drums, bass and other"
+requires-python = "==3.13.*"
+license = "LicenseRef-Proprietary"
+# Pinned. Run `uv lock` after changing one, and record it in THIRD_PARTY.md.
+dependencies = [
+    "numpy==2.5.4",
+    "torch==2.14.1",
+    "einops==0.8.2",
+    "huggingface-hub==2.3.0",
+    "safetensors==0.8.0",
+    "pyyaml==6.0.3",
+    "tqdm==4.70.1",
+    "julius==0.2.8",
+    "demucs==4.1.0",
+]
+
+[dependency-groups]
+# scipy: the test-song generator's filters (tools/make_test_song.py).
+dev = ["pytest==9.1.1", "scipy==1.18.1"]
+
+[tool.uv]
+package = false
+
+# Demucs lists more than inference needs: lameenc (LAME, LGPL) for MP3
+# output, and training tools. We install it with only what inference imports.
+[[tool.uv.dependency-metadata]]
+name = "demucs"
+version = "4.1.0"
+requires-dist = ["einops", "huggingface-hub", "julius>=0.2.3", "pyyaml", "safetensors", "torch>=2.1", "tqdm"]

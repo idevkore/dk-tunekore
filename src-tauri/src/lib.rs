@@ -1,3 +1,5 @@
+mod analyzer;
+
 use tunekore_engine::{Engine, Meter, OutputDevice};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -9,17 +11,27 @@ const TONE_GAIN: f32 = 0.2;
 const RAMP_WAIT: Duration = Duration::from_millis(40);
 
 /// The engine plus the device its stream is open on (`Some(None)` = system default).
-struct Audio {
-    engine: Engine,
+pub(crate) struct Audio {
+    pub(crate) engine: Engine,
     open_device: Option<Option<String>>,
 }
 
 impl Audio {
     fn fade_out_and_close(&mut self) {
         self.engine.set_tone(false, 440.0, 0.0);
+        self.engine.player().set_playing(false);
         std::thread::sleep(RAMP_WAIT);
         self.engine.close_output();
         self.open_device = None;
+    }
+
+    /// Opens the system default output unless an output is already open.
+    pub(crate) fn ensure_open(&mut self) -> Result<(), String> {
+        if self.open_device.is_none() {
+            self.engine.open_output(None)?;
+            self.open_device = Some(None);
+        }
+        Ok(())
     }
 }
 
@@ -63,12 +75,15 @@ async fn start_tone(device_id: Option<String>, frequency: f32, state: Shared<'_>
     .map_err(|e| e.to_string())?
 }
 
+/// Stops the tone. Closes the output too, unless the Analyzer is playing on it.
 #[tauri::command]
 async fn stop_tone(state: Shared<'_>) -> Result<(), String> {
     let audio = audio(&state);
     spawn_blocking(move || {
         let mut a = audio.lock().unwrap();
-        if a.open_device.is_some() {
+        if a.engine.player().is_playing() {
+            a.engine.set_tone(false, 440.0, 0.0);
+        } else if a.open_device.is_some() {
             a.fade_out_and_close();
         }
     })
@@ -96,17 +111,42 @@ fn spawn_meter(app: tauri::AppHandle, meter: Meter) {
 pub fn run() {
     let engine = Engine::new();
     let meter = engine.meter();
+    let player = engine.player();
     // One engine for the life of the app.
     let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(audio)
+        .manage(player.clone())
+        .manage(analyzer::Analyzer::default())
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
+            analyzer::spawn_position(app.handle().clone(), player);
             let _ = app.get_webview_window("main");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![engine_version, list_outputs, start_tone, stop_tone])
-        .run(tauri::generate_context!())
-        .expect("error while running tuneKore");
+        .invoke_handler(tauri::generate_handler![
+            engine_version,
+            list_outputs,
+            start_tone,
+            stop_tone,
+            analyzer::open_analyzer,
+            analyzer::analyzer_backends,
+            analyzer::analyzer_open,
+            analyzer::analyzer_separate,
+            analyzer::analyzer_cancel,
+            analyzer::analyzer_play,
+            analyzer::analyzer_seek,
+            analyzer::analyzer_track,
+            analyzer::analyzer_export,
+        ])
+        .build(tauri::generate_context!())
+        .expect("error while building tuneKore")
+        .run(|app, event| {
+            // Don't leave a stem worker running after the app quits.
+            if let tauri::RunEvent::Exit = event {
+                app.state::<analyzer::Analyzer>().cancel_job();
+            }
+        });
 }

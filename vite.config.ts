@@ -8,7 +8,12 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
-    watch: { ignored: ["**/src-tauri/**", "**/engine/**"] },
+    watch: { ignored: ["**/src-tauri/**", "**/engine/**", "**/analyzer/src/**", "**/stems/**"] },
   },
-  build: { target: "safari15", sourcemap: false },
+  build: {
+    target: "safari15",
+    sourcemap: false,
+    // Two windows: the main window and the Analyzer.
+    rollupOptions: { input: { main: "index.html", analyzer: "analyzer.html" } },
+  },
 });
