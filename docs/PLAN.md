@@ -336,8 +336,8 @@ touching the Analyzer.
 **SAM Audio (candidate).** Meta's general sound separator, released December
 2025 (github.com/facebookresearch/sam-audio). It isolates whatever a prompt
 names ("vocals", "drums"), with small, base and large checkpoints. Of every
-open separation model checked on 2026-10-24, it is the only one whose weights
-carry a license that allows shipping them.
+open separation model checked on 2026-10-24, it and Spleeter are the only ones
+whose weights we could ship (see "What tuneKore can ship" below).
 
 | SAM License (dated 2025-11-19) | What it means for tuneKore |
 | --- | --- |
@@ -364,7 +364,6 @@ Demucs:
 
 **The other open models checked**, none of which can ship:
 
-- **Spleeter:** MIT code, but no license on its weights.
 - **Open-Unmix `umxl`:** non-commercial weights (CC BY-NC-SA 4.0).
 - **Open-Unmix `umxhq` and `umx`:** no stated weights license, trained on
   non-commercial data, and weaker (about 6 dB SDR against about 9 for
@@ -377,10 +376,12 @@ Demucs:
 
 | Vendor | What they offer | Contact | Status |
 | --- | --- | --- | --- |
-| AudioShake | Local Inference SDK: on-device separation for macOS, Windows, iOS and Android, with no cloud calls | info@audioshake.ai, or Contact sales on audioshake.ai/products/sdk | Inquiry drafted, not sent |
-| Music AI (Moises) | The model Ableton licensed for Live 12.3. Its public offer is a cloud API with SDKs; on-device licensing isn't advertised, so ask. | Sales contact on music.ai | Inquiry drafted, not sent |
+| AudioShake | Local Inference SDK: a native library for macOS (Apple silicon and Intel, on Metal and the Neural Engine), Windows, Linux, iOS and Android, with no cloud calls. It powers djay Pro's Neural Mix. | info@audioshake.ai, or Contact sales on audioshake.ai/products/sdk | Inquiry drafted, not sent |
+| Music AI (Moises) | The model behind Live 12.3's stems. Its Embedded SDK runs "locally", from PCs to embedded Linux; terms by quote. | Contact Sales on music.ai | Inquiry drafted, not sent |
+| zplane | STEMS EFFICIENT SDK: vocals, bass, drums and other. Terms not public. | licensing.zplane.de (in maintenance on 2026-10-24) | Not contacted |
+| Gaudio Lab | GSEP separation as an API and an SDK; whether the SDK runs on a desktop isn't stated | "Talk to an expert" on gaudiolab.com | Not contacted |
 
-What to ask both:
+What to ask each:
 
 - Can the model run fully on-device in a desktop app (macOS first, then
   Windows and Linux)?
@@ -396,6 +397,127 @@ What to ask both:
 Update the table as replies come in. The shipping model, SAM Audio or a
 vendor's, is chosen by the end of Phase 1, so it can be in place before
 Phase 8 (Windows) at the latest.
+
+### What tuneKore can ship (checked 2026-10-24)
+
+The question: what can a paid app ship for vocals, drums, bass and other,
+running on the user's machine? Every licence below was read at its source:
+the authors' paper or repo, the dataset's own record, or the vendor's own
+pages. Hugging Face tags don't count. This is research for a product
+decision, not legal advice; a vendor contract or a recording contract still
+needs a lawyer.
+
+| Option | Kind | Licence | Trained on, or what it is | Source | Fits `CLAUDE.md` |
+| --- | --- | --- | --- | --- | --- |
+| Spleeter `4stems` (Deezer) | Open model | MIT. Deezer's paper: "source code and pre-trained models are available on github and distributed under a MIT license" | Deezer's own catalogue (the private Bean set), "not trained, validated or optimized in any way with musdb18 data" | [JOSS paper](https://joss.theoj.org/papers/10.21105/joss.02154), [repo](https://github.com/deezer/spleeter) | Yes |
+| AudioShake Local Inference SDK | Vendor | Commercial; terms and price not public | Native library for macOS (Apple silicon and Intel), Windows, Linux, iOS and Android; encrypted model files | [SDK docs](https://developer.audioshake.ai/sdk/overview.md) | Needs an exception (proprietary) |
+| Music AI Embedded SDK | Vendor | Commercial; by quote | Runs "locally", from PCs to embedded Linux; the model behind Live 12.3's stems | [Embedded AI](https://music.ai/embedded-ai/), [Ableton](https://www.ableton.com/stem-separation-in-ableton-live/) | Needs an exception |
+| zplane STEMS EFFICIENT SDK | Vendor | Commercial; terms not public | Vocals, bass, drums, other | [licensing.zplane.de](https://licensing.zplane.de/) | Needs an exception |
+| VocalSet, Dagstuhl ChoirSet | Training data | CC BY 4.0 | Solo singing (10 h, 20 singers) and close-miked choir. Exercises and two choir pieces, not songs. | [VocalSet](https://zenodo.org/records/1442513), [ChoirSet](https://zenodo.org/records/4607766) | Yes, with credit |
+| ccMixter, CC BY and CC0 uploads | Training data | Per upload | 1,507 of its 5,986 a cappellas are CC BY or CC0; most of the rest are non-commercial. Remixes reuse others' samples, so each needs checking. | [ccMixter API](https://ccmixter.org/api/query?f=count&tags=acappella&lic=by) | Yes, track by track |
+| Shutterstock (with Pond5); AudioSparx | Licensed data | By contract; price by quote | Multitrack stems with and without vocals, sold for AI training | [Shutterstock](https://www.shutterstock.com/data-licensing/audio), [AudioSparx](https://www.audiosparx.com/sa/about/license-for-generative-AI-training.cfm) (unverified: blocks automated reads) | Yes, if the contract lets us ship the trained model |
+| Our own multitracks | Training data | Ours, by contract | Sessions recorded for training, with each player's written assignment and consent to AI training. A commissioned sound recording isn't a work made for hire under US law, so the contract needs an assignment. | [Copyright Office Circular 30](https://www.copyright.gov/circs/circ30.pdf) | Yes |
+| Slakh2100 | Training data | CC BY 4.0 | 2,100 songs rendered from MIDI, no vocals. The MIDI (Lakh) was scraped from the web with no known authors, and the audio was rendered with Native Instruments' Kontakt, whose EULA now bars AI training. | [Zenodo](https://zenodo.org/records/4599666), [render scripts](https://github.com/ethman/slakh_generation_scripts) | Unclear; treat as no |
+
+**Spleeter's catches.**
+
+- It's weaker: about 5.9 dB SDR on MUSDB18 (vocals 6.9, drums 6.7, bass 5.5,
+  other 4.6, with Wiener filtering), against 9.0 dB for `htdemucs` and 9.2 for
+  `htdemucs_ft` (the JOSS paper's table; the Demucs README).
+- The default 4-stem config separates up to about 11 kHz and leaves every
+  stem silent above that (`F: 1024`, `mask_extension: zeros`). The 16 kHz
+  config runs the same weights up to about 16.5 kHz.
+- The README says only "the code" is MIT. Three open issues ask Deezer to
+  confirm the models are MIT too (#898 from 2024, #957 and #959 from 2026), and
+  Deezer hasn't answered. Deezer's paid Spleeter Pro is a cloud API, so it's
+  no substitute.
+- It's a TensorFlow model. To run it natively it would be converted to ONNX
+  (section 1), and the MIT notice ships with it.
+
+**Checked and ruled out** (new on 2026-10-24; the earlier list is above):
+
+- **ByteDance and Volcengine.** `bytesep`'s weights are CC BY 4.0, but it
+  splits only vocals from accompaniment and was trained only on MUSDB18.
+  ByteDance released no official BS-RoFormer or Mel-RoFormer weights. AudioSep
+  separates general sounds and was trained partly on WavCaps (academic use
+  only). Volcengine/BytePlus sells a cloud API for vocals and background.
+- **Intel.** The OpenVINO plugins for Audacity run Demucs, converted to
+  OpenVINO. The "MIT" tag on `Intel/demucs-openvino` is Intel's own label on
+  Meta's research-only weights, and the plugin itself is GPL-3.0.
+- **Other research models.** Sony D3Net, KUIELab MDX-Net and SCNet state no
+  weights licence and were trained on MUSDB18 (or MoisesDB). Banquet (CC
+  BY-NC-SA) and LarsNet (CC BY-NC) are non-commercial. ZFTurbo's owner now
+  says its checkpoints are MIT, but they were trained on MUSDB18-HQ.
+  Moises-Light released no weights.
+- **The operating systems.** macOS's `AUSoundIsolation` isolates voice only;
+  Windows has no separation API.
+- **Datasets.** MoisesDB and MedleyDB are CC BY-NC-SA, MUSDB18 and DSD100 are
+  non-commercial, and MTG-Jamendo is for research only.
+- **Rendering our own MIDI through sample libraries.** Splice's terms forbid
+  using its Sounds "as source or training material for generative or other
+  types of artificial intelligence models" (section II 3.1.1.3(h), updated
+  2026-07-24), and its Instrument presets carry the same ban. Native
+  Instruments' EULA (2026-07-01) and, as reported, the Loopmasters/Loopcloud
+  licence bar it too. A Slakh-style set needs sounds we own: our own samples,
+  CC0 audio or our own synths.
+- **Vendors that don't fit.** LALAL.AI's business offer runs on your server or
+  AWS. Audionamix and Kits.ai run on servers or in the cloud. HANCE licensed
+  its engine and stem models to Acon Digital for Remix, but its site is down
+  and a directory says it's closing.
+
+**"Users download the weights themselves."**
+
+- No paid DAW or DJ app was found doing this with research-only weights. It
+  turns up only in free tools (Ultimate Vocal Remover, StemRoller, Intel's
+  Audacity plugin) and REAPER scripts. Paid apps license an engine (Ableton
+  with Music AI, djay with AudioShake, Acon with HANCE) or build their own
+  (iZotope, Serato, Logic).
+- Two paid apps appear to use Demucs without saying how they cleared it:
+  DJ.Studio names htDemucs on its own page, and FL Studio users report it
+  (Image-Line hasn't confirmed). Neither is a precedent; we can't see their
+  terms.
+- Whether weights can be copyrighted at all is unsettled (Henderson and
+  Lemley, 2025). Demucs has no click-through, so a claim would rest on
+  copyright, not contract, and a contract term binds only the user who
+  accepted it.
+- Under *Grokster* (2005) and *Cox v. Sony* (25 March 2026), a provider is
+  liable for its users' infringement only if it induced it or offered a
+  service tailored to it. A button in a paid music app that fetches one
+  named research-only model, for a use its licence forbids, is close to that
+  line. A general model runner such as LM Studio, whose users pick from
+  thousands of models, is easier to defend.
+- The user can't comply anyway: making a track isn't a "scientific purpose",
+  paid or not, so a "you're responsible for the licence" disclaimer doesn't
+  help.
+- Model owners do go after download tools. Meta's 2023 DMCA notice took
+  down `llama-dl` and all 403 repositories in its fork network on GitHub.
+- So it isn't a loophole. It moves our exposure from distributing the
+  weights to secondary liability, and adds a takedown risk after launch.
+
+**Recommendation.**
+
+1. **Don't build the download button.** Demucs stays a prototype on Nate's
+   Mac.
+2. **Test Spleeter now.** Add it to Phase 1's comparison with Demucs, on the
+   same songs and by ear, using the 16 kHz config. It's the one model we can
+   ship today with no deal and no exception. Before relying on it, ask Deezer
+   in writing to confirm the models are MIT (deezer-techservices.com/contact,
+   or issue #959).
+3. **Keep licensing a vendor for quality.** Spleeter is about 3 dB behind
+   Demucs, which users will hear. Contact AudioShake first (a documented
+   on-device SDK for every platform we need), then Music AI (Live's model,
+   now with an embedded SDK), then zplane. A proprietary SDK isn't on
+   `CLAUDE.md`'s licence list, so the one we pick needs Nate's exception
+   there.
+4. **Plan our own model as the long-term path, data first.** Open data with
+   vocals is small (VocalSet, ChoirSet, about 1,500 ccMixter a cappellas), so
+   training needs licensed stems (ask Shutterstock and AudioSparx for prices)
+   or sessions we record under contracts a music lawyer drafts. Instrument
+   stems can be rendered from MIDI with sounds we own; Splice, Loopcloud and
+   Native Instruments content can't be used.
+
+If Spleeter passes the listening test, tuneKore can ship with it as Fast
+and add the vendor model as Best when a deal closes.
 
 ## 7. Cross-platform path
 
@@ -507,3 +629,59 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 - MUSDB18-HQ license: https://zenodo.org/records/3338373
 - Signalsmith Stretch: https://signalsmith-audio.co.uk/code/stretch/
 - Library validation for plugin hosts (Apple DTS, Sep 2026): https://developer.apple.com/forums/thread/845750
+
+**Stem separation: what can ship** (checked 2026-10-24):
+
+- Spleeter paper (Hennequin et al., JOSS 5(50), 2020; licence, training data,
+  SDR table): https://joss.theoj.org/papers/10.21105/joss.02154
+- Spleeter repo, configs and licence issues: https://github.com/deezer/spleeter,
+  https://github.com/deezer/spleeter/issues/898,
+  https://github.com/deezer/spleeter/issues/957,
+  https://github.com/deezer/spleeter/issues/959
+- Spleeter Pro (cloud API): https://www.deezer-techservices.com/solutions/spleeter/
+- Demucs scores and training data: https://github.com/adefossez/demucs
+- bytesep weights (CC BY 4.0, MUSDB18 only): https://zenodo.org/record/5804160
+- BS-RoFormer paper: https://arxiv.org/abs/2309.02612
+- AudioSep: https://github.com/Audio-AGI/AudioSep
+- BytePlus vocal/background separation (cloud):
+  https://docs.byteplus.com/api/docs/byteplus-vod/docs-voice-background-audio-separation
+- Intel OpenVINO plugins for Audacity (GPL-3.0) and the converted Demucs
+  weights: https://github.com/intel/openvino-plugins-ai-audacity,
+  https://huggingface.co/Intel/demucs-openvino
+- Banquet weights (CC BY-NC-SA 4.0): https://zenodo.org/records/13694558
+- LarsNet (CC BY-NC 4.0): https://github.com/polimi-ispl/larsnet
+- ZFTurbo checkpoints: https://github.com/ZFTurbo/Music-Source-Separation-Training/issues/245
+- AudioShake SDK: https://developer.audioshake.ai/sdk/overview.md; djay Pro:
+  https://audioshake.ai/post/algoriddim-djaypro-neural-mix
+- Music AI Embedded SDK: https://music.ai/embedded-ai/
+- zplane licensing: https://licensing.zplane.de/
+- Gaudio Lab GSEP: https://www.gaudiolab.com/technology/source-separation
+- Acon Digital Remix licenses HANCE:
+  https://www.production-expert.com/production-expert-1/acon-digital-remix-real-time-ai-stem-separation-plugin-released
+- LALAL.AI on your own server:
+  https://www.lalal.ai/blog/lalal-ai-for-business-deploy-our-solution-to-your-server-or-aws/
+- MoisesDB: https://github.com/moises-ai/moises-db; MedleyDB:
+  https://zenodo.org/records/1649325; Slakh2100: https://zenodo.org/records/4599666
+  and https://github.com/ethman/slakh_generation_scripts; Lakh MIDI:
+  https://colinraffel.com/projects/lmd/
+- VocalSet: https://zenodo.org/records/1442513; Dagstuhl ChoirSet:
+  https://zenodo.org/records/4607766; ccMixter licence counts:
+  https://ccmixter.org/api/query?f=count&tags=acappella
+- Shutterstock data licensing: https://www.shutterstock.com/data-licensing/audio;
+  AudioSparx: https://www.audiosparx.com/sa/about/license-for-generative-AI-training.cfm
+- Splice Terms of Use (II 3.1.1.3(h), updated 2026-07-24): https://splice.com/terms
+- Native Instruments EULA (2026-07-01):
+  https://www.native-instruments.com/en/company/legal-information/end-user-license-agreement/
+- Loopmasters licence, clause 6 (as reported; not read first-hand):
+  https://help.loopmasters.com/hc/en-us/articles/27012699080348
+- Works made for hire (Copyright Office Circular 30): https://www.copyright.gov/circs/circ30.pdf
+- DJ.Studio models: https://dj.studio/de/stem-separation; FL Studio (user
+  reports): https://forum.image-line.com/viewtopic.php?t=319759
+- LM Studio terms: https://lmstudio.ai/app-terms
+- Henderson and Lemley, "The Mirage of Artificial Intelligence Terms of Use
+  Restrictions" (2025): https://law.stanford.edu/wp-content/uploads/2025/03/ssrn-5049562.pdf
+- *MGM v. Grokster* (2005): https://www.law.cornell.edu/supct/html/04-480.ZO.html
+- *Cox v. Sony* (2026):
+  https://www.faegredrinker.com/en/insights/publications/2026/3/supreme-court-decides-cox-communications-v-sony-music-entertainment
+- Meta's DMCA notice against llama-dl (2023):
+  https://github.com/github/dmca/blob/master/2023/03/2023-03-21-meta.md
