@@ -2,7 +2,7 @@
 Phase 1 checks and, where we own reference stems, SDR.
 
     python tools/compare.py RESULTS_DIR SONG [SONG ...] \
-        [--runs demucs:fast demucs:best sam-audio:fast sam-audio:best]
+        [--runs demucs:fast demucs:best]
 
 A SONG is an audio file, or a folder with mix.wav and stems/{vocals,drums,bass,other}.wav
 (as tools/make_test_song.py writes). Each run goes through the Rust
@@ -51,7 +51,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("results")
     ap.add_argument("songs", nargs="+")
-    ap.add_argument("--runs", nargs="+", default=["demucs:fast", "demucs:best", "sam-audio:fast", "sam-audio:best"])
+    ap.add_argument("--runs", nargs="+", default=["demucs:fast", "demucs:best"])
     a = ap.parse_args()
     if not os.path.exists(ANALYZE):
         sys.exit("build it first: cargo build --release -p tunekore-analyzer --example analyze")

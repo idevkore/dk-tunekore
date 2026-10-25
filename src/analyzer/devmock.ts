@@ -26,7 +26,6 @@ export function installMocks() {
         case "analyzer_backends":
           return [
             { id: "demucs", name: "Demucs (htdemucs)", modes: ["fast", "best"], modeLabels: { fast: "htdemucs, one pass", best: "htdemucs_ft, one model per stem" }, available: true, reason: null },
-            { id: "sam-audio", name: "SAM Audio (Meta)", modes: ["fast", "best"], modeLabels: { fast: "sam-audio-small", best: "sam-audio-base" }, available: false, reason: "log in to Hugging Face first: stems/.venv/bin/hf auth login" },
           ];
         case "plugin:dialog|open":
           return (args as { options?: { directory?: boolean } })?.options?.directory ? "/Users/test/Stems" : "/Users/test/Music/Quantum Love.mp3";

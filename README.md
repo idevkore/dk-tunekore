@@ -16,8 +16,9 @@ macOS, and compiles and links them on Windows and Linux, for every push to
 
 Status: Phase 1, the Analyzer. Open a song, split it into vocals, drums, bass
 and other, then play, solo, mute and export the stems. Separation runs on this
-Mac in a separate worker process, with Demucs or Meta's SAM Audio; neither
-model ships yet (see `docs/PLAN.md` section 6).
+Mac in a separate worker process, with Demucs. Its weights are research-only,
+so a model we may ship replaces it before release (see `docs/PLAN.md`
+section 6).
 
 ## Build and run
 
@@ -26,13 +27,12 @@ Analyzer's stem worker, [uv](https://docs.astral.sh/uv/).
 
 ```bash
 npm install
-(cd stems && uv sync --extra sam)
+(cd stems && uv sync)
 npm run tauri dev
 ```
 
-Open the Analyzer from the main window. Model weights download to this Mac on
-first use; SAM Audio needs a Hugging Face login first
-(`stems/.venv/bin/hf auth login`). See [`stems/README.md`](stems/README.md).
+Open the Analyzer from the main window. Demucs's weights (about 160 MB)
+download to this Mac on first use. See [`stems/README.md`](stems/README.md).
 
 `npm run tauri build -- --bundles app` makes `tuneKore.app` in
 `target/release/bundle/macos/`. The repo is one Cargo workspace: the audio

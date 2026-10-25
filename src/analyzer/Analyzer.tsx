@@ -286,7 +286,7 @@ export default function Analyzer() {
                 <span className="card-text">
                   <span className="card-title">{b.name}</span>
                   <span className="card-note">
-                    {b.available ? (b.id === "demucs" ? "Research-only weights: for testing on this Mac." : "Meta's model, under the SAM License.") : b.reason}
+                    {b.available ? (b.id === "demucs" ? "Research-only weights: for testing on this Mac." : "") : b.reason}
                   </span>
                 </span>
               </label>

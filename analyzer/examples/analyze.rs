@@ -23,7 +23,7 @@ fn main() {
             _ => song_path = Some(PathBuf::from(a)),
         }
     }
-    let song_path = song_path.expect("usage: analyze <song> [--backend demucs|sam-audio] [--mode fast|best] [--out dir]");
+    let song_path = song_path.expect("usage: analyze <song> [--backend demucs] [--mode fast|best] [--out dir]");
 
     let t0 = Instant::now();
     let song = decode_file(&song_path).unwrap_or_else(|e| fail(&e));

@@ -14,9 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from tunekore_stems.mixing import mask_from_mix  # noqa: E402
 from tunekore_stems.rawio import read_planar, read_wav, write_planar, write_wav16  # noqa: E402
-from tunekore_stems.sam_audio_backend import chunk_starts, fade_weights  # noqa: E402
 from tunekore_stems.separator import STEMS, conform  # noqa: E402
 
 
@@ -31,7 +29,7 @@ def test_lists_backends():
     code, events, _ = worker("--list")
     assert code == 0 and len(events) == 1
     ids = {b["id"]: b for b in events[0]["backends"]}
-    assert {"demucs", "sam-audio", "test-split"} <= set(ids)
+    assert {"demucs", "test-split"} <= set(ids)
     assert ids["test-split"]["available"] is True
     assert ids["demucs"]["modes"] == ["fast", "best"]
 
@@ -64,27 +62,6 @@ def test_conform_fixes_shape_and_rejects_nan():
         conform(stems, 2, 100)
 
 
-def test_masks_cut_stems_that_sum_to_the_mix():
-    rng = np.random.default_rng(1)
-    n = 48_000
-    parts = {s: (rng.standard_normal((2, n)) * (i + 1) * 0.05).astype(np.float32) for i, s in enumerate(STEMS)}
-    mix = sum(parts.values())
-    estimates = {k: v.mean(0) for k, v in parts.items() if k != "other"}  # mono, like SAM Audio's
-    out = mask_from_mix(mix, estimates)
-    assert set(out) == set(STEMS)
-    assert all(v.shape == (2, n) for v in out.values())
-    err = mix - sum(out.values())
-    assert 10 * np.log10((mix ** 2).sum() / (err ** 2).sum()) > 80
-
-
-def test_chunks_cover_the_song():
-    starts = chunk_starts(100, 30, 5)
-    assert starts[0] == 0 and starts[-1] == 70
-    covered = np.zeros(100)
-    for i, s in enumerate(starts):
-        covered[s:s + 30] += fade_weights(30, 5, i == 0, i == len(starts) - 1).numpy()
-    assert covered.min() > 0
-    assert chunk_starts(20, 30, 5) == [0]
 
 
 def test_wav_round_trip(tmp_path):

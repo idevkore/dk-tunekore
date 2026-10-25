@@ -37,7 +37,7 @@ impl WorkerConfig {
         }
         if !python.exists() {
             return Err(format!(
-                "the stem worker isn't set up yet. In a terminal: cd {} && uv sync --extra sam",
+                "the stem worker isn't set up yet. In a terminal: cd {} && uv sync",
                 dir.display()
             ));
         }

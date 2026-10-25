@@ -25,7 +25,7 @@ from musiKore to tuneKore; the logo is "TUNE K›".
 | Audio files | Symphonia (MPL-2.0, used unmodified) for WAV, AIFF, FLAC, MP3 and Ogg, plus the OS decoders for AAC/M4A | Pure Rust, and no LGPL dependency to manage |
 | Time-stretch | Signalsmith Stretch (MIT), through a thin binding to its C++ header | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
 | Resampling | rubato (MIT/Apache) | Pure Rust. r8brain-free (MIT, C++) is the backup. |
-| Stems | A separate worker process behind a `Separator` interface. Phase 1: Python and PyTorch on Metal, run from the repo on Nate's Mac (`stems/`). To ship: the chosen model in ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML, or a vendor's SDK | Both candidate models are PyTorch research code, and SAM Audio (a flow-matching transformer) doesn't export to ONNX as it is. Prototyping in PyTorch lets us choose the model first. See section 6. |
+| Stems | A separate worker process behind a `Separator` interface. Phase 1: Python and PyTorch on Metal, run from the repo on Nate's Mac (`stems/`). To ship: the chosen model in ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML, or a vendor's SDK | The models we test are PyTorch research code (Demucs; SAM Audio, tested and dropped). Prototyping in PyTorch lets us choose the shipping model first, then run it natively. See section 6. |
 | Project files | Our own format: a `.mkore` folder with `project.json`, `audio/` and `plugins/` | We read Ableton `.als` files later, if ever; we never copy the format. |
 
 ### Why not JUCE
@@ -325,15 +325,28 @@ touching the Analyzer.
 - **Phase 1 builds on Demucs (htdemucs)**, running on Nate's Mac only. The
   weights are downloaded on that machine and never committed, bundled or
   shipped.
-- **Phase 1 also tests SAM Audio** against Demucs (details below). If its
-  quality and speed hold up on Nate's Mac, it could ship without a paid
-  vendor.
+- **Phase 1 also tested SAM Audio** against Demucs (details below), as the
+  one open model whose licence allows shipping.
 - **Before tuneKore ships to anyone,** a model we have the right to ship
-  replaces Demucs behind `Separator`: SAM Audio if it passes, otherwise a
-  licensed vendor model. The vendors are being contacted now, in parallel,
-  since deals like this take weeks.
+  replaces Demucs behind `Separator`: a licensed vendor model, or our own
+  trained on audio we have the rights to. The vendors are being contacted
+  now, in parallel, since deals like this take weeks.
 
-**SAM Audio (candidate).** Meta's general sound separator, released December
+**Decision (Nate, 2026-10-24, after the Phase 1 test): SAM Audio is out.**
+Demucs separated better where it counts (drums and bass) and 45 to 75 times
+faster on this Mac (results below). The SAM Audio backend and its packages
+are removed from the worker; the test results stay here as the record.
+
+Bundling Demucs instead doesn't solve shipping. Its code is MIT, but its
+trained weights are for research only, and that holds however they are
+packaged: inside a PyInstaller executable, or converted to ONNX and run
+natively. What a native build would change is the runtime: an HT-Demucs
+model in ONNX Runtime with Core ML, with no Python on the user's machine,
+which is the plan in section 1 for whichever model ships. Demucs's MIT code
+and architecture are also the starting point for training our own model
+(the second path above), whose weights would be ours to ship.
+
+**SAM Audio (tested in Phase 1, removed).** Meta's general sound separator, released December
 2025 (github.com/facebookresearch/sam-audio). It isolates whatever a prompt
 names ("vocals", "drums"), with small, base and large checkpoints. Of every
 open separation model checked on 2026-10-24, it is the only one whose weights
@@ -422,15 +435,14 @@ doesn't fit in 16 GB.
   much worse (8–9 dB against 17–21 dB). Base scores below small on both
   songs.
 
-**Recommendation.** SAM Audio doesn't replace Demucs as Phase 1 tested it:
-in Fast mode it's 45 to 75 times slower than Demucs on this Mac, and weaker on drums and bass. What it
-does well (pulling out a voice, or any sound a prompt names) could still make
-it worth shipping for one job, such as a "vocals only" or "find this sound"
-tool, run in the background. For the four-stem split, plan on a licensed
-model (AudioShake, Music AI) unless a test on real multitracks changes the
-picture. Shipping SAM Audio at all still needs Nate's licence exception (see
-`CLAUDE.md`) and a confirmation of `perception-models`'s licence (its README
-says Apache-2.0, its package metadata says FAIR Noncommercial).
+**Outcome.** SAM Audio doesn't replace Demucs: in Fast mode it's 45 to 75
+times slower on this Mac, and weaker on drums and bass. Nate removed it on
+2026-10-24. Its one strength here, pulling out a voice or any sound a prompt
+names, could be worth a second look for a "find this sound" tool later; that
+would also need Nate's licence exception (see `CLAUDE.md`) and a confirmation
+of `perception-models`'s licence (Apache-2.0 per its README, FAIR
+Noncommercial per its package metadata). For the four-stem split, plan on a
+licensed model (AudioShake, Music AI) or our own.
 
 **The other open models checked**, none of which can ship:
 
@@ -443,7 +455,7 @@ says Apache-2.0, its package metadata says FAIR Noncommercial).
 - **Demucs re-uploads tagged "MIT":** Hugging Face license tags are written by
   the uploader, and Demucs's author says its weights are for research only.
 
-**Vendors** (the fallback if SAM Audio falls short):
+**Vendors** (the shipping path, unless we train our own):
 
 | Vendor | What they offer | Contact | Status |
 | --- | --- | --- | --- |
@@ -463,8 +475,8 @@ What to ask both:
   format), and which hardware accelerators does it use (Core ML, Metal,
   DirectML, CUDA)?
 
-Update the table as replies come in. The shipping model, SAM Audio or a
-vendor's, is chosen by the end of Phase 1, so it can be in place before
+Update the table as replies come in. The shipping model, a vendor's or our
+own, is chosen by the end of Phase 1, so it can be in place before
 Phase 8 (Windows) at the latest.
 
 ## 7. Cross-platform path

@@ -17,50 +17,16 @@ dependencies = [
     "demucs==4.1.0",
 ]
 
-[project.optional-dependencies]
-# SAM Audio and what its code imports on our path (text prompts, no video).
-sam = [
-    "sam-audio",
-    "dacvae",
-    "perception-models",
-    "torchvision==0.29.1",
-    "torchdiffeq==0.2.5",
-    "transformers==5.20.2",
-    "timm==1.0.30",
-]
-
 [dependency-groups]
-dev = ["pytest==9.1.1", "hf==2.3.0"]
+# scipy: the test-song generator's filters (tools/make_test_song.py).
+dev = ["pytest==9.1.1", "scipy==1.18.1"]
 
 [tool.uv]
 package = false
 
-[tool.uv.sources]
-sam-audio = { git = "https://github.com/facebookresearch/sam-audio.git", rev = "bb4c6999d2677c7402360e426afc01ddfad6dce0" }
-dacvae = { git = "https://github.com/facebookresearch/dacvae.git", rev = "414c20785fc3a28373073ea8ef7a1316eeeaca6e" }
-perception-models = { git = "https://github.com/facebookresearch/perception_models.git", rev = "3e352cca660658d4b5c90f42a7808b11469e4c66" }
-
-# These packages list far more than the code we run imports. Their real lists
-# pull in LGPL audio I/O (lameenc, libsndfile through soundfile), FFmpeg
-# (torchcodec), a non-commercial model (ImageBind) and training tools. We
-# install them with only what inference needs; `tunekore_stems/shims.py`
-# stands in for the three modules they import but never call on our path.
+# Demucs lists more than inference needs: lameenc (LAME, LGPL) for MP3
+# output, and training tools. We install it with only what inference imports.
 [[tool.uv.dependency-metadata]]
 name = "demucs"
 version = "4.1.0"
 requires-dist = ["einops", "huggingface-hub", "julius>=0.2.3", "pyyaml", "safetensors", "torch>=2.1", "tqdm"]
-
-[[tool.uv.dependency-metadata]]
-name = "sam-audio"
-version = "0.1.0"
-requires-dist = ["dacvae", "perception-models", "einops", "numpy", "torch", "torchvision", "torchdiffeq", "transformers>=4.54.0", "huggingface-hub"]
-
-[[tool.uv.dependency-metadata]]
-name = "dacvae"
-version = "1.0.0"
-requires-dist = ["einops", "numpy", "torch", "tqdm", "huggingface-hub"]
-
-[[tool.uv.dependency-metadata]]
-name = "perception-models"
-version = "1.0.0"
-requires-dist = ["einops", "numpy", "torch", "torchvision", "timm", "transformers", "huggingface-hub", "safetensors"]

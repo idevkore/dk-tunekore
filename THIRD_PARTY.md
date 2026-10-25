@@ -66,7 +66,7 @@ and which never reach the app.
 ## Stem worker (Python, on Nate's Mac only, not shipped)
 
 `stems/` is the Analyzer's worker process for Phase 1. It runs from this
-checkout's virtualenv (`uv sync --extra sam`) and is not part of the app
+checkout's virtualenv (`uv sync`) and is not part of the app
 bundle. Before tuneKore ships, the separator it ships with replaces it (see
 `docs/PLAN.md` section 6), so these are recorded for the record and for that
 decision, not as shipped code. Versions are pinned in `stems/pyproject.toml`
@@ -74,37 +74,28 @@ and locked in `stems/uv.lock` (Python 3.13).
 
 | Package | Version | Licence | Use |
 | --- | --- | --- | --- |
-| [torch](https://github.com/pytorch/pytorch) | 2.14.1 | Apache-2.0 AND BSD (per its metadata) | Runs both models, on Metal (MPS) |
+| [torch](https://github.com/pytorch/pytorch) | 2.14.1 | Apache-2.0 AND BSD (per its metadata) | Runs Demucs on Metal (MPS) |
 | [numpy](https://numpy.org) | 2.5.4 | BSD-3-Clause | Audio buffers |
 | [demucs](https://github.com/facebookresearch/demucs) | 4.1.0 | MIT (code) | The Demucs separator |
 | [julius](https://github.com/adefossez/julius) | 0.2.8 | MIT | Resampling in the worker |
-| [einops](https://github.com/arogozhnikov/einops) | 0.8.2 | MIT | Used by both models |
-| [huggingface-hub](https://github.com/huggingface/huggingface_hub) | 2.3.0 | Apache-2.0 | Downloads weights to this Mac's cache; reads Nate's login |
+| [einops](https://github.com/arogozhnikov/einops) | 0.8.2 | MIT | Used by Demucs |
+| [huggingface-hub](https://github.com/huggingface/huggingface_hub) | 2.3.0 | Apache-2.0 | Downloads Demucs's weights to this Mac's cache |
 | [safetensors](https://github.com/huggingface/safetensors) | 0.8.0 | Apache-2.0 | Demucs weights format |
 | [pyyaml](https://github.com/yaml/pyyaml) | 6.0.3 | MIT | Demucs model configs |
 | [tqdm](https://github.com/tqdm/tqdm) | 4.70.1 | MPL-2.0 AND MIT (unmodified) | Imported by Demucs |
-| [sam-audio](https://github.com/facebookresearch/sam-audio) | git `bb4c699` | SAM License (Meta) | The SAM Audio separator |
-| [dacvae](https://github.com/facebookresearch/dacvae) | git `414c207` | Apache-2.0 | SAM Audio's audio codec |
-| [perception-models](https://github.com/facebookresearch/perception_models) | git `3e352cc` | Apache-2.0 per its README; its `setup.py` says "FAIR Noncommercial Research License". **Confirm with Meta before shipping SAM Audio.** | Encoder modules SAM Audio imports |
-| [transformers](https://github.com/huggingface/transformers) | 5.20.2 | Apache-2.0 | SAM Audio's T5 text encoder |
-| [torchvision](https://github.com/pytorch/vision) | 0.29.1 | BSD-3-Clause | Imported by SAM Audio |
-| [torchdiffeq](https://github.com/rtqichen/torchdiffeq) | 0.2.5 | MIT | SAM Audio's ODE solver |
-| [timm](https://github.com/huggingface/pytorch-image-models) | 1.0.30 | Apache-2.0 | Imported by perception-models |
-| [scipy](https://scipy.org) | 1.18.1 | BSD-3-Clause | Pulled in by the above; the test-song generator's filters |
-| [hf](https://github.com/huggingface/huggingface_hub) | 2.3.0 | Apache-2.0 | Dev only: `hf auth login` |
+| [scipy](https://scipy.org) | 1.18.1 | BSD-3-Clause | Dev only: the test-song generator's filters |
 | [pytest](https://pytest.org) | 9.1.1 | MIT | Dev only: tests |
 
-49 packages in the environment in all; the rest are their dependencies, all
-MIT, BSD, Apache-2.0, ISC, PSF-2.0, MIT-CMU (pillow) or MPL-2.0 (tqdm).
+32 packages in the environment in all; the rest are their dependencies, all
+MIT, BSD, Apache-2.0 or PSF-2.0, plus tqdm (MPL-2.0 AND MIT, unmodified).
 
-**Left out on purpose.** `stems/pyproject.toml` overrides the declared
-dependencies of demucs, sam-audio, dacvae and perception-models so these are
-never installed: `lameenc` (LAME, LGPL), `descript-audiotools` (brings
-`soundfile`, i.e. libsndfile, LGPL), `torchcodec` (FFmpeg), `torchaudio`,
-`imagebind` (CC BY-NC-SA 4.0, a non-commercial model used only for video
-re-ranking), `laion-clap`, `audiobox_aesthetics` and `xformers`.
-`stems/tunekore_stems/shims.py` stands in for the four of them the code imports
-without calling on our path; anything that really calls one fails loudly.
+**Left out on purpose.** `stems/pyproject.toml` overrides Demucs's declared
+dependencies so `lameenc` (LAME, LGPL; Demucs uses it only to write MP3) and
+its training tools are never installed. The worker reads and writes raw
+float32, so it needs no audio codec library at all.
+
+SAM Audio (Meta) was tried in Phase 1 and removed on 2026-10-24; see
+`docs/PLAN.md` section 6. Its packages are gone from the environment.
 
 **Model weights**, downloaded to this Mac's Hugging Face cache
 (`~/.cache/huggingface`), never committed, bundled or shipped:
@@ -112,8 +103,6 @@ without calling on our path; anything that really calls one fails loudly.
 | Weights | Licence | Status |
 | --- | --- | --- |
 | Demucs `htdemucs`, `htdemucs_ft` (Hugging Face `adefossez/HTDemucs`, `adefossez/HTDemucs-ft`) | The author: "provided only for scientific purposes" | Prototyping on Nate's Mac only. Can't ship. |
-| SAM Audio `facebook/sam-audio-small`, `-base` (gated) | SAM License, 2025-11-19 | Shippable with the licence text, if Nate makes the exception `CLAUDE.md` needs |
-| `t5-base` (SAM Audio's text encoder, from Hugging Face) | Apache-2.0 | Fine |
 
 ## System libraries, not bundled
 

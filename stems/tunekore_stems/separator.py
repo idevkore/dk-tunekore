@@ -81,9 +81,8 @@ def conform(stems: dict[str, np.ndarray], channels: int, frames: int) -> dict[st
 
 def backends() -> dict[str, type[Separator]]:
     from .demucs_backend import DemucsSeparator
-    from .sam_audio_backend import SamAudioSeparator
 
-    classes: list[type[Separator]] = [DemucsSeparator, SamAudioSeparator]
+    classes: list[type[Separator]] = [DemucsSeparator]
     if os.environ.get("TUNEKORE_STEMS_TEST") == "1":
         from .test_backend import TestSeparator
 
