@@ -13,10 +13,12 @@ interface Props {
   disabled: boolean;
   onClose: () => void;
   onDone: (path: string) => void;
+  /** Renders the pattern onto the first empty pad. */
+  onBounce: (loops: number) => Promise<void>;
   onError: (e: unknown) => void;
 }
 
-export default function ExportDialog({ name, steps, tempo, disabled, onClose, onDone, onError }: Props) {
+export default function ExportDialog({ name, steps, tempo, disabled, onClose, onDone, onBounce, onError }: Props) {
   const [loops, setLoops] = useState(4);
   const [busy, setBusy] = useState(false);
   const seconds = (loops * steps * 15) / tempo;
@@ -41,7 +43,7 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
   }
 
   return (
-    <Dialog title="Export pattern" onClose={onClose}>
+    <Dialog title="Export or bounce" onClose={onClose}>
       <fieldset className="field">
         <legend>Repeat the pattern</legend>
         <div className="seg" role="radiogroup">
@@ -55,9 +57,23 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
       </fieldset>
       <p className="dim small">
         {seconds.toFixed(1)} s of audio, 48 kHz WAV. It ends exactly on the last step, so it loops cleanly.
+        Bounce puts it on the next empty pad, to chop, pitch or reverse like any sample.
       </p>
       <div className="dialog-foot">
         <button className="btn small" onClick={onClose}>Cancel</button>
+        <button
+          className="btn small"
+          disabled={busy || disabled}
+          onClick={() => {
+            setBusy(true);
+            void onBounce(loops).finally(() => {
+              setBusy(false);
+              onClose();
+            });
+          }}
+        >
+          Bounce to a pad
+        </button>
         <button className="btn small primary" onClick={() => void run()} disabled={busy || disabled} autoFocus>
           {busy ? "Exporting…" : "Export WAV…"}
         </button>

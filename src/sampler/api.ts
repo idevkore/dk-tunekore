@@ -48,6 +48,8 @@ export interface SamplerView {
   projectName: string;
   projectPath: string | null;
   dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
 }
 
 export interface Tick {
@@ -87,6 +89,9 @@ export const setTransport = (tempo: number, swing: number, steps: number) =>
 export const play = (playing: boolean) => invoke<void>("sampler_play", { playing });
 export const trigger = (pad: number) => invoke<void>("sampler_trigger", { pad });
 export const release = (pad: number) => invoke<void>("sampler_release", { pad });
+export const undo = () => invoke<SamplerView>("sampler_undo");
+export const redo = () => invoke<SamplerView>("sampler_redo");
+export const bounce = (loops: number) => invoke<{ pad: number; path: string }>("sampler_bounce", { loops });
 export const exportPattern = (path: string, loops: number) => invoke<Exported>("sampler_export", { path, loops });
 
 export const scanLibrary = (dir: string) => invoke<LibraryScan>("library_scan", { dir });
@@ -106,6 +111,10 @@ export const onTick = (handler: (t: Tick) => void): Promise<UnlistenFn> =>
 /** The Analyzer wrote samples into `folder` and put them on pads. */
 export const onChopped = (handler: (folder: string) => void): Promise<UnlistenFn> =>
   listen<string>("sampler:chopped", (e) => handler(e.payload));
+
+/** The window is closing or the app quitting with unsaved changes: ask, then call `quitApp`. */
+export const onConfirmQuit = (handler: () => void): Promise<UnlistenFn> => listen("app:confirm-quit", () => handler());
+export const quitApp = () => invoke<void>("app_quit");
 
 export const currentOutput = () => invoke<string | null | undefined>("current_output");
 export const setOutput = (deviceId: string | null) => invoke<void>("set_output", { deviceId });

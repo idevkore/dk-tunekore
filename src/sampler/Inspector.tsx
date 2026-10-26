@@ -1,5 +1,5 @@
 // The selected pad's settings: trim, level, pan, pitch, gate, reverse, mute.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
 import { AUDIO_EXTENSIONS, PAD_KEYS, type PadSettings, type PadView } from "./api";
@@ -10,6 +10,8 @@ interface Props {
   onLoadFile: (path: string) => void;
   onClear: () => void;
   onClearSteps: () => void;
+  /** Plays the pad, to hear a trim. */
+  onAudition: () => void;
 }
 
 const fmtDb = (db: number) => (db <= -60 ? "off" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`);
@@ -17,7 +19,7 @@ const fmtPan = (p: number) => (Math.abs(p) < 0.005 ? "C" : `${Math.round(Math.ab
 const fmtPitch = (st: number) => `${st > 0 ? "+" : ""}${st} st`;
 const fmtTime = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(2)} s`);
 
-export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps }: Props) {
+export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition }: Props) {
   // Local copy so sliders move smoothly; each change is sent as it happens.
   const [s, setS] = useState(pad.settings);
   useEffect(() => setS(pad.settings), [pad.settings, pad.index]);
@@ -73,7 +75,7 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
               {fmtTime(length)} · {pad.channels === 1 ? "mono" : "stereo"} · {(pad.rate / 1000).toFixed(1)} kHz
             </span>
           </div>
-          <Wave className="insp-wave" peaks={pad.peaks} start={s.start} end={s.end} reverse={s.reverse} />
+          <Trim settings={s} peaks={pad.peaks} onChange={change} onDone={onAudition} />
           <Slider label="Start" value={s.start} min={0} max={1} step={0.001} shown={fmtTime(s.start * pad.seconds)} onChange={(v) => change({ start: v })} />
           <Slider label="End" value={s.end} min={0} max={1} step={0.001} shown={fmtTime(s.end * pad.seconds)} onChange={(v) => change({ end: v })} />
           <Slider label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
@@ -98,6 +100,43 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
         </div>
       )}
     </section>
+  );
+}
+
+/** The waveform with start and end handles to drag; a click moves the nearer one. */
+function Trim({ settings: s, peaks, onChange, onDone }: { settings: PadSettings; peaks: number[]; onChange: (p: Partial<PadSettings>) => void; onDone: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const which = useRef<"start" | "end" | null>(null);
+  // Reversed pads draw backwards, so a handle's place on screen flips.
+  const shown = (v: number) => (s.reverse ? 1 - v : v);
+  const at = (clientX: number) => {
+    const r = ref.current!.getBoundingClientRect();
+    return shown(Math.min(1, Math.max(0, (clientX - r.left) / r.width)));
+  };
+  const set = (f: number) => onChange(which.current === "start" ? { start: Math.min(f, s.end - 0.001) } : { end: Math.max(f, s.start + 0.001) });
+  return (
+    <div
+      ref={ref}
+      className="trim"
+      title="Drag the handles to trim; let go to hear it"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const f = at(e.clientX);
+        which.current = Math.abs(f - s.start) <= Math.abs(f - s.end) ? "start" : "end";
+        e.currentTarget.setPointerCapture(e.pointerId);
+        set(f);
+      }}
+      onPointerMove={(e) => which.current && set(at(e.clientX))}
+      onPointerUp={() => {
+        if (which.current) onDone();
+        which.current = null;
+      }}
+    >
+      <Wave className="insp-wave" peaks={peaks} start={s.start} end={s.end} reverse={s.reverse} />
+      <span className="handle" style={{ left: `${shown(s.start) * 100}%` }} aria-hidden="true" />
+      <span className="handle end" style={{ left: `${shown(s.end) * 100}%` }} aria-hidden="true" />
+    </div>
   );
 }
 

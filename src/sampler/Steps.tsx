@@ -2,7 +2,8 @@
 // sixteenth. Click or drag across cells to paint; arrow keys move between
 // cells and Enter or Space toggles one.
 import { useEffect, useRef, useState } from "react";
-import { PAD_KEYS, type PadView } from "./api";
+import { open } from "@tauri-apps/plugin-dialog";
+import { AUDIO_EXTENSIONS, PAD_KEYS, type PadView } from "./api";
 
 interface Props {
   pads: PadView[];
@@ -15,10 +16,33 @@ interface Props {
   onRelease: (pad: number) => void;
   onStep: (pad: number, step: number, on: boolean) => void;
   onMute: (pad: number) => void;
+  /** The pad a drag is over, to highlight the add row when it's the target. */
+  dropTarget: number | null;
+  /** Files chosen with "Add a sound", for the empty pads in order. */
+  onAddFiles: (paths: string[]) => void;
 }
 
-export default function Steps({ pads, steps, current, selected, onSelect, onPress, onRelease, onStep, onMute }: Props) {
+export default function Steps({ pads, steps, current, selected, onSelect, onPress, onRelease, onStep, onMute, dropTarget, onAddFiles }: Props) {
   const rows = pads.filter((p) => p.name);
+  const free = pads.find((p) => !p.name);
+
+  async function choose() {
+    const picked = await open({ multiple: true, title: "Add sounds", filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] }).catch(() => null);
+    const files = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+    if (files.length) onAddFiles(files);
+  }
+
+  // A row that turns into the next pad: click to choose files, or drop a sample on it.
+  const addRow = free && (
+    <div className={`add-row${dropTarget === free.index ? " over" : ""}`} data-pad={free.index}>
+      <button className="add-btn" onClick={() => void choose()}>
+        <span aria-hidden="true">＋</span> Add a sound
+      </button>
+      <span className="dim small">
+        or drag one here from the Library. It goes on pad {free.index + 1} ({PAD_KEYS[free.index].toUpperCase()}).
+      </span>
+    </div>
+  );
   // Painting: the value the first cell got, applied to every cell dragged over.
   const paint = useRef<boolean | null>(null);
   const [focus, setFocus] = useState<[number, number]>([0, 0]);
@@ -34,7 +58,8 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
     return (
       <section className="steps empty-steps" aria-label="Steps">
         <strong>Steps</strong>
-        <span>Put samples on pads, then click here to make a pattern. Press Space to play it.</span>
+        <span>Each sound gets a row of steps here. Click steps to make a pattern, then press Space to play it.</span>
+        {addRow}
       </section>
     );
   }
@@ -136,6 +161,7 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
           </div>
         ))}
       </div>
+      {addRow}
     </section>
   );
 }

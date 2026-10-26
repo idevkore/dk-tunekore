@@ -205,6 +205,11 @@ export default function App() {
       if (document.querySelector("dialog[open]")) return;
       const k = e.key.toLowerCase();
       if (e.metaKey || e.ctrlKey) {
+        if (k === "z" && !typing(e.target)) {
+          e.preventDefault();
+          (e.shiftKey ? api.redo() : api.undo()).then(take).catch(fail);
+          return;
+        }
         const actions: Record<string, () => void> = {
           s: () => void doSave(e.shiftKey),
           o: () => void doOpen(),
@@ -242,7 +247,23 @@ export default function App() {
       window.removeEventListener("keydown", onDown);
       window.removeEventListener("keyup", onUp);
     };
-  }, [togglePlay, press, unpress, doSave, doOpen, doNew]);
+  }, [togglePlay, press, unpress, doSave, doOpen, doNew, take, fail]);
+
+  // Closing the window or quitting with unsaved changes: the Rust side holds it and asks here.
+  useEffect(
+    () =>
+      subscribe(
+        api.onConfirmQuit(() => {
+          void ask("Your changes to this project aren't saved. Quit anyway?", {
+            title: "Unsaved changes",
+            kind: "warning",
+            okLabel: "Quit without saving",
+            cancelLabel: "Cancel",
+          }).then((quit) => { if (quit) void api.quitApp(); });
+        }),
+      ),
+    [],
+  );
 
   // ---- Dragging samples from the Library and pads onto pads ----
 
@@ -350,6 +371,12 @@ export default function App() {
           <button className="btn small" onClick={() => void doNew()} title={`New project (${mod}N)`}>New</button>
           <button className="btn small" onClick={() => void doOpen()} title={`Open a project (${mod}O)`}>Open</button>
           <button className="btn small" onClick={() => void doSave(false)} title={`Save (${mod}S); Save As: ${mod}⇧S`}>Save</button>
+          <button className="btn small icon" onClick={() => void api.undo().then(take).catch(fail)} disabled={!view.canUndo} aria-label="Undo" title={`Undo (${mod}Z)`}>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M5.5 4 2.5 7l3 3M3 7h6.5a3.5 3.5 0 0 1 0 7H7" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+          <button className="btn small icon" onClick={() => void api.redo().then(take).catch(fail)} disabled={!view.canRedo} aria-label="Redo" title={`Redo (${mod}⇧Z)`}>
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M10.5 4l3 3-3 3M13 7H6.5a3.5 3.5 0 0 0 0 7H9" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
         </div>
 
         <div className="transport" role="group" aria-label="Transport">
@@ -394,7 +421,7 @@ export default function App() {
         </div>
 
         <div className="grow" />
-        <button className="btn small" onClick={() => setExportOpen(true)} disabled={!hasPattern} title={`Export the pattern as WAV (${mod}E)`}>Export</button>
+        <button className="btn small" onClick={() => setExportOpen(true)} disabled={!hasPattern} title={`Export the pattern as WAV, or bounce it onto a pad (${mod}E)`}>Export</button>
         <button className="btn small" onClick={() => openAnalyzer().catch(fail)} title="Split a song into stems, then send them to pads">Analyzer</button>
         <button className="btn small icon" onClick={() => setAudioOpen(true)} aria-label="Audio settings" title="Audio settings">
           <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2zM11.5 5.5a3.5 3.5 0 0 1 0 5M13 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
@@ -432,6 +459,10 @@ export default function App() {
               onLoadFile={(f) => loadSample(selected, f)}
               onClear={() => void api.clearPad(selected).then(take).catch(fail)}
               onClearSteps={() => void api.clearSteps(selected).then(take).catch(fail)}
+              onAudition={() => {
+                press(selected);
+                setTimeout(() => unpress(selected), 300);
+              }}
             />
           </div>
           <Steps
@@ -444,6 +475,12 @@ export default function App() {
             onRelease={unpress}
             onStep={(p, s, on) => void api.setStep(p, s, on).then(take).catch(fail)}
             onMute={(p) => void api.setSettings(p, { ...view.pads[p].settings, mute: !view.pads[p].settings.mute }).then(take).catch(fail)}
+            dropTarget={dropPad}
+            onAddFiles={(files) => {
+              const free = view.pads.filter((x) => !x.name).map((x) => x.index);
+              files.slice(0, free.length).forEach((f, i) => loadSample(free[i], f));
+              if (files.length > free.length) say(`${files.length - free.length} files didn't fit on the pads.`, true);
+            }}
           />
         </div>
       </main>
@@ -475,6 +512,15 @@ export default function App() {
           tempo={view.tempo}
           onClose={() => setExportOpen(false)}
           onDone={(p) => say(`Exported ${p}.`)}
+          onBounce={(loops) =>
+            api
+              .bounce(loops)
+              .then((b) => {
+                setSelected(b.pad);
+                say(`Bounced the pattern onto pad ${b.pad + 1}.`);
+              })
+              .catch(fail)
+          }
           onError={fail}
           disabled={!hasPattern}
         />

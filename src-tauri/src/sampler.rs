@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
@@ -26,6 +26,10 @@ const PAD_PEAKS: usize = 160;
 const EXPORT_RATE: u32 = 48_000;
 /// The Library lists at most this many files from one folder.
 const LIBRARY_LIMIT: usize = 20_000;
+/// Undo steps kept.
+const UNDO_LIMIT: usize = 200;
+/// Edits of the same kind this close together undo as one (a slider drag, painting steps).
+const MERGE_WINDOW: Duration = Duration::from_millis(700);
 /// Decoded files kept in memory, so previews and reloads are instant.
 const CACHE_FILES: usize = 48;
 /// Project files end in `.tunek`.
@@ -84,7 +88,7 @@ struct Sample {
     peaks: Vec<f32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Pad {
     sample: Option<Arc<Sample>>,
     /// A sample the project names but that isn't on disk.
@@ -100,11 +104,61 @@ struct Doc {
     steps: usize,
     path: Option<PathBuf>,
     dirty: bool,
+    history: History,
 }
 
 impl Default for Doc {
     fn default() -> Self {
-        Self { pads: (0..PADS).map(|_| Pad::default()).collect(), tempo: 120.0, swing: 0.0, steps: 16, path: None, dirty: false }
+        Self {
+            pads: (0..PADS).map(|_| Pad::default()).collect(),
+            tempo: 120.0,
+            swing: 0.0,
+            steps: 16,
+            path: None,
+            dirty: false,
+            history: History::default(),
+        }
+    }
+}
+
+/// The parts of the document that undo restores. Samples are shared, so a
+/// snapshot costs a few hundred bytes.
+#[derive(Clone)]
+struct Snapshot {
+    pads: Vec<Pad>,
+    tempo: f32,
+    swing: f32,
+    steps: usize,
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// The kind and time of the last edit, to merge a run of them into one step.
+    last: Option<(String, Instant)>,
+}
+
+impl Doc {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { pads: self.pads.clone(), tempo: self.tempo, swing: self.swing, steps: self.steps }
+    }
+
+    /// Records `before` as an undo step for an edit of kind `key`, unless it
+    /// continues a run of the same kind.
+    fn checkpoint(&mut self, key: &str, before: Snapshot) {
+        let now = Instant::now();
+        let merge = matches!(&self.history.last, Some((k, t)) if k == key && now.duration_since(*t) < MERGE_WINDOW);
+        self.history.last = Some((key.to_string(), now));
+        self.dirty = true;
+        if merge {
+            return;
+        }
+        self.history.undo.push(before);
+        if self.history.undo.len() > UNDO_LIMIT {
+            self.history.undo.remove(0);
+        }
+        self.history.redo.clear();
     }
 }
 
@@ -137,6 +191,36 @@ impl SamplerState {
         self.handle.set_tempo(doc.tempo);
         self.handle.set_swing(doc.swing);
         self.handle.set_steps(doc.steps);
+    }
+
+    /// Whether the document has changes that aren't saved.
+    pub fn is_dirty(&self) -> bool {
+        self.doc.lock().unwrap().dirty
+    }
+
+    /// Puts `snap` back, reloading only the pads whose sample changed.
+    fn restore(&self, app: &AppHandle, doc: &mut Doc, snap: Snapshot) -> Result<(), String> {
+        let mut a = audio(app).lock().unwrap();
+        for (pad, (now, then)) in doc.pads.iter().zip(&snap.pads).enumerate() {
+            let same = match (&now.sample, &then.sample) {
+                (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                self.handle.cut(pad);
+                a.engine.load_sample(pad, then.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
+            }
+        }
+        drop(a);
+        doc.pads = snap.pads;
+        doc.tempo = snap.tempo;
+        doc.swing = snap.swing;
+        doc.steps = snap.steps;
+        doc.dirty = true;
+        doc.history.last = None;
+        self.apply_all(doc);
+        Ok(())
     }
 
     fn decode(&self, path: &Path) -> Result<Arc<Decoded>, String> {
@@ -173,6 +257,8 @@ pub struct View {
     project_name: String,
     project_path: Option<String>,
     dirty: bool,
+    can_undo: bool,
+    can_redo: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -220,6 +306,8 @@ fn view(doc: &Doc) -> View {
         project_name: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
         project_path: doc.path.as_ref().map(|p| p.display().to_string()),
         dirty: doc.dirty,
+        can_undo: !doc.history.undo.is_empty(),
+        can_redo: !doc.history.redo.is_empty(),
     }
 }
 
@@ -238,12 +326,14 @@ fn publish(app: &AppHandle, doc: &Doc) -> View {
     v
 }
 
-/// Runs `f` on the document, marks it changed, and publishes it.
-fn edit(app: &AppHandle, f: impl FnOnce(&SamplerState, &mut Doc) -> Result<(), String>) -> Result<View, String> {
+/// Runs `f` on the document as an undoable edit of kind `key`, marks it
+/// changed, and publishes it.
+fn edit(app: &AppHandle, key: &str, f: impl FnOnce(&SamplerState, &mut Doc) -> Result<(), String>) -> Result<View, String> {
     let s = state(app);
     let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
     f(&s, &mut doc)?;
-    doc.dirty = true;
+    doc.checkpoint(key, before);
     Ok(publish(app, &doc))
 }
 
@@ -265,6 +355,7 @@ pub fn load_pad(app: &AppHandle, pad: usize, path: &Path, settings: PadSettings)
         peaks: peaks(&d.data, PAD_PEAKS),
     });
     let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
     s.handle.cut(pad);
     audio(app).lock().unwrap().engine.load_sample(pad, Some((d.rate, d.data.clone())))?;
     let p = &mut doc.pads[pad];
@@ -272,7 +363,8 @@ pub fn load_pad(app: &AppHandle, pad: usize, path: &Path, settings: PadSettings)
     p.missing = None;
     p.settings = settings;
     s.apply_pad(&doc, pad);
-    doc.dirty = true;
+    // A run of loads (a Finder drop, a chop) undoes as one step.
+    doc.checkpoint("load", before);
     Ok(())
 }
 
@@ -311,7 +403,7 @@ pub async fn sampler_load(pad: usize, path: String, app: AppHandle) -> Result<Vi
 #[tauri::command]
 pub fn sampler_clear(pad: usize, app: AppHandle) -> Result<View, String> {
     check_pad(pad)?;
-    edit(&app, |s, doc| {
+    edit(&app, &format!("clear:{pad}"), |s, doc| {
         s.handle.cut(pad);
         audio(&app).lock().unwrap().engine.load_sample(pad, None)?;
         doc.pads[pad] = Pad::default();
@@ -328,7 +420,7 @@ pub fn sampler_move(from: usize, to: usize, app: AppHandle) -> Result<View, Stri
     if from == to {
         return Ok(sampler_state(app));
     }
-    edit(&app, |s, doc| {
+    edit(&app, &format!("move:{from}:{to}"), |s, doc| {
         doc.pads.swap(from, to);
         let mut a = audio(&app).lock().unwrap();
         for pad in [from, to] {
@@ -344,7 +436,7 @@ pub fn sampler_move(from: usize, to: usize, app: AppHandle) -> Result<View, Stri
 #[tauri::command]
 pub fn sampler_settings(pad: usize, settings: PadSettings, app: AppHandle) -> Result<View, String> {
     check_pad(pad)?;
-    edit(&app, |s, doc| {
+    edit(&app, &format!("settings:{pad}"), |s, doc| {
         doc.pads[pad].settings = settings;
         s.apply_pad(doc, pad);
         Ok(())
@@ -357,7 +449,7 @@ pub fn sampler_step(pad: usize, step: usize, on: bool, app: AppHandle) -> Result
     if step >= MAX_STEPS {
         return Err(format!("there is no step {}", step + 1));
     }
-    edit(&app, |s, doc| {
+    edit(&app, "steps", |s, doc| {
         let bit = 1u64 << step;
         let p = &mut doc.pads[pad];
         p.pattern = if on { p.pattern | bit } else { p.pattern & !bit };
@@ -369,7 +461,7 @@ pub fn sampler_step(pad: usize, step: usize, on: bool, app: AppHandle) -> Result
 /// Clears one pad's steps, or every pad's when `pad` is `None`.
 #[tauri::command]
 pub fn sampler_clear_steps(pad: Option<usize>, app: AppHandle) -> Result<View, String> {
-    edit(&app, |s, doc| {
+    edit(&app, &format!("clear-steps:{pad:?}"), |s, doc| {
         for i in 0..PADS {
             if pad.is_none_or(|p| p == i) {
                 doc.pads[i].pattern = 0;
@@ -382,7 +474,7 @@ pub fn sampler_clear_steps(pad: Option<usize>, app: AppHandle) -> Result<View, S
 
 #[tauri::command]
 pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -> Result<View, String> {
-    edit(&app, |s, doc| {
+    edit(&app, "transport", |s, doc| {
         doc.tempo = tempo.clamp(40.0, 300.0);
         doc.swing = swing.clamp(0.0, 1.0);
         doc.steps = steps.clamp(1, MAX_STEPS);
@@ -391,6 +483,30 @@ pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -
         s.handle.set_steps(doc.steps);
         Ok(())
     })
+}
+
+/// Steps back one edit.
+#[tauri::command]
+pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
+    let s = state(&app);
+    let mut doc = s.doc.lock().unwrap();
+    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&doc)) };
+    let now = doc.snapshot();
+    doc.history.redo.push(now);
+    s.restore(&app, &mut doc, snap)?;
+    Ok(publish(&app, &doc))
+}
+
+/// Steps forward again after an undo.
+#[tauri::command]
+pub fn sampler_redo(app: AppHandle) -> Result<View, String> {
+    let s = state(&app);
+    let mut doc = s.doc.lock().unwrap();
+    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&doc)) };
+    let now = doc.snapshot();
+    doc.history.undo.push(now);
+    s.restore(&app, &mut doc, snap)?;
+    Ok(publish(&app, &doc))
 }
 
 /// Starts the pattern from step 1, or stops it.
@@ -673,6 +789,7 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
             steps: file.steps.clamp(1, MAX_STEPS),
             path: Some(project),
             dirty: false,
+            history: History::default(),
         };
         s.apply_all(&doc);
         Ok(publish(&a, &doc))
@@ -709,45 +826,100 @@ pub struct Exported {
     format: WavFormat,
 }
 
+/// What a render needs, copied out of the document so the render runs without its lock.
+struct RenderJob {
+    samples: Vec<Option<Arc<Sample>>>,
+    shared: SamplerShared,
+    project: String,
+}
+
+fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
+    let s = state(app);
+    let doc = s.doc.lock().unwrap();
+    if doc.pads.iter().all(|p| p.pattern == 0 || p.sample.is_none()) {
+        return Err("there is nothing in the pattern yet: add steps first".into());
+    }
+    let shared = SamplerShared::default();
+    for (i, p) in doc.pads.iter().enumerate() {
+        shared.set_pad(i, &p.settings.params());
+        shared.set_pattern(i, p.pattern);
+    }
+    shared.set_tempo(doc.tempo);
+    shared.set_swing(doc.swing);
+    shared.set_steps(doc.steps);
+    Ok(RenderJob {
+        samples: doc.pads.iter().map(|p| p.sample.clone()).collect(),
+        shared,
+        project: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
+    })
+}
+
+/// Renders `loops` passes of the pattern at 48 kHz. Blocking.
+fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
+    let mut tracks: Vec<Option<Track>> = Vec::with_capacity(PADS);
+    for s in &job.samples {
+        tracks.push(match s {
+            None => None,
+            Some(s) if s.rate == EXPORT_RATE => Some(s.data.clone()),
+            Some(s) => Some(Arc::new(resample(&s.data, s.rate, EXPORT_RATE)?)),
+        });
+    }
+    Ok(render_pattern(&tracks, &job.shared, EXPORT_RATE, loops.clamp(1, 64)))
+}
+
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.
 #[tauri::command]
 pub async fn sampler_export(path: String, loops: usize, app: AppHandle) -> Result<Exported, String> {
-    let (samples, shared) = {
-        let s = state(&app);
-        let doc = s.doc.lock().unwrap();
-        let shared = SamplerShared::default();
-        for (i, p) in doc.pads.iter().enumerate() {
-            shared.set_pad(i, &p.settings.params());
-            shared.set_pattern(i, p.pattern);
-        }
-        shared.set_tempo(doc.tempo);
-        shared.set_swing(doc.swing);
-        shared.set_steps(doc.steps);
-        let samples: Vec<Option<Arc<Sample>>> = doc.pads.iter().map(|p| p.sample.clone()).collect();
-        if doc.pads.iter().all(|p| p.pattern == 0 || p.sample.is_none()) {
-            return Err("there is nothing in the pattern to export".into());
-        }
-        (samples, shared)
-    };
+    let job = render_job(&app)?;
     spawn_blocking(move || {
         let mut path = PathBuf::from(path);
         if path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() != Some("wav") {
             path.set_extension("wav");
         }
-        let mut tracks: Vec<Option<Track>> = Vec::with_capacity(PADS);
-        for s in &samples {
-            tracks.push(match s {
-                None => None,
-                Some(s) if s.rate == EXPORT_RATE => Some(s.data.clone()),
-                Some(s) => Some(Arc::new(resample(&s.data, s.rate, EXPORT_RATE)?)),
-            });
-        }
-        let out = render_pattern(&tracks, &shared, EXPORT_RATE, loops.clamp(1, 64));
+        let out = render(&job, loops)?;
         let format = export_wav(&out, EXPORT_RATE, &path)?;
         Ok(Exported { seconds: out[0].len() as f64 / EXPORT_RATE as f64, path: path.display().to_string(), format })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bounced {
+    pad: usize,
+    path: String,
+}
+
+/// Resamples: renders `loops` passes of the pattern and puts the result on
+/// the first empty pad. The WAV goes in Music/tuneKore/Samples/Bounces.
+#[tauri::command]
+pub async fn sampler_bounce(loops: usize, app: AppHandle) -> Result<Bounced, String> {
+    let job = render_job(&app)?;
+    let pad = first_free_pad(&app).ok_or("every pad is in use: clear one to bounce onto it")?;
+    let dir = app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore/Samples/Bounces");
+    let a = app.clone();
+    let result = spawn_blocking(move || -> Result<Bounced, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("can't make {}: {e}", dir.display()))?;
+        let name: String = job.project.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let path = (1..)
+            .map(|n| dir.join(format!("{name} bounce {n}.wav")))
+            .find(|p| !p.exists())
+            .expect("an unused name");
+        let out = render(&job, loops)?;
+        export_wav(&out, EXPORT_RATE, &path)?;
+        load_pad(&a, pad, &path, PadSettings::default())?;
+        Ok(Bounced { pad, path: path.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    publish_now(&app);
+    if let Ok(b) = &result {
+        if let Some(folder) = Path::new(&b.path).parent() {
+            let _ = app.emit("sampler:chopped", folder.display().to_string());
+        }
+    }
+    result
 }
 
 fn file_stem(path: &Path) -> String {
@@ -785,6 +957,30 @@ mod tests {
         let json = serde_json::to_string(&file).unwrap();
         let back: ProjectFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pads.len(), PADS);
+    }
+
+    #[test]
+    fn edits_of_one_kind_in_a_run_undo_as_one_step() {
+        let mut doc = Doc::default();
+        for step in 0..4 {
+            let before = doc.snapshot();
+            doc.pads[0].pattern |= 1 << step;
+            doc.checkpoint("steps", before);
+        }
+        assert_eq!(doc.history.undo.len(), 1, "painting four steps is one undo");
+        assert_eq!(doc.history.undo[0].pads[0].pattern, 0);
+
+        let before = doc.snapshot();
+        doc.tempo = 90.0;
+        doc.checkpoint("transport", before);
+        assert_eq!(doc.history.undo.len(), 2, "a different kind of edit is a new step");
+        assert!(doc.dirty);
+
+        doc.history.redo.push(doc.snapshot());
+        let before = doc.snapshot();
+        doc.swing = 0.5;
+        doc.checkpoint("swing", before);
+        assert!(doc.history.redo.is_empty(), "a new edit drops the redo steps");
     }
 
     #[test]

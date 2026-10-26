@@ -186,3 +186,14 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .seg label.on { background: var(--violet); color: #fff; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--lime); outline-offset: -2px; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
+
+.add-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 6px; border: 1.5px dashed #34343f; border-radius: 8px; }
+.add-row.over { border-color: var(--lime); background: #1e2414; }
+.add-btn { height: 28px; padding: 0 12px; border-radius: 7px; border: 1px solid var(--violet); background: transparent; color: var(--violet-soft); font-size: 12px; font-weight: 600; display: inline-flex; gap: 6px; align-items: center; }
+.add-btn:hover { background: #241e38; color: #fff; }
+
+.trim { position: relative; cursor: ew-resize; touch-action: none; }
+.trim .insp-wave { display: block; }
+.handle { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--lime); pointer-events: none; }
+.handle::after { content: ""; position: absolute; top: 0; left: -4px; width: 10px; height: 10px; border-radius: 2px; background: var(--lime); }
+.handle.end::after { top: auto; bottom: 0; }

@@ -2,6 +2,7 @@ mod analyzer;
 mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tauri::{async_runtime::spawn_blocking, Emitter, Manager, State};
@@ -40,6 +41,21 @@ type Shared<'a> = State<'a, &'static Mutex<Audio>>;
 
 fn audio(state: &Shared<'_>) -> &'static Mutex<Audio> {
     *state.inner()
+}
+
+/// Set once the user has said to quit without saving.
+static QUIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
+
+/// Whether quitting or closing the main window must ask first.
+fn must_ask(app: &tauri::AppHandle) -> bool {
+    !QUIT_CONFIRMED.load(Ordering::Relaxed) && app.state::<sampler::SamplerState>().is_dirty()
+}
+
+/// Quits, after the UI has asked about unsaved changes.
+#[tauri::command]
+fn app_quit(app: tauri::AppHandle) {
+    QUIT_CONFIRMED.store(true, Ordering::Relaxed);
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -139,6 +155,17 @@ pub fn run() {
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
         .manage(sampler::SamplerState::new(pads.clone()))
+        .on_window_event(|window, event| {
+            // Closing the main window with unsaved changes asks first (the UI shows the question).
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" && must_ask(window.app_handle()) {
+                    api.prevent_close();
+                    let _ = window.emit("app:confirm-quit", ());
+                } else if window.label() == "main" {
+                    window.app_handle().exit(0);
+                }
+            }
+        })
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
@@ -154,6 +181,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             engine_version,
+            app_quit,
             list_outputs,
             start_tone,
             stop_tone,
@@ -181,6 +209,9 @@ pub fn run() {
             sampler::sampler_trigger,
             sampler::sampler_release,
             sampler::sampler_export,
+            sampler::sampler_bounce,
+            sampler::sampler_undo,
+            sampler::sampler_redo,
             sampler::library_scan,
             sampler::library_default,
             sampler::library_preview,
@@ -192,9 +223,15 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")
         .run(|app, event| {
-            // Don't leave a stem worker running after the app quits.
-            if let tauri::RunEvent::Exit = event {
-                app.state::<analyzer::Analyzer>().cancel_job();
+            match event {
+                // Quit (⌘Q) with unsaved changes asks first, in the main window.
+                tauri::RunEvent::ExitRequested { api, code: None, .. } if must_ask(app) => {
+                    api.prevent_exit();
+                    let _ = app.emit_to("main", "app:confirm-quit", ());
+                }
+                // Don't leave a stem worker running after the app quits.
+                tauri::RunEvent::Exit => app.state::<analyzer::Analyzer>().cancel_job(),
+                _ => {}
             }
         });
 }

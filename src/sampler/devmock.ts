@@ -18,7 +18,7 @@ export function installMocks() {
     settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false },
     steps: Array(16).fill(false),
   });
-  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false };
+  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false };
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
@@ -107,6 +107,16 @@ export function installMocks() {
           return "/Users/test/Music/Beat 1.tunek";
         case "plugin:dialog|ask":
           return true;
+        case "sampler_bounce": {
+          const free = v.pads.find((p) => !p.name);
+          if (!free) throw "every pad is in use";
+          Object.assign(free, { name: "Untitled bounce 1", path: "/Users/test/Music/tuneKore/Samples/Bounces/Untitled bounce 1.wav", seconds: 8, channels: 2, rate: 48000, peaks: peaks(3) });
+          publish();
+          return { pad: free.index, path: free.path };
+        }
+        case "sampler_undo":
+        case "sampler_redo":
+          return publish();
         case "sampler_export":
           return { path: a.path, seconds: 8, format: "pcm24" };
         default:
