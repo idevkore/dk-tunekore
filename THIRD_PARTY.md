@@ -50,6 +50,7 @@ as a dependency. The adapted code carries a header comment naming its source.
 | Source | Licence | What we took | Where |
 | --- | --- | --- | --- |
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/dsp/src/plugins/synth.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The state-variable filter (`Svf`: TPT coefficients, integrator update, denormal flush, resonance-to-`k` mapping) and the amp envelope's decay curve (`Adsr`: exponential decay timed to -60 dB, snapping to the sustain level) | `engine/src/sampler.rs` (`VoiceFilter`, the decay stage in `mix_frame`) |
+| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/dsp/src/plugins/dynamics.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The master limiter (`Maximizer`: lookahead min-hold gain smoothed by a moving average, hard ceiling) | `engine/src/limiter.rs` |
 
 ## UI (TypeScript)
 
@@ -113,15 +114,6 @@ SAM Audio (Meta) was tried in Phase 1 and removed on 2026-10-24; see
 | Weights | Licence | Status |
 | --- | --- | --- |
 | Demucs `htdemucs`, `htdemucs_ft` (Hugging Face `adefossez/HTDemucs`, `adefossez/HTDemucs-ft`) | The author: "provided only for scientific purposes" | Prototyping on Nate's Mac only. Can't ship. |
-
-## Code adapted from other projects
-
-Code we adapted rather than depend on. Each file keeps a header naming its
-source and licence.
-
-| Project | Licence | Where | What |
-| --- | --- | --- | --- |
-| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft Team and the SoundCraft contributors) | MIT OR Apache-2.0 | `engine/src/limiter.rs` | The master limiter, from soundCraft's `Maximizer` (`crates/dsp/src/plugins/dynamics.rs`, commit `7dc56a4`) |
 
 ## System libraries, not bundled
 
