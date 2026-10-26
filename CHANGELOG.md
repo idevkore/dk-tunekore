@@ -21,6 +21,8 @@ idevkore/dk-tunekore#15, PR #9
   an external drive.
 - Autosave with recovery after a crash; collect a project's samples into
   a folder beside it; export stems, one WAV per pad.
+- Fixed: stopping the pattern (Space or the stop button) now silences the
+  pads straight away instead of letting each sample play to its end.
 - Adapted from soundCraft (MIT OR Apache-2.0): the limiter, the filter and
   envelope decay, the input recorder's safeguards and the step-chance PRNG.
 

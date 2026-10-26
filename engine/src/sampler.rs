@@ -958,6 +958,11 @@ impl Sampler {
             self.chain_pos = NO_POS;
         } else if !playing && self.was_playing {
             self.stop_transport(shared);
+            // Stopping silences the pads, as any transport stop does, instead of
+            // letting each sample play to its end.
+            for slot in 0..PADS {
+                self.release_slot(slot);
+            }
         }
         self.was_playing = playing;
         let steps = shared.steps().max(1);
@@ -1620,6 +1625,23 @@ mod tests {
         run(&mut s, &shared, 8);
         link.collect();
         assert_eq!(Arc::strong_count(&first), 1, "the audio thread let go of it");
+    }
+
+    #[test]
+    fn stopping_cuts_ringing_pads_but_not_the_preview() {
+        let shared = SamplerShared::default();
+        let (mut s, mut link) = sampler(RATE);
+        link.send(0, Some(dc(RATE as usize * 4, 0.5))).unwrap();
+        link.send(PREVIEW, Some(dc(RATE as usize * 4, 0.25))).unwrap();
+        shared.set_pattern(0, 1);
+        shared.set_playing(true);
+        run(&mut s, &shared, 2_000); // step 1 starts the long pad sample
+        shared.trigger(PREVIEW);
+        let out = run(&mut s, &shared, 1_000);
+        assert!((out[1998] - 0.75).abs() < 1e-3, "pad and preview both sound: {}", out[1998]);
+        shared.set_playing(false);
+        let out = run(&mut s, &shared, 1_000);
+        assert!((out[1998] - 0.25).abs() < 1e-3, "the pad stopped within the fade, the preview plays on: {}", out[1998]);
     }
 
     #[test]
