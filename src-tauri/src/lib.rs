@@ -197,6 +197,7 @@ pub fn run() {
             analyzer::analyzer_track,
             analyzer::analyzer_export,
             analyzer::analyzer_to_pads,
+            analyzer::analyzer_tempo_key,
             sampler::sampler_state,
             sampler::sampler_load,
             sampler::sampler_clear,

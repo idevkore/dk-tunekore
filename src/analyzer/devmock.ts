@@ -57,6 +57,15 @@ export function installMocks() {
           return null;
         case "analyzer_to_pads":
           return { pads: (args as { how: string }).how === "whole" ? [0] : [0, 1, 2, 3, 4, 5, 6, 7], folder: "/Users/test/Music/tuneKore/Samples/Quantum Love" };
+        case "analyzer_tempo_key":
+          // Slow enough to see the "finding" state.
+          return new Promise((resolve) =>
+            setTimeout(() => resolve({ bpm: 124.0, bpmConfidence: 0.82, key: "A minor", camelot: "8A", keyConfidence: 0.61 }), 700),
+          );
+        case "sampler_state":
+          return { tempo: 96, swing: 0.25, steps: 12 };
+        case "sampler_transport":
+          return null;
         case "analyzer_export":
           return ["vocals", "drums", "bass", "other"]
             .filter((n) => (args as { names: string[] }).names.length === 0 || (args as { names: string[] }).names.includes(n))

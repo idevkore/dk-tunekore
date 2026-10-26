@@ -4,7 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import logo from "../../brand/tunekore-logo-color.svg";
 import Waveform from "./Waveform";
 import * as api from "./api";
-import type { Backend, Finished, SongInfo } from "./api";
+import type { Backend, Finished, SongInfo, TempoKey } from "./api";
 
 const STEMS = [
   { name: "vocals", label: "Vocals", color: "#f2c14e" },
@@ -36,6 +36,11 @@ type Phase =
   | { kind: "ready" }
   | { kind: "separating"; job: number; started: number; stages: string[]; fraction: number }
   | { kind: "stems"; result: Finished };
+
+/** Below this, a tempo or key is shown as a guess. */
+const LOW_CONFIDENCE = 0.3;
+
+type Found = { kind: "none" } | { kind: "busy" } | { kind: "done"; result: TempoKey } | { kind: "failed"; message: string };
 
 interface Mix {
   db: number;
@@ -79,6 +84,18 @@ export default function Analyzer() {
   const [listen, setListen] = useState<"stems" | "original">("stems");
   const [lastDir, setLastDir] = useState<string | null>(null);
   const jobRef = useRef<number | null>(null);
+  const [found, setFound] = useState<Found>({ kind: "none" });
+  const foundRef = useRef(0);
+
+  // Key and tempo run in the background; a newer run or a new song makes an older answer stale.
+  const findKeyTempo = useCallback(() => {
+    const run = ++foundRef.current;
+    setFound({ kind: "busy" });
+    api
+      .tempoKey()
+      .then((result) => run === foundRef.current && setFound({ kind: "done", result }))
+      .catch((e) => run === foundRef.current && setFound({ kind: "failed", message: String(e) }));
+  }, []);
 
   const loadBackends = useCallback(() => {
     api
@@ -132,11 +149,12 @@ export default function Analyzer() {
       setSong(s);
       setPos({ position: 0, duration: s.seconds, playing: false });
       setPhase({ kind: "ready" });
+      findKeyTempo();
     } catch (e) {
       setPhase(song ? { kind: "ready" } : { kind: "empty" });
       setError(String(e));
     }
-  }, [song]);
+  }, [song, findKeyTempo]);
 
   async function chooseSong() {
     const picked = await open({
@@ -174,6 +192,21 @@ export default function Analyzer() {
     void api.setTrack(0, 1, !original, original);
     mix.forEach((m, i) => void api.setTrack(i + 1, gainOf(m.db), m.mute, m.solo && !original));
   }, [hasStems, mix, listen]);
+
+  // Once the stems exist the tempo can come from the drums, which is usually clearer.
+  useEffect(() => {
+    if (hasStems) findKeyTempo();
+  }, [hasStems, findKeyTempo]);
+
+  async function useTempo(bpm: number) {
+    setError("");
+    try {
+      await api.setSamplerTempo(bpm);
+      setNote(`The Sampler's tempo is now ${bpm.toFixed(1)} BPM. Its swing and steps are unchanged.`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
 
   async function startSeparation() {
     setError("");
@@ -285,6 +318,7 @@ export default function Analyzer() {
                   </button>
                 </div>
                 <Waveform peaks={song.peaks} color="#8a8a98" playhead={null} height={44} label={`${song.name} waveform`} />
+                <KeyTempo found={found} onFind={findKeyTempo} onUse={(bpm) => void useTempo(bpm)} />
               </div>
             ) : (
               <button className="drop" onClick={() => void chooseSong()} disabled={busy}>
@@ -481,7 +515,7 @@ export default function Analyzer() {
                 <div className="later">
                   <span className="label">Next with one stem · coming later</span>
                   <div className="chips">
-                    {["Find key and tempo", "Turn into MIDI", "Send through a plugin chain"].map((t) => (
+                    {["Turn into MIDI", "Send through a plugin chain"].map((t) => (
                       <button key={t} disabled>
                         {t}
                       </button>
@@ -506,6 +540,61 @@ export default function Analyzer() {
         </main>
       </div>
       {dragging && <div className="dropzone">Drop the song to open it</div>}
+    </div>
+  );
+}
+
+/** "124.0 BPM · A minor · 8A", with a button to set the Sampler's tempo to it. */
+function KeyTempo({ found, onFind, onUse }: { found: Found; onFind: () => void; onUse: (bpm: number) => void }) {
+  const r = found.kind === "done" ? found.result : null;
+  const lowTempo = r?.bpmConfidence != null && r.bpmConfidence < LOW_CONFIDENCE;
+  const lowKey = r?.keyConfidence != null && r.keyConfidence < LOW_CONFIDENCE;
+  const pct = (c: number | null | undefined) => (c == null ? "no result" : `${Math.round(c * 100)}%`);
+  return (
+    <div className="tk" aria-live="polite">
+      <div className="tk-read">
+        {found.kind === "busy" && <span className="dim">Finding key and tempo…</span>}
+        {found.kind === "none" && <span className="dim">Key and tempo not checked yet.</span>}
+        {found.kind === "failed" && <span className="warn small">{found.message}</span>}
+        {r && (
+          <>
+            {r.bpm != null ? (
+              <span className={"tk-bpm" + (lowTempo ? " low" : "")} title={`Tempo confidence ${pct(r.bpmConfidence)}${lowTempo ? ": a guess" : ""}`}>
+                {r.bpm.toFixed(1)} <small>BPM</small>
+              </span>
+            ) : (
+              <span className="dim">No clear tempo</span>
+            )}
+            {r.key != null ? (
+              <>
+                <span className={"tk-key" + (lowKey ? " low" : "")} title={`Key confidence ${pct(r.keyConfidence)}${lowKey ? ": a guess" : ""}`}>
+                  {r.key}
+                </span>
+                {r.camelot && (
+                  <span className="mono tk-cam" title="Camelot wheel code">
+                    {r.camelot}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="dim">No clear key</span>
+            )}
+          </>
+        )}
+      </div>
+      <div className="tk-actions">
+        <button
+          className="btn small"
+          disabled={r?.bpm == null}
+          onClick={() => r?.bpm != null && onUse(r.bpm)}
+          title="Set the Sampler's tempo to this, keeping its swing and steps"
+        >
+          Use this tempo in the Sampler
+        </button>
+        <button className="link" type="button" onClick={onFind} disabled={found.kind === "busy"}>
+          {found.kind === "none" ? "Find key and tempo" : "Find again"}
+        </button>
+      </div>
     </div>
   );
 }
