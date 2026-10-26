@@ -23,6 +23,8 @@ export function installMocks() {
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
+  let sampling: { pad: number; started: number } | null = null;
+  let sampler: ReturnType<typeof setInterval> | undefined;
   const calls: unknown[] = [];
   (window as unknown as { __mockCalls: unknown[] }).__mockCalls = calls;
   const publish = () => {
@@ -104,6 +106,31 @@ export function installMocks() {
           return publish();
         case "list_outputs":
           return [{ id: "coreaudio:built-in", name: "MacBook Pro Speakers", channels: 2, sampleRates: [44100, 48000], preferredRate: 48000, isDefault: true }];
+        case "midi_inputs":
+          return [{ name: "Mock Pad Controller", connected: true }];
+        case "input_devices":
+          return [{ id: "coreaudio:mock-mic", name: "MacBook Pro Microphone", channels: 1, preferredRate: 48000, isDefault: true }];
+        case "sampling_start": {
+          sampling = { pad: a.pad as number, started: Date.now() };
+          sampler = setInterval(() => {
+            const seconds = (Date.now() - sampling!.started) / 1000;
+            void emit("input:level", { peak: 0.5 + 0.4 * Math.sin(seconds * 6), seconds, full: false });
+          }, 33);
+          return null;
+        }
+        case "sampling_cancel":
+          clearInterval(sampler);
+          sampling = null;
+          return null;
+        case "sampling_stop": {
+          clearInterval(sampler);
+          const p = v.pads[sampling!.pad];
+          const seconds = Math.max(0.2, (Date.now() - sampling!.started) / 1000);
+          sampling = null;
+          Object.assign(p, pad(p.index), { name: "Recording 1", path: "/Users/test/Music/tuneKore/Samples/Recordings/Recording 1.wav", seconds, channels: 1, rate: 48000, peaks: peaks(p.index + 2), steps: p.steps });
+          publish();
+          return { pad: p.index, path: p.path, seconds };
+        }
         case "engine_version":
           return "0.1.0";
         case "plugin:dialog|open":

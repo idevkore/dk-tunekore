@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
+import SampleInput from "./SampleInput";
 import { AUDIO_EXTENSIONS, PAD_KEYS, type PadSettings, type PadView } from "./api";
 
 interface Props {
@@ -101,6 +102,8 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
           </div>
         </>
       )}
+
+      <SampleInput pad={pad.index} loaded={loaded} />
 
       {pad.name && (
         <div className="insp-foot">

@@ -1,5 +1,6 @@
 mod analyzer;
 mod midi;
+mod recorder;
 mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
@@ -157,6 +158,7 @@ pub fn run() {
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
         .manage(midi_state.clone())
+        .manage(recorder::RecorderState::default())
         .manage(sampler::SamplerState::new(pads.clone()))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
@@ -231,6 +233,10 @@ pub fn run() {
             sampler::project_open,
             sampler::project_save,
             midi::midi_inputs,
+            recorder::input_devices,
+            recorder::sampling_start,
+            recorder::sampling_stop,
+            recorder::sampling_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")

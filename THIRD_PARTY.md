@@ -17,13 +17,14 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
 | [cpal](https://github.com/RustAudio/cpal) | 0.18.2 | Apache-2.0 | Engine: audio device I/O through CoreAudio on macOS, WASAPI on Windows and ALSA on Linux |
-| [rtrb](https://github.com/mgeier/rtrb) | 0.4.0 | MIT OR Apache-2.0 | Engine: lock-free queues that hand stems to the audio thread and back |
+| [rtrb](https://github.com/mgeier/rtrb) | 0.4.0 | MIT OR Apache-2.0 | Engine: lock-free queues that hand stems to the audio thread and back, and audio from the input stream to the recorder |
 | [rubato](https://github.com/HEnquist/rubato) | 5.0.1 | MIT OR Apache-2.0 | Engine: resamples stems to the output device's rate (off the audio thread) |
 | [symphonia](https://github.com/pdeljanov/Symphonia) | 0.6.1 | MPL-2.0 (unmodified) | Analyzer: decodes WAV, AIFF, FLAC, MP3 and M4A (AAC, ALAC) |
 | [hound](https://github.com/ruuda/hound) | 3.5.1 | Apache-2.0 | Analyzer: writes the exported stems as WAV |
 | [rustfft](https://github.com/ejmahler/RustFFT) | 6.4.1 | MIT OR Apache-2.0 | Analyzer: the FFTs behind tempo and key detection (also pulled in by rubato) |
 | [serde](https://github.com/serde-rs/serde) | 1.0.229 | MIT OR Apache-2.0 | Engine, Analyzer and shell: data sent to the UI and the stem worker |
 | [serde_json](https://github.com/serde-rs/json) | 1.0.154 | MIT OR Apache-2.0 | Analyzer and shell: the stem worker's JSON-lines protocol |
+| [midir](https://github.com/Boddlnagg/midir) | 0.11.1 | MIT | Shell: MIDI controller input (CoreMIDI on macOS, WinMM on Windows, ALSA on Linux) |
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.5 | Apache-2.0 OR MIT | Shell: windows, menus, IPC |
 | [tauri-plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | 2.8.3 | Apache-2.0 OR MIT | Shell: the Open and Export folder dialogs |
 | tauri-build | 2.7.4 | Apache-2.0 OR MIT | Shell: build step |
@@ -32,7 +33,11 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 The lockfile has 471 crates in all, counting every platform's. Nearly all are
 MIT or Apache-2.0 (or both). The rest are Unicode-3.0, Zlib, BSD-3-Clause, ISC,
 Unlicense, CC0-1.0 and 0BSD. cpal brings `coreaudio-rs` and `objc2-core-audio`
-on macOS, `windows` on Windows and `alsa` on Linux, all MIT or Apache-2.0.
+on macOS, `windows` on Windows and `alsa` on Linux, all MIT or Apache-2.0. midir brings
+`coremidi` and `coremidi-sys` on macOS (MIT), and on Windows `windows` and
+`windows-sys` (MIT or Apache-2.0) and, for its Android support (which we don't
+use), `jni-min-helper`, `java-locator`, `android-build`, `dlopen2` and
+`process_path` (MIT or Apache-2.0).
 rubato brings `audioadapter`, `audioadapter-buffers`, `realfft` and `rustfft`
 (MIT or Apache-2.0). The dialog plugin brings `tauri-plugin-fs` (Apache-2.0 OR
 MIT) and `rfd` (MIT). Sixteen crates are MPL-2.0, all used unmodified: the
@@ -104,6 +109,15 @@ SAM Audio (Meta) was tried in Phase 1 and removed on 2026-10-24; see
 | Weights | Licence | Status |
 | --- | --- | --- |
 | Demucs `htdemucs`, `htdemucs_ft` (Hugging Face `adefossez/HTDemucs`, `adefossez/HTDemucs-ft`) | The author: "provided only for scientific purposes" | Prototyping on Nate's Mac only. Can't ship. |
+
+## Code adapted from other projects
+
+Where we read another project's code and wrote ours from it, the file says so
+in a header comment. Each is MIT or Apache-2.0 and we keep its copyright notice.
+
+| Project | Licence | Where we use it |
+| --- | --- | --- |
+| [soundCraft](https://github.com/storytold/soundcraft) (commit 7dc56a4), `crates/playback/src/record.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | `engine/src/input.rs`: the guard against a panicking input callback, the silence a full ring owes to keep a take's timing, the NaN guard and the stream-lost check. We swapped its atomics ring and file writer for `rtrb` and an in-memory take. |
 
 ## System libraries, not bundled
 
