@@ -42,6 +42,15 @@ eleven Symphonia crates (`symphonia`, `-core`, `-common`, `-metadata`,
 `cssparser-macros`, `dtoa-short`, `option-ext` and `selectors`). `r-efi`
 offers LGPL-2.1-or-later as one of three choices; we use it as MIT.
 
+## Code adapted from other projects
+
+Code translated or closely adapted from another project's source, not linked
+as a dependency. The adapted code carries a header comment naming its source.
+
+| Source | Licence | What we took | Where |
+| --- | --- | --- | --- |
+| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/dsp/src/plugins/synth.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The state-variable filter (`Svf`: TPT coefficients, integrator update, denormal flush, resonance-to-`k` mapping) and the amp envelope's decay curve (`Adsr`: exponential decay timed to -60 dB, snapping to the sustain level) | `engine/src/sampler.rs` (`VoiceFilter`, the decay stage in `mix_frame`) |
+
 ## UI (TypeScript)
 
 | Package | Version | Licence | Use |

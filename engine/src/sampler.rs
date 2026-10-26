@@ -25,6 +25,18 @@ const VOICES: usize = 32;
 const ATTACK_SECONDS: f64 = 0.0005;
 /// Fade when a voice is cut, released or reaches its end point.
 const RELEASE_SECONDS: f64 = 0.004;
+/// The shortest release a pad can ask for, so a gate ending never clicks.
+const MIN_RELEASE_SECONDS: f64 = 0.001;
+/// The decay stage ends, and holds at the sustain level, once it is this close.
+const DECAY_SNAP: f32 = 1.0e-4;
+/// Filter cutoff range in Hz. The top is also clamped below Nyquist.
+const CUTOFF_MIN: f32 = 20.0;
+const CUTOFF_MAX: f32 = 20_000.0;
+/// Filter modes in `PadParams::filter`.
+pub const FILTER_OFF: u8 = 0;
+pub const FILTER_LOW_PASS: u8 = 1;
+pub const FILTER_HIGH_PASS: u8 = 2;
+pub const FILTER_BAND_PASS: u8 = 3;
 const NO_STEP: u32 = u32::MAX;
 
 const GATE: u32 = 1;
@@ -70,12 +82,50 @@ pub struct PadParams {
     /// Choke group, 0 (none) or 1..=8. Starting a voice on a pad releases the
     /// voices of the other pads in its group (closed hi-hat cutting open).
     pub choke: u8,
+    /// Amp envelope. `attack` is the time to full level, 0..2 s; 0 keeps the
+    /// 0.5 ms anti-click ramp. `decay` is the time, 0..5 s, for the level to fall
+    /// 60 dB of the way to `sustain` (0..1); 0 means no decay, and `sustain`
+    /// then has no effect. `release` is the fade-out time, 0..5 s, after a
+    /// gate or pad release (at least 1 ms). Cuts, chokes and retriggers always
+    /// use the 4 ms fade.
+    pub attack: f32,
+    pub decay: f32,
+    pub sustain: f32,
+    pub release: f32,
+    /// Filter mode: 0 off, 1 low-pass, 2 high-pass, 3 band-pass.
+    pub filter: u8,
+    /// Filter cutoff (or centre) in Hz, 20..20,000.
+    pub cutoff: f32,
+    /// Filter resonance, 0..1.
+    pub resonance: f32,
 }
 
 impl Default for PadParams {
     fn default() -> Self {
-        Self { gain: 1.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false, choke: 0 }
+        Self {
+            gain: 1.0,
+            pan: 0.0,
+            pitch: 0.0,
+            start: 0.0,
+            end: 1.0,
+            gate: false,
+            reverse: false,
+            mute: false,
+            choke: 0,
+            attack: 0.0,
+            decay: 0.0,
+            sustain: 1.0,
+            release: RELEASE_SECONDS as f32,
+            filter: FILTER_OFF,
+            cutoff: CUTOFF_MAX,
+            resonance: 0.0,
+        }
     }
+}
+
+/// `v` clamped to `lo..=hi`, or `default` when it is not a number.
+fn sane(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
+    if v.is_nan() { default } else { v.clamp(lo, hi) }
 }
 
 #[derive(Debug)]
@@ -95,6 +145,16 @@ struct PadCtl {
     cuts: AtomicU32,
     /// Bumped by the audio thread each time the slot starts a voice, for the UI.
     played: AtomicU32,
+    // Sound shaping, kept after the fields above.
+    attack: AtomicU32,    // f32 bits
+    decay: AtomicU32,     // f32 bits
+    sustain: AtomicU32,   // f32 bits
+    release: AtomicU32,   // f32 bits
+    filter: AtomicU8,
+    cutoff: AtomicU32,    // f32 bits
+    resonance: AtomicU32, // f32 bits
+    /// Velocity of the next hit, 0..1 as f32 bits. Written before `hits` is bumped.
+    hit_vel: AtomicU32,
 }
 
 impl Default for PadCtl {
@@ -112,6 +172,14 @@ impl Default for PadCtl {
             held: AtomicBool::new(false),
             cuts: AtomicU32::new(0),
             played: AtomicU32::new(0),
+            attack: AtomicU32::new(p.attack.to_bits()),
+            decay: AtomicU32::new(p.decay.to_bits()),
+            sustain: AtomicU32::new(p.sustain.to_bits()),
+            release: AtomicU32::new(p.release.to_bits()),
+            filter: AtomicU8::new(p.filter),
+            cutoff: AtomicU32::new(p.cutoff.to_bits()),
+            resonance: AtomicU32::new(p.resonance.to_bits()),
+            hit_vel: AtomicU32::new(1.0f32.to_bits()),
         }
     }
 }
@@ -130,6 +198,13 @@ impl PadCtl {
             reverse: flags & REVERSE != 0,
             mute: flags & MUTE != 0,
             choke: ((flags >> CHOKE_SHIFT) & CHOKE_MASK) as u8,
+            attack: f(&self.attack),
+            decay: f(&self.decay),
+            sustain: f(&self.sustain),
+            release: f(&self.release),
+            filter: self.filter.load(Ordering::Relaxed),
+            cutoff: f(&self.cutoff),
+            resonance: f(&self.resonance),
         }
     }
 }
@@ -184,6 +259,14 @@ impl SamplerShared {
         let flags = (p.gate as u32 * GATE) | (p.reverse as u32 * REVERSE) | (p.mute as u32 * MUTE)
             | (u32::from(p.choke.min(CHOKE_GROUPS)) << CHOKE_SHIFT);
         c.flags.store(flags, Ordering::Relaxed);
+        let d = PadParams::default();
+        c.attack.store(sane(p.attack, 0.0, 2.0, d.attack).to_bits(), Ordering::Relaxed);
+        c.decay.store(sane(p.decay, 0.0, 5.0, d.decay).to_bits(), Ordering::Relaxed);
+        c.sustain.store(sane(p.sustain, 0.0, 1.0, d.sustain).to_bits(), Ordering::Relaxed);
+        c.release.store(sane(p.release, 0.0, 5.0, d.release).to_bits(), Ordering::Relaxed);
+        c.filter.store(p.filter.min(FILTER_BAND_PASS), Ordering::Relaxed);
+        c.cutoff.store(sane(p.cutoff, CUTOFF_MIN, CUTOFF_MAX, d.cutoff).to_bits(), Ordering::Relaxed);
+        c.resonance.store(sane(p.resonance, 0.0, 1.0, d.resonance).to_bits(), Ordering::Relaxed);
     }
 
     pub fn pad(&self, slot: usize) -> PadParams {
@@ -242,8 +325,15 @@ impl SamplerShared {
 
     /// Plays a slot now, as if its pad were pressed. Pair with [`release`](Self::release).
     pub fn trigger(&self, slot: usize) {
+        self.trigger_velocity(slot, 1.0);
+    }
+
+    /// Like [`trigger`](Self::trigger), but the hit plays at `v` (0..1, clamped)
+    /// of full level. A hit recorded into the pattern keeps this velocity.
+    pub fn trigger_velocity(&self, slot: usize, v: f32) {
         if let Some(c) = self.pads.get(slot) {
             c.held.store(true, Ordering::Relaxed);
+            c.hit_vel.store(sane(v, 0.0, 1.0, 1.0).to_bits(), Ordering::Relaxed);
             c.hits.fetch_add(1, Ordering::Release);
         }
     }
@@ -342,6 +432,77 @@ enum Hold {
     Frames(f64),
 }
 
+/// Where a voice is in its amp envelope (before it is released).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stage {
+    Attack,
+    Decay,
+    Sustain,
+}
+
+/// A topology-preserving-transform (zero-delay) state-variable filter for one
+/// voice: two integrators per channel, and the coefficients.
+///
+/// Adapted from soundCraft (github.com/storytold/soundcraft,
+/// crates/dsp/src/plugins/synth.rs), MIT OR Apache-2.0, Copyright (c) 2026
+/// ArtCraft Team and the SoundCraft contributors. The coefficients, the
+/// integrator update, the denormal flush and the resonance-to-`k` mapping
+/// follow its `Svf`; ours adds high-pass and band-pass outputs, a stereo state
+/// and per-block coefficients.
+#[derive(Debug, Clone, Copy, Default)]
+struct VoiceFilter {
+    mode: u8,
+    k: f32,
+    a1: f32,
+    a2: f32,
+    a3: f32,
+    ic1: [f32; 2],
+    ic2: [f32; 2],
+}
+
+impl VoiceFilter {
+    /// Sets the mode and coefficients: one `tan` per call. Plain math.
+    fn tune(&mut self, mode: u8, cutoff: f32, resonance: f32, rate: f64) {
+        self.mode = mode;
+        if mode == FILTER_OFF {
+            return;
+        }
+        let top = CUTOFF_MAX.min(rate as f32 * 0.45).max(CUTOFF_MIN);
+        let fc = sane(cutoff, CUTOFF_MIN, top, CUTOFF_MAX);
+        let g = (std::f32::consts::PI * fc / rate as f32).tan();
+        // Resonance 0 is k = 2 (Q 0.5); 1 is k = 0.05 (Q 20).
+        self.k = 2.0 - 1.95 * sane(resonance, 0.0, 1.0, 0.0);
+        self.a1 = 1.0 / (1.0 + g * (g + self.k));
+        self.a2 = g * self.a1;
+        self.a3 = g * self.a2;
+    }
+
+    fn reset(&mut self) {
+        self.ic1 = [0.0; 2];
+        self.ic2 = [0.0; 2];
+    }
+
+    #[inline]
+    fn flush(x: f32) -> f32 {
+        if x.is_finite() && x.abs() > 1.0e-25 { x } else { 0.0 }
+    }
+
+    #[inline]
+    fn process(&mut self, ch: usize, x: f32) -> f32 {
+        let v3 = x - self.ic2[ch];
+        let v1 = self.a1 * self.ic1[ch] + self.a2 * v3;
+        let v2 = self.ic2[ch] + self.a2 * self.ic1[ch] + self.a3 * v3;
+        self.ic1[ch] = Self::flush(2.0 * v1 - self.ic1[ch]);
+        self.ic2[ch] = Self::flush(2.0 * v2 - self.ic2[ch]);
+        let y = match self.mode {
+            FILTER_LOW_PASS => v2,
+            FILTER_HIGH_PASS => x - self.k * v1 - v2,
+            _ => self.k * v1, // band-pass, unity gain at the centre
+        };
+        if y.is_finite() { y } else { 0.0 }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Voice {
     active: bool,
@@ -357,6 +518,32 @@ struct Voice {
     releasing: bool,
     hold: Hold,
     age: u64,
+    // Amp envelope and filter, kept after the fields above.
+    stage: Stage,
+    /// Attack: level added per frame.
+    atk_inc: f32,
+    /// Decay: factor per frame on the way to `sustain`; 0 when the pad has no decay.
+    dec_coef: f32,
+    sustain: f32,
+    /// Release: level taken off per frame when timed from full level.
+    rel_full: f32,
+    /// Release: level taken off per frame now that the voice is releasing.
+    rel_step: f32,
+    /// Released by a cut, choke or retrigger, so on the 4 ms fade.
+    fast: bool,
+    filter: VoiceFilter,
+}
+
+impl Voice {
+    /// Starts the release. `fast` is the step of a cut (4 ms from full level,
+    /// whatever the pad's release is); `None` is the pad's own release, timed
+    /// from the level the voice is at, so it lasts `release` seconds.
+    fn release(&mut self, fast: Option<f32>) {
+        let step = fast.unwrap_or(self.env.max(0.0) * self.rel_full);
+        self.rel_step = if self.releasing { self.rel_step.max(step) } else { step };
+        self.releasing = true;
+        self.fast |= fast.is_some();
+    }
 }
 
 impl Default for Voice {
@@ -375,6 +562,14 @@ impl Default for Voice {
             releasing: false,
             hold: Hold::Free,
             age: 0,
+            stage: Stage::Sustain,
+            atk_inc: 1.0,
+            dec_coef: 0.0,
+            sustain: 1.0,
+            rel_full: 1.0,
+            rel_step: 0.0,
+            fast: false,
+            filter: VoiceFilter::default(),
         }
     }
 }
@@ -390,7 +585,6 @@ pub struct Sampler {
     hits: [u32; SLOTS],
     cuts: [u32; SLOTS],
     rate: f64,
-    attack: f32,
     release: f32,
     edge: f64,
     clock: u64,
@@ -459,7 +653,6 @@ impl Sampler {
             hits: [0; SLOTS],
             cuts: [0; SLOTS],
             rate,
-            attack: (1.0 / (rate * ATTACK_SECONDS)).min(1.0) as f32,
             release: (1.0 / (rate * RELEASE_SECONDS)).min(1.0) as f32,
             edge: rate * RELEASE_SECONDS,
             clock: 0,
@@ -518,13 +711,15 @@ impl Sampler {
             let hits = c.hits.load(Ordering::Acquire);
             if hits != self.hits[slot] {
                 self.hits[slot] = hits;
+                let vel = sane(f32::from_bits(c.hit_vel.load(Ordering::Relaxed)), 0.0, 1.0, 1.0);
                 if recording && slot < PADS {
-                    self.record_hit(shared, slot, steps);
+                    self.record_hit(shared, slot, steps, vel);
                 }
                 let hold = if c.held.load(Ordering::Acquire) { Hold::Held } else { Hold::Frames(self.rate * 0.05) };
-                self.start(shared, slot, hold, 1.0);
+                self.start(shared, slot, hold, vel);
             }
         }
+        self.tune_filters(shared);
 
         let channels = channels.max(1);
         let frames = out.len() / channels;
@@ -599,7 +794,7 @@ impl Sampler {
     /// sequencer is comes from `countdown`, the frames left in the step that
     /// fired last: in its first half the hit goes on that step, in its second
     /// half on the next one, which the sequencer then skips for this pad once.
-    fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize) {
+    fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize, vel: f32) {
         let current = (self.next_step + steps - 1) % steps;
         let length = shared.step_frames(current, self.rate);
         let step = if self.countdown > length * 0.5 {
@@ -610,6 +805,7 @@ impl Sampler {
             self.next_step
         };
         shared.pads[pad].pattern.fetch_or(1u64 << step, Ordering::Relaxed);
+        shared.set_velocity(pad, step, vel);
         shared.recorded.fetch_add(1, Ordering::Release);
     }
 
@@ -639,11 +835,26 @@ impl Sampler {
 
     /// Releases the voices of every other pad in choke group `group`.
     fn choke(&mut self, shared: &SamplerShared, slot: usize, group: u8) {
-        for v in self.voices.iter_mut().filter(|v| v.active && !v.releasing && v.slot != slot && v.slot < PADS) {
+        let fast = self.release;
+        for v in self.voices.iter_mut().filter(|v| v.active && !v.fast && v.slot != slot && v.slot < PADS) {
             let flags = shared.pads[v.slot].flags.load(Ordering::Relaxed);
             if ((flags >> CHOKE_SHIFT) & CHOKE_MASK) as u8 == group {
-                v.releasing = true;
+                v.release(Some(fast));
             }
+        }
+    }
+
+    /// Retunes every sounding voice's filter from its pad, once per block, so
+    /// turning the cutoff while a pad rings needs no per-sample trig.
+    fn tune_filters(&mut self, shared: &SamplerShared) {
+        for v in self.voices.iter_mut().filter(|v| v.active) {
+            let c = &shared.pads[v.slot];
+            let mode = c.filter.load(Ordering::Relaxed);
+            if v.filter.mode == FILTER_OFF && mode != FILTER_OFF {
+                v.filter.reset(); // switched on while ringing: start from silence
+            }
+            let f = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
+            v.filter.tune(mode, f(&c.cutoff), f(&c.resonance), self.rate);
         }
     }
 
@@ -673,6 +884,19 @@ impl Sampler {
             None => (0..VOICES).min_by_key(|&i| self.voices[i].age).unwrap_or(0),
         };
         self.clock += 1;
+        let rate = self.rate;
+        let attack_secs = ATTACK_SECONDS.max(f64::from(p.attack));
+        let release_secs = f64::from(p.release).max(MIN_RELEASE_SECONDS);
+        // The default (0.004 as an f32) is the 4 ms fade exactly, as before.
+        let release_secs = if (release_secs - RELEASE_SECONDS).abs() < 1e-6 { RELEASE_SECONDS } else { release_secs };
+        let dec_coef = if p.decay > 0.0 {
+            // Exponential, `decay` seconds to fall 60 dB of the way to sustain.
+            (0.001f64.powf(1.0 / (rate * f64::from(p.decay))) as f32).max(1.0e-20)
+        } else {
+            0.0
+        };
+        let mut filter = VoiceFilter::default();
+        filter.tune(p.filter, p.cutoff, p.resonance, rate);
         self.voices[i] = Voice {
             active: true,
             slot,
@@ -688,13 +912,22 @@ impl Sampler {
             releasing: false,
             hold,
             age: self.clock,
+            stage: Stage::Attack,
+            atk_inc: (1.0 / (rate * attack_secs)).min(1.0) as f32,
+            dec_coef,
+            sustain: p.sustain,
+            rel_full: (1.0 / (rate * release_secs)).min(1.0) as f32,
+            rel_step: 0.0,
+            fast: false,
+            filter,
         };
         shared.pads[slot].played.fetch_add(1, Ordering::Relaxed);
     }
 
     fn release_slot(&mut self, slot: usize) {
+        let fast = self.release;
         for v in self.voices.iter_mut().filter(|v| v.active && v.slot == slot) {
-            v.releasing = true;
+            v.release(Some(fast));
         }
     }
 
@@ -707,19 +940,46 @@ impl Sampler {
                 continue;
             };
             match v.hold {
-                Hold::Held if !shared.pads[v.slot].held.load(Ordering::Relaxed) => v.releasing = true,
-                Hold::Frames(n) if n <= 0.0 => v.releasing = true,
+                Hold::Held if !shared.pads[v.slot].held.load(Ordering::Relaxed) => {
+                    if !v.releasing {
+                        v.release(None);
+                    }
+                }
+                Hold::Frames(n) if n <= 0.0 => {
+                    if !v.releasing {
+                        v.release(None);
+                    }
+                }
                 Hold::Frames(n) => v.hold = Hold::Frames(n - 1.0),
                 _ => {}
             }
             if v.releasing {
-                v.env -= self.release;
+                v.env -= v.rel_step;
                 if v.env <= 0.0 {
                     v.active = false;
                     continue;
                 }
-            } else if v.env < 1.0 {
-                v.env = (v.env + self.attack).min(1.0);
+            } else {
+                match v.stage {
+                    Stage::Attack => {
+                        v.env = (v.env + v.atk_inc).min(1.0);
+                        if v.env >= 1.0 {
+                            v.stage = if v.dec_coef > 0.0 { Stage::Decay } else { Stage::Sustain };
+                        }
+                    }
+                    Stage::Decay => {
+                        v.env = v.sustain + (v.env - v.sustain) * v.dec_coef;
+                        if (v.env - v.sustain).abs() < DECAY_SNAP {
+                            v.env = v.sustain;
+                            v.stage = Stage::Sustain;
+                            if v.sustain <= 0.0 {
+                                v.active = false; // decayed to silence: the voice is done
+                                continue;
+                            }
+                        }
+                    }
+                    Stage::Sustain => {}
+                }
             }
             // Fade over the last few milliseconds before the end point.
             let to_edge = if v.inc > 0.0 { (v.hi - v.pos) / v.inc } else { (v.pos - v.lo) / -v.inc };
@@ -730,8 +990,12 @@ impl Sampler {
             let frac = (v.pos - i as f64) as f32;
             let j = (i + 1).min(sample[0].len() - 1);
             let read = |c: &[f32]| c[i] + (c[j] - c[i]) * frac;
-            let l = read(&sample[0]);
-            let r = if sample.len() > 1 { read(&sample[1]) } else { l };
+            let mut l = read(&sample[0]);
+            let mut r = if sample.len() > 1 { read(&sample[1]) } else { l };
+            if v.filter.mode != FILTER_OFF {
+                l = v.filter.process(0, l);
+                r = v.filter.process(1, r);
+            }
             left += g * v.left * l;
             right += g * v.right * r;
 
@@ -1206,5 +1470,330 @@ mod tests {
         shared.trigger(0);
         run(&mut s, &shared, 100);
         assert_eq!(shared.pattern(0), 1, "wrapped to step 0");
+    }
+
+    // ---- Sound shaping: amp envelope, filter, hit velocity ----
+
+    /// Plays `sample` on pad 0 with `p`, hit by hand, and returns the left channel.
+    fn play(p: &PadParams, sample: Track, frames: usize) -> Vec<f32> {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sample));
+        shared.trigger(0);
+        run(&mut s, &shared, frames).chunks(2).map(|f| f[0]).collect()
+    }
+
+    fn sine(hz: f32, frames: usize) -> Track {
+        Arc::new(vec![(0..frames).map(|i| (std::f32::consts::TAU * hz * i as f32 / RATE as f32).sin()).collect()])
+    }
+
+    fn rms(x: &[f32]) -> f32 {
+        (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt()
+    }
+
+    /// RMS of a long sine through a pad's filter, once the filter has settled.
+    fn through(p: &PadParams, hz: f32) -> f32 {
+        let out = play(p, sine(hz, 48_000), 40_000);
+        rms(&out[8_000..])
+    }
+
+    #[test]
+    fn default_shaping_is_the_old_sound() {
+        let d = PadParams::default();
+        assert_eq!((d.attack, d.decay, d.sustain, d.filter, d.cutoff, d.resonance), (0.0, 0.0, 1.0, 0, 20_000.0, 0.0));
+        let shared = SamplerShared::default();
+        assert_eq!(shared.pad(0), d, "set and read back");
+
+        // The old fade-in: 0.5 ms (24 frames) up from zero.
+        let out = play(&d, dc(10_000, 0.5), 200);
+        for (i, &x) in out.iter().enumerate().take(30) {
+            let want = 0.5 * ((i + 1) as f32 / 24.0).min(1.0);
+            assert!((x - want).abs() < 1e-5, "frame {i}: {x} vs {want}");
+        }
+        // Settings that cannot matter leave every sample alone, bit for bit.
+        let plain = play(&d, sine(440.0, 5_000), 5_000);
+        let same = PadParams { sustain: 0.2, filter: 0, cutoff: 100.0, resonance: 1.0, attack: 0.0001, ..d };
+        assert_eq!(plain, play(&same, sine(440.0, 5_000), 5_000), "no decay, filter off, attack under the minimum");
+    }
+
+    #[test]
+    fn the_default_release_is_the_old_four_ms_fade() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams { gate: true, ..Default::default() });
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(48_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 1_000);
+        shared.release(0);
+        let out: Vec<f32> = run(&mut s, &shared, 400).chunks(2).map(|f| f[0]).collect();
+        // 4 ms is 192 frames, a straight line down from 0.5.
+        for (i, &x) in out.iter().enumerate().take(190) {
+            let want = 0.5 * (1.0 - (i + 1) as f32 / 192.0);
+            assert!((x - want).abs() < 1e-4, "frame {i}: {x} vs {want}");
+        }
+        assert_eq!(out[196], 0.0);
+    }
+
+    #[test]
+    fn attack_reaches_full_level_on_time() {
+        let p = PadParams { attack: 0.1, ..Default::default() }; // 4,800 frames
+        let out = play(&p, dc(48_000, 0.5), 6_000);
+        assert!((out[2_399] - 0.25).abs() < 0.002, "halfway: {}", out[2_399]);
+        assert!(out[4_700] < 0.49, "not there yet: {}", out[4_700]);
+        assert!((out[4_799] - 0.5).abs() < 1e-4, "there: {}", out[4_799]);
+        assert_eq!(out[5_500], 0.5);
+        assert!(out.windows(2).all(|w| w[1] >= w[0]), "rises straight up");
+    }
+
+    #[test]
+    fn decay_falls_to_the_sustain_level() {
+        // 0.2 s to fall 60 dB of the way from full to 0.4.
+        let p = PadParams { decay: 0.2, sustain: 0.4, ..Default::default() };
+        let out = play(&p, dc(96_000, 0.5), 48_000);
+        let at = |sec: f32| out[(sec * RATE as f32) as usize] / 0.5;
+        assert!(at(0.001) > 0.97, "starts near full: {}", at(0.001));
+        assert!((at(0.1) - (0.4 + 0.6 * 0.001f32.powf(0.5))).abs() < 2e-3, "halfway through: {}", at(0.1));
+        assert!((at(0.2) - (0.4 + 0.6 * 0.001)).abs() < 2e-3, "-60 dB of the way at 0.2 s: {}", at(0.2));
+        assert!((at(0.6) - 0.4).abs() < 1e-6, "holding: {}", at(0.6));
+        assert!((at(0.99) - 0.4).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_one_shot_that_decays_to_nothing_frees_its_voice() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams { decay: 0.05, sustain: 0.0, ..Default::default() });
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(480_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 20_000);
+        assert!(s.voices.iter().all(|v| !v.active));
+    }
+
+    #[test]
+    fn release_takes_its_time_on_a_gate_pad() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams { gate: true, release: 0.1, ..Default::default() });
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(96_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 2_000);
+        shared.release(0);
+        let out: Vec<f32> = run(&mut s, &shared, 6_000).chunks(2).map(|f| f[0]).collect();
+        assert!((out[2_399] - 0.25).abs() < 0.002, "halfway down at 50 ms: {}", out[2_399]);
+        assert!(out[4_700] > 0.0, "still fading");
+        assert_eq!(out[4_820], 0.0, "silent after 100 ms");
+    }
+
+    #[test]
+    fn release_lasts_the_same_from_the_sustain_level() {
+        let p = PadParams { gate: true, decay: 0.01, sustain: 0.4, release: 0.1, ..Default::default() };
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(96_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 20_000);
+        shared.release(0);
+        let out: Vec<f32> = run(&mut s, &shared, 6_000).chunks(2).map(|f| f[0]).collect();
+        assert!((out[0] - 0.2).abs() < 0.01, "starts at the sustain level: {}", out[0]);
+        assert!((out[2_399] - 0.1).abs() < 0.005, "{}", out[2_399]);
+        assert_eq!(out[4_820], 0.0, "still 100 ms, not 40");
+    }
+
+    #[test]
+    fn a_sequencer_gate_step_ends_with_the_release() {
+        let shared = SamplerShared::default();
+        shared.set_steps(4);
+        shared.set_tempo(120.0); // 6,000 frames a step
+        shared.set_pattern(0, 1);
+        shared.set_pad(0, &PadParams { gate: true, release: 0.05, ..Default::default() });
+        let out = render_pattern(&[Some(dc(48_000, 0.5))], &shared, RATE, 1);
+        assert!(out[0][5_999] > 0.49);
+        assert!((out[0][6_000 + 1_200] - 0.25).abs() < 0.01, "half way down 25 ms after the step: {}", out[0][7_200]);
+        assert_eq!(out[0][6_000 + 2_420], 0.0);
+    }
+
+    #[test]
+    fn cuts_stay_tight_whatever_the_release() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams { gate: true, release: 3.0, ..Default::default() });
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(480_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 1_000);
+        shared.cut(0);
+        let out: Vec<f32> = run(&mut s, &shared, 400).chunks(2).map(|f| f[0]).collect();
+        assert_eq!(out[200], 0.0, "gone after the 4 ms fade");
+
+        // A retrigger while a long release rings is cut tight too.
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams { gate: true, release: 3.0, ..Default::default() });
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(480_000, 0.5)));
+        shared.trigger(0);
+        run(&mut s, &shared, 1_000);
+        shared.release(0);
+        run(&mut s, &shared, 1_000); // ringing out slowly
+        shared.trigger(0);
+        run(&mut s, &shared, 400);
+        assert_eq!(s.voices.iter().filter(|v| v.active).count(), 1, "the old voice faded in 4 ms");
+
+        // So is a choke.
+        let shared = SamplerShared::default();
+        for pad in 0..2 {
+            shared.set_pad(pad, &PadParams { gate: true, release: 3.0, choke: 1, ..Default::default() });
+        }
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(480_000, 0.5)));
+        s.set_sample(1, Some(dc(480_000, 0.25)));
+        shared.trigger(0);
+        run(&mut s, &shared, 1_000);
+        shared.trigger(1);
+        let out: Vec<f32> = run(&mut s, &shared, 400).chunks(2).map(|f| f[0]).collect();
+        assert!((out[399] - 0.25).abs() < 1e-4, "pad 0 choked in 4 ms: {}", out[399]);
+    }
+
+    fn lp(cutoff: f32, resonance: f32) -> PadParams {
+        PadParams { filter: FILTER_LOW_PASS, cutoff, resonance, ..Default::default() }
+    }
+
+    #[test]
+    fn a_low_pass_keeps_the_lows_and_cuts_the_highs() {
+        let input = rms(&sine(200.0, 48_000)[0][8_000..40_000]);
+        let low = through(&lp(1_000.0, 0.0), 200.0);
+        let high = through(&lp(1_000.0, 0.0), 8_000.0);
+        assert!((low / input - 1.0).abs() < 0.05, "200 Hz passes: {}", low / input);
+        assert!(high / input < 0.05, "8 kHz is down 26 dB or more: {}", high / input);
+    }
+
+    #[test]
+    fn a_high_pass_keeps_the_highs_and_cuts_the_lows() {
+        let p = PadParams { filter: FILTER_HIGH_PASS, cutoff: 2_000.0, ..Default::default() };
+        let input = rms(&sine(200.0, 48_000)[0][8_000..40_000]);
+        let high = through(&p, 10_000.0);
+        let low = through(&p, 200.0);
+        assert!((high / input - 1.0).abs() < 0.05, "10 kHz passes: {}", high / input);
+        assert!(low / input < 0.05, "200 Hz is down 26 dB or more: {}", low / input);
+    }
+
+    #[test]
+    fn a_band_pass_keeps_the_middle() {
+        let p = PadParams { filter: FILTER_BAND_PASS, cutoff: 1_000.0, resonance: 0.8, ..Default::default() };
+        let input = rms(&sine(1_000.0, 48_000)[0][8_000..40_000]);
+        assert!((through(&p, 1_000.0) / input - 1.0).abs() < 0.05, "unity at the centre");
+        assert!(through(&p, 100.0) / input < 0.2);
+        assert!(through(&p, 10_000.0) / input < 0.2);
+    }
+
+    #[test]
+    fn resonance_boosts_near_the_cutoff() {
+        let flat = through(&lp(1_000.0, 0.0), 1_000.0);
+        let peaky = through(&lp(1_000.0, 0.9), 1_000.0);
+        assert!(peaky > flat * 5.0, "{peaky} vs {flat}");
+        // Far from the cutoff it does not.
+        let a = through(&lp(4_000.0, 0.0), 100.0);
+        let b = through(&lp(4_000.0, 0.9), 100.0);
+        assert!((a - b).abs() / a < 0.05, "{a} vs {b}");
+    }
+
+    #[test]
+    fn the_filter_follows_the_knob_while_a_pad_rings() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &lp(20_000.0, 0.0));
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(4_000.0, 96_000)));
+        shared.trigger(0);
+        let first: Vec<f32> = run(&mut s, &shared, 4_800).chunks(2).map(|f| f[0]).collect();
+        shared.set_pad(0, &lp(200.0, 0.0));
+        let second: Vec<f32> = run(&mut s, &shared, 4_800).chunks(2).map(|f| f[0]).collect();
+        assert!(rms(&first[1_000..]) > 0.65, "open: {}", rms(&first[1_000..]));
+        assert!(rms(&second[2_400..]) < 0.01, "closed: {}", rms(&second[2_400..]));
+        assert!(second.iter().all(|x| x.is_finite()));
+    }
+
+    #[test]
+    fn the_cutoff_is_kept_below_nyquist() {
+        // At a low rate, 20 kHz is above Nyquist; the filter must stay finite and stable.
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &lp(20_000.0, 1.0));
+        let mut s = Sampler::offline(22_050);
+        s.set_sample(0, Some(sine(3_000.0, 20_000)));
+        shared.trigger(0);
+        let out = run(&mut s, &shared, 20_000);
+        assert!(out.iter().all(|x| x.is_finite() && x.abs() < 40.0));
+        shared.set_pad(0, &PadParams { filter: FILTER_LOW_PASS, cutoff: f32::NAN, resonance: f32::NAN, ..Default::default() });
+        assert_eq!(shared.pad(0).cutoff, 20_000.0, "a bad number is the default");
+    }
+
+    #[test]
+    fn a_new_voice_starts_the_filter_from_silence() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &lp(500.0, 0.9));
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(48_000, 0.5)));
+        shared.trigger(0);
+        let a = run(&mut s, &shared, 2_000);
+        shared.cut(0);
+        run(&mut s, &shared, 500);
+        shared.trigger(0);
+        let b = run(&mut s, &shared, 2_000);
+        assert_eq!(a, b, "the same hit sounds the same twice");
+    }
+
+    #[test]
+    fn trigger_velocity_scales_the_hit() {
+        let shared = SamplerShared::default();
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(20_000, 0.4)));
+        shared.trigger_velocity(0, 0.5);
+        assert!((run(&mut s, &shared, 1_000)[1_998] - 0.2).abs() < 1e-6, "half level");
+        shared.trigger(0);
+        assert!((run(&mut s, &shared, 1_000)[1_998] - 0.4).abs() < 1e-6, "trigger is full velocity");
+        shared.trigger_velocity(0, 7.0);
+        assert!((run(&mut s, &shared, 1_000)[1_998] - 0.4).abs() < 1e-6, "clamped to full");
+        shared.trigger_velocity(0, 0.0);
+        assert_eq!(run(&mut s, &shared, 1_000)[1_998], 0.0, "zero is silent");
+        shared.trigger_velocity(PADS + 5, 0.5); // a bad slot is ignored
+    }
+
+    #[test]
+    fn a_recorded_hit_keeps_its_velocity() {
+        let (mut s, shared) = recording_rig();
+        run(&mut s, &shared, 12_500);
+        shared.trigger_velocity(0, 0.5);
+        let out = run(&mut s, &shared, 100);
+        assert_eq!(shared.pattern(0), 1 << 2);
+        assert!((shared.velocity(0, 2) - 0.5).abs() < 0.003, "{}", shared.velocity(0, 2));
+        assert!((out[198] - 0.05).abs() < 1e-3, "and it sounded at half: {}", out[198]);
+
+        // The next pass plays the step at that velocity.
+        run(&mut s, &shared, 16 * 6_000 - 100);
+        let out = run(&mut s, &shared, 3_000);
+        assert!((out[2_000] - 0.05).abs() < 1e-3, "{}", out[2_000]);
+    }
+
+    #[test]
+    fn render_pattern_carries_the_shaping() {
+        let shared = SamplerShared::default();
+        shared.set_steps(1);
+        shared.set_tempo(60.0);
+        shared.set_pattern(0, 1);
+        let p = PadParams { attack: 0.1, decay: 0.2, sustain: 0.5, release: 0.3, filter: FILTER_HIGH_PASS, cutoff: 3_000.0, resonance: 0.5, ..Default::default() };
+        shared.set_pad(0, &p);
+        assert_eq!(shared.pad(0), p);
+        shared.set_pad(0, &PadParams { attack: 9.0, decay: -1.0, sustain: 3.0, release: 99.0, filter: 9, cutoff: 1.0, resonance: 5.0, ..p });
+        let c = shared.pad(0);
+        assert_eq!((c.attack, c.decay, c.sustain, c.release, c.filter, c.cutoff, c.resonance), (2.0, 0.0, 1.0, 5.0, 3, 20.0, 1.0));
+        shared.set_pad(0, &p);
+
+        let out = render_pattern(&[Some(dc(12_000, 0.5))], &shared, RATE, 1);
+        assert!(out[0][2_399].abs() < 0.2, "the filter took the DC out: {}", out[0][2_399]);
+        let plain = SamplerShared::default();
+        plain.set_steps(1);
+        plain.set_tempo(60.0);
+        plain.set_pattern(0, 1);
+        let same = render_pattern(&[Some(dc(12_000, 0.5))], &plain, RATE, 1);
+        assert_ne!(out, same, "and it differs from the defaults");
     }
 }
