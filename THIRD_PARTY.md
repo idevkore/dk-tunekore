@@ -105,6 +105,15 @@ SAM Audio (Meta) was tried in Phase 1 and removed on 2026-10-24; see
 | --- | --- | --- |
 | Demucs `htdemucs`, `htdemucs_ft` (Hugging Face `adefossez/HTDemucs`, `adefossez/HTDemucs-ft`) | The author: "provided only for scientific purposes" | Prototyping on Nate's Mac only. Can't ship. |
 
+## Code adapted from other projects
+
+Code we adapted rather than depend on. Each file keeps a header naming its
+source and licence.
+
+| Project | Licence | Where | What |
+| --- | --- | --- | --- |
+| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft Team and the SoundCraft contributors) | MIT OR Apache-2.0 | `engine/src/limiter.rs` | The master limiter, from soundCraft's `Maximizer` (`crates/dsp/src/plugins/dynamics.rs`, commit `7dc56a4`) |
+
 ## System libraries, not bundled
 
 The app links the operating system's own libraries. They are not part of what

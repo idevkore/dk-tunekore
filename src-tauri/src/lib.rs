@@ -98,6 +98,19 @@ fn stop_tone(state: Shared<'_>) {
     audio(&state).lock().unwrap().engine.set_tone(false, 440.0, 0.0);
 }
 
+/// The master level in dB (-60 = off, up to +6). Everything is limited after it.
+#[tauri::command]
+fn set_master(db: f32, state: Shared<'_>) {
+    let gain = if db <= -60.0 { 0.0 } else { 10f32.powf(db.min(6.0) / 20.0) };
+    audio(&state).lock().unwrap().engine.set_master(gain);
+}
+
+#[tauri::command]
+fn master(state: Shared<'_>) -> f32 {
+    let g = audio(&state).lock().unwrap().engine.master();
+    if g <= 0.0 { -60.0 } else { 20.0 * g.log10() }
+}
+
 /// The output device in use (`None` = the system default), or `None` when closed.
 #[tauri::command]
 fn current_output(state: Shared<'_>) -> Option<Option<String>> {
@@ -136,6 +149,11 @@ fn spawn_meter(app: tauri::AppHandle, meter: Meter) {
                 let _ = app.emit("meter", peak);
             }
             was_active = peak > 0.0;
+            // Gain reduction in dB while the master limiter works, so the UI can light up.
+            let g = meter.take_limiting();
+            if g < 0.99 {
+                let _ = app.emit("limiter", 20.0 * g.max(1e-6).log10());
+            }
         }
     });
 }
@@ -186,6 +204,8 @@ pub fn run() {
             start_tone,
             stop_tone,
             current_output,
+            set_master,
+            master,
             set_output,
             analyzer::open_analyzer,
             analyzer::analyzer_backends,

@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import logo from "../brand/tunekore-logo-color.svg";
 import mark from "../brand/tunekore-mark.svg";
-import { onMeter } from "./engine";
+import { onLimiter, onMeter } from "./engine";
 import { openAnalyzer } from "./analyzer/api";
 import * as api from "./sampler/api";
 import { PAD_KEYS, subscribe, type LibraryItem, type PadSettings, type SamplerView, type Tick } from "./sampler/api";
@@ -43,6 +43,7 @@ export default function App() {
   const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [] });
   const [selected, setSelected] = useState(0);
   const [level, setLevel] = useState(0);
+  const [limiting, setLimiting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [dropPad, setDropPad] = useState<number | null>(null);
@@ -67,6 +68,7 @@ export default function App() {
       subscribe(api.onState(take)),
       subscribe(api.onTick(setTick)),
       subscribe(onMeter((peak) => setLevel((prev) => Math.max(peak, prev * 0.8)))),
+      subscribe(onLimiter(() => setLimiting(true))),
     ];
     return () => offs.forEach((off) => off());
   }, [take, fail]);
@@ -82,6 +84,13 @@ export default function App() {
       ),
     [],
   );
+
+  // The limiter light goes out a moment after the last limiter event.
+  useEffect(() => {
+    if (!limiting) return;
+    const t = setTimeout(() => setLimiting(false), 400);
+    return () => clearTimeout(t);
+  }, [limiting]);
 
   useEffect(() => {
     if (level === 0) return;
@@ -440,7 +449,7 @@ export default function App() {
         <button className="btn small icon" onClick={() => setAudioOpen(true)} aria-label="Audio settings" title="Audio settings">
           <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2zM11.5 5.5a3.5 3.5 0 0 1 0 5M13 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
-        <div className="meter" role="meter" aria-label="Output level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={meterPosition(level)}>
+        <div className={`meter${limiting ? " limiting" : ""}`} title={limiting ? "The limiter is holding the output under -0.3 dBFS" : "Output level"} role="meter" aria-label="Output level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={meterPosition(level)}>
           <div className="meter-fill" style={{ transform: `scaleX(${meterPosition(level)})` }} />
         </div>
       </header>

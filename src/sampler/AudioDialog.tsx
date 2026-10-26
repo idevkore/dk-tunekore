@@ -1,6 +1,6 @@
 // Audio settings: which output device to play on, and a test tone to check it.
 import { useEffect, useState } from "react";
-import { engineVersion, listOutputs, startTone, stopTone, type OutputDevice } from "../engine";
+import { engineVersion, getMaster, listOutputs, setMaster, startTone, stopTone, type OutputDevice } from "../engine";
 import { currentOutput, setOutput } from "./api";
 import Dialog from "./Dialog";
 
@@ -11,11 +11,13 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
   const [device, setDevice] = useState(DEFAULT);
   const [tone, setTone] = useState(false);
   const [version, setVersion] = useState("");
+  const [master, setMasterDb] = useState(0);
 
   useEffect(() => {
     listOutputs().then(setDevices).catch(onError);
     currentOutput().then((d) => setDevice(d ?? DEFAULT)).catch(() => {});
     engineVersion().then(setVersion).catch(() => {});
+    getMaster().then(setMasterDb).catch(() => {});
     return () => void stopTone().catch(() => {});
   }, [onError]);
 
@@ -52,6 +54,28 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
             </option>
           ))}
         </select>
+      </label>
+      <label className="field">
+        <span>
+          Master level <span className="mono">{master <= -60 ? "off" : `${master > 0 ? "+" : ""}${master.toFixed(1)} dB`}</span>
+        </span>
+        <input
+          type="range"
+          min={-60}
+          max={6}
+          step={0.5}
+          value={master}
+          onChange={(e) => {
+            const db = Number(e.target.value);
+            setMasterDb(db);
+            setMaster(db).catch(onError);
+          }}
+          onDoubleClick={() => {
+            setMasterDb(0);
+            setMaster(0).catch(onError);
+          }}
+        />
+        <span className="dim small">A limiter after it keeps the output under -0.3 dBFS, so a full kit never clips. Double-click to reset.</span>
       </label>
       <div className="field-row">
         <button className={`btn small${tone ? " primary" : ""}`} onClick={() => void toggleTone()}>
