@@ -401,6 +401,9 @@ pub async fn analyzer_to_pads(
     .await
     .map_err(|e| e.to_string())?;
     crate::sampler::publish_now(&app);
+    if let Ok(r) = &result {
+        let _ = app.emit("sampler:chopped", &r.folder);
+    }
     result
 }
 
