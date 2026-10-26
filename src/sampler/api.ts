@@ -52,6 +52,10 @@ export interface PadView {
   steps: boolean[];
   /** How hard each step plays, 0..1, one per step. */
   velocity: number[];
+  /** How likely each step is to play, 0..1. */
+  chance: number[];
+  /** Hits per step, 1–4. */
+  ratchet: number[];
 }
 
 export interface SamplerView {
@@ -70,6 +74,10 @@ export interface SamplerView {
   patternsUsed: boolean[];
   metronome: boolean;
   recording: boolean;
+  /** Song mode: patterns to play in order (0 = A). */
+  chain: number[];
+  songMode: boolean;
+  songLoop: boolean;
 }
 
 export interface Tick {
@@ -77,6 +85,8 @@ export interface Tick {
   step: number | null;
   /** Play count per pad; a change means the pad just played. */
   played: number[];
+  /** Which chain entry the song is on, in song mode. */
+  chainPosition: number | null;
 }
 
 export interface LibraryItem {
@@ -116,12 +126,15 @@ export const copyPattern = (from: number, to: number) => invoke<SamplerView>("sa
 export const setMetronome = (on: boolean) => invoke<SamplerView>("sampler_metronome", { on });
 export const setRecording = (on: boolean) => invoke<SamplerView>("sampler_record", { on });
 export const chop = (pad: number, count: number) => invoke<{ pads: number[]; folder: string }>("sampler_chop", { pad, count });
-export const exportStems = (dir: string, loops: number) => invoke<Exported[]>("sampler_export_stems", { dir, loops });
+export const exportStems = (dir: string, loops: number, song: boolean) => invoke<Exported[]>("sampler_export_stems", { dir, loops, song });
+export const setStepExtras = (pad: number, step: number, chance: number, ratchet: number) =>
+  invoke<SamplerView>("sampler_step_extras", { pad, step, chance, ratchet });
+export const setSong = (chain: number[], songMode: boolean, songLoop: boolean) => invoke<SamplerView>("sampler_song", { chain, songMode, songLoop });
 export const collectSamples = () => invoke<SamplerView>("project_collect");
 export const undo = () => invoke<SamplerView>("sampler_undo");
 export const redo = () => invoke<SamplerView>("sampler_redo");
-export const bounce = (loops: number) => invoke<{ pad: number; path: string }>("sampler_bounce", { loops });
-export const exportPattern = (path: string, loops: number) => invoke<Exported>("sampler_export", { path, loops });
+export const bounce = (loops: number, song: boolean) => invoke<{ pad: number; path: string }>("sampler_bounce", { loops, song });
+export const exportPattern = (path: string, loops: number, song: boolean) => invoke<Exported>("sampler_export", { path, loops, song });
 
 export const scanLibrary = (dir: string) => invoke<LibraryScan>("library_scan", { dir });
 export const defaultLibrary = () => invoke<string | null>("library_default");

@@ -34,7 +34,7 @@ export default function MidiDot() {
   return (
     <span className={`midi-dot${names.length ? " on" : ""}${blink ? " blink" : ""}`} title={title} role="status" aria-label={title}>
       <i aria-hidden="true" />
-      MIDI
+      <span className="wide-only" aria-hidden="true">MIDI</span>
     </span>
   );
 }

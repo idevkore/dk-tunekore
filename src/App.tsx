@@ -41,7 +41,7 @@ const isAudio = (p: string) => api.AUDIO_EXTENSIONS.includes(p.split(".").pop()?
 
 export default function App() {
   const [view, setView] = useState<SamplerView | null>(null);
-  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [] });
+  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [], chainPosition: null });
   const [selected, setSelected] = useState(0);
   const [level, setLevel] = useState(0);
   const [limiting, setLimiting] = useState(false);
@@ -546,6 +546,13 @@ export default function App() {
             onVelocity={(p, s, vel) => void api.setVelocity(p, s, vel).then(take).catch(fail)}
             pattern={view.pattern}
             onLength={(n) => void setTransport(view.tempo, view.swing, n)}
+            onExtras={(p, s, c, r) => void api.setStepExtras(p, s, c, r).then(take).catch(fail)}
+            chain={view.chain}
+            songMode={view.songMode}
+            songLoop={view.songLoop}
+            chainPosition={tick.chainPosition ?? null}
+            tempo={view.tempo}
+            onSong={(c, m, l) => void api.setSong(c, m, l).then(take).catch(fail)}
             patternsUsed={view.patternsUsed}
             onPattern={(i) => void api.selectPattern(i).then(take).catch(fail)}
             onCopyPattern={(from, to) =>
@@ -593,9 +600,10 @@ export default function App() {
           tempo={view.tempo}
           onClose={() => setExportOpen(false)}
           onDone={(p) => say(`Exported ${p}.`)}
-          onBounce={(loops) =>
+          hasSong={view.chain.length > 0}
+          onBounce={(loops, song) =>
             api
-              .bounce(loops)
+              .bounce(loops, song)
               .then((b) => {
                 setSelected(b.pad);
                 say(`Bounced the pattern onto pad ${b.pad + 1}.`);

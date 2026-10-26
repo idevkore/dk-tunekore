@@ -18,8 +18,10 @@ export function installMocks() {
     settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0, attack: 0, decay: 0, sustain: 1, release: 0.004, filter: 0, cutoff: 20000, resonance: 0 },
     steps: Array(16).fill(false),
     velocity: Array(16).fill(1),
+    chance: Array(16).fill(1),
+    ratchet: Array(16).fill(1),
   });
-  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false };
+  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false, chain: [], songMode: false, songLoop: true };
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
@@ -36,6 +38,8 @@ export function installMocks() {
     v.pads.forEach((p) => {
       p.steps = Array.from({ length: v.steps }, (_, i) => p.steps[i] ?? false);
       p.velocity = Array.from({ length: v.steps }, (_, i) => p.velocity[i] ?? 1);
+      p.chance = Array.from({ length: v.steps }, (_, i) => p.chance[i] ?? 1);
+      p.ratchet = Array.from({ length: v.steps }, (_, i) => p.ratchet[i] ?? 1);
     });
 
   setInterval(() => {
@@ -146,6 +150,13 @@ export function installMocks() {
           publish();
           return { pad: free.index, path: free.path };
         }
+        case "sampler_step_extras":
+          v.pads[a.pad as number].chance[a.step as number] = a.chance as number;
+          v.pads[a.pad as number].ratchet[a.step as number] = a.ratchet as number;
+          return publish();
+        case "sampler_song":
+          Object.assign(v, { chain: a.chain, songMode: a.songMode, songLoop: a.songLoop });
+          return publish();
         case "sampler_velocity":
           v.pads[a.pad as number].velocity[a.step as number] = a.velocity as number;
           return publish();
