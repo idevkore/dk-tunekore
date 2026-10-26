@@ -49,7 +49,7 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .app.dragging, .app.dragging * { cursor: grabbing !important; }
 .bar { height: 52px; flex-shrink: 0; background: var(--deep); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 14px; min-width: 0; }
 .bar-logo { height: 17px; flex-shrink: 0; }
-.project { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 200px; padding-left: 6px; border-left: 1px solid var(--line-2); margin-left: 4px; }
+.project { display: flex; align-items: center; gap: 4px; min-width: 80px; max-width: 200px; padding-left: 6px; border-left: 1px solid var(--line-2); margin-left: 4px; }
 .project-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dirty { color: var(--lime); font-size: 18px; line-height: 1; }
 .group-btns { display: flex; gap: 4px; }
@@ -157,7 +157,7 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .cell.alt { background: #1c1c24; }
 .cell.beat { border-color: #393946; }
 .cell:hover { border-color: #5a5a6a; }
-.cell.on { background: var(--violet); border-color: var(--violet); }
+.cell.on { background: linear-gradient(to top, var(--violet) calc(var(--vel, 1) * 100%), #3a2c6b calc(var(--vel, 1) * 100%)); border-color: var(--violet); }
 .cell.now { box-shadow: inset 0 -3px 0 var(--lime); }
 .cell.on.now { background: #a07dff; }
 .grid-row.muted .cell.on { background: #4b3d7a; border-color: #4b3d7a; }
@@ -197,3 +197,24 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .handle { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--lime); pointer-events: none; }
 .handle::after { content: ""; position: absolute; top: 0; left: -4px; width: 10px; height: 10px; border-radius: 2px; background: var(--lime); }
 .handle.end::after { top: auto; bottom: 0; }
+
+.rec, .click { width: 30px; height: 30px; border-radius: 8px; border: 0; background: #22222b; color: var(--dim); display: grid; place-items: center; }
+.rec.on { background: #ff4d6d; color: #fff; }
+.click.on { background: var(--violet); color: #fff; }
+.bank { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.bank-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin-right: 4px; }
+.bank-btn { width: 30px; height: 26px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--card-2); color: var(--dim); font-weight: 600; font-size: 12px; position: relative; }
+.bank-btn.used::after { content: ""; position: absolute; right: 4px; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--lime); }
+.bank-btn.on { background: var(--violet); border-color: var(--violet); color: #fff; }
+.bank-copy { height: 26px; margin-left: 6px; background: var(--deep); border: 1px solid var(--line-2); border-radius: 6px; color: var(--soft); font-size: 12px; padding: 0 4px; }
+.bank-hint { margin-left: auto; }
+select.choke { height: 26px; background: var(--deep); border: 1px solid var(--line-2); border-radius: 6px; color: var(--soft); font-size: 12px; }
+
+.bar-mark { height: 20px; flex-shrink: 0; }
+.narrow-only { display: none; }
+@media (max-width: 1199px) {
+  .wide-only { display: none; }
+  .narrow-only { display: block; }
+  .bar { gap: 8px; }
+}
+.bank .len { margin-left: 10px; }

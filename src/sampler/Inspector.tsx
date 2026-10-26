@@ -81,6 +81,16 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
           <Slider label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
           <Slider label="Pan" value={s.pan} min={-1} max={1} step={0.01} shown={fmtPan(s.pan)} onChange={(v) => change({ pan: v })} reset={0} />
           <Slider label="Pitch" value={s.pitch} min={-24} max={24} step={1} shown={fmtPitch(s.pitch)} onChange={(v) => change({ pitch: v })} reset={0} />
+          <div className="slider">
+            <label htmlFor="s-choke">Choke</label>
+            <select id="s-choke" className="choke" value={s.choke} onChange={(e) => change({ choke: Number(e.target.value) })} title="Pads in the same group cut each other off, like an open and a closed hat">
+              <option value={0}>None</option>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((g) => (
+                <option key={g} value={g}>Group {g}</option>
+              ))}
+            </select>
+            <span />
+          </div>
           <div className="toggles" role="group" aria-label="Playback">
             <Toggle on={s.gate} label="Gate" hint="Play only while held, or for one step" onClick={() => change({ gate: !s.gate })} />
             <Toggle on={s.reverse} label="Reverse" hint="Play backwards" onClick={() => change({ reverse: !s.reverse })} />

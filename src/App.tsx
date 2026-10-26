@@ -5,10 +5,11 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import logo from "../brand/tunekore-logo-color.svg";
+import mark from "../brand/tunekore-mark.svg";
 import { onMeter } from "./engine";
 import { openAnalyzer } from "./analyzer/api";
 import * as api from "./sampler/api";
-import { PAD_KEYS, STEP_CHOICES, subscribe, type LibraryItem, type PadSettings, type SamplerView, type Tick } from "./sampler/api";
+import { PAD_KEYS, subscribe, type LibraryItem, type PadSettings, type SamplerView, type Tick } from "./sampler/api";
 import Library from "./sampler/Library";
 import Pads from "./sampler/Pads";
 import Inspector from "./sampler/Inspector";
@@ -362,7 +363,8 @@ export default function App() {
   return (
     <div className={`app${drag?.moving ? " dragging" : ""}`}>
       <header className="bar">
-        <img src={logo} alt="tuneKore" className="bar-logo" />
+        <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
+        <img src={mark} alt="tuneKore" className="bar-mark narrow-only" />
         <div className="project" title={view.projectPath ?? "Not saved yet"}>
           <span className="project-name">{view.projectName}</span>
           {view.dirty && <span className="dirty" aria-label="unsaved changes">•</span>}
@@ -387,8 +389,26 @@ export default function App() {
               <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 2.5v11l9.5-5.5z" fill="currentColor" /></svg>
             )}
           </button>
+          <button
+            className={`rec${view.recording ? " on" : ""}`}
+            onClick={() => void api.setRecording(!view.recording).then(take).catch(fail)}
+            aria-pressed={view.recording}
+            aria-label="Record"
+            title="Record: play pads while the pattern runs and they're written into its steps"
+          >
+            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true"><circle cx="8" cy="8" r="5.5" fill="currentColor" /></svg>
+          </button>
+          <button
+            className={`click${view.metronome ? " on" : ""}`}
+            onClick={() => void api.setMetronome(!view.metronome).then(take).catch(fail)}
+            aria-pressed={view.metronome}
+            aria-label="Metronome"
+            title="Metronome: a click on every beat while playing"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 2h4l2.5 12h-9zM8 11l4-6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" /></svg>
+          </button>
           <div className="tempo">
-            <button className="nudge" onClick={() => nudgeTempo(-1)} aria-label="Slower">−</button>
+            <button className="nudge wide-only" onClick={() => nudgeTempo(-1)} aria-label="Slower">−</button>
             <input
               aria-label="Tempo in BPM"
               className="mono"
@@ -405,18 +425,12 @@ export default function App() {
               }}
             />
             <span className="unit">BPM</span>
-            <button className="nudge" onClick={() => nudgeTempo(1)} aria-label="Faster">+</button>
+            <button className="nudge wide-only" onClick={() => nudgeTempo(1)} aria-label="Faster">+</button>
           </div>
           <label className="swing" title="Swing: delays every other sixteenth">
             <span>Swing</span>
             <input type="range" min={0} max={1} step={0.01} value={view.swing} onChange={(e) => void setTransport(view.tempo, Number(e.target.value), view.steps)} />
             <span className="mono">{Math.round(view.swing * 100)}%</span>
-          </label>
-          <label className="len">
-            <span>Steps</span>
-            <select value={view.steps} onChange={(e) => void setTransport(view.tempo, view.swing, Number(e.target.value))}>
-              {STEP_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
           </label>
         </div>
 
@@ -476,6 +490,20 @@ export default function App() {
             onStep={(p, s, on) => void api.setStep(p, s, on).then(take).catch(fail)}
             onMute={(p) => void api.setSettings(p, { ...view.pads[p].settings, mute: !view.pads[p].settings.mute }).then(take).catch(fail)}
             dropTarget={dropPad}
+            onVelocity={(p, s, vel) => void api.setVelocity(p, s, vel).then(take).catch(fail)}
+            pattern={view.pattern}
+            onLength={(n) => void setTransport(view.tempo, view.swing, n)}
+            patternsUsed={view.patternsUsed}
+            onPattern={(i) => void api.selectPattern(i).then(take).catch(fail)}
+            onCopyPattern={(from, to) =>
+              void api
+                .copyPattern(from, to)
+                .then((v) => {
+                  take(v);
+                  say(`Copied pattern ${api.PATTERN_NAMES[from]} to ${api.PATTERN_NAMES[to]}.`);
+                })
+                .catch(fail)
+            }
             onAddFiles={(files) => {
               const free = view.pads.filter((x) => !x.name).map((x) => x.index);
               files.slice(0, free.length).forEach((f, i) => loadSample(free[i], f));

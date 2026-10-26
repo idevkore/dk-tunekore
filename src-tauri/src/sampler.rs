@@ -53,11 +53,13 @@ pub struct PadSettings {
     pub gate: bool,
     pub reverse: bool,
     pub mute: bool,
+    /// 0 = none; pads in the same group 1..=8 cut each other off (open and closed hats).
+    pub choke: u8,
 }
 
 impl Default for PadSettings {
     fn default() -> Self {
-        Self { gain_db: 0.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false }
+        Self { gain_db: 0.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false, choke: 0 }
     }
 }
 
@@ -73,7 +75,7 @@ impl PadSettings {
             gate: self.gate,
             reverse: self.reverse,
             mute: self.mute,
-            choke: 0,
+            choke: self.choke.min(8),
         }
     }
 }
@@ -99,6 +101,21 @@ struct Pad {
     settings: PadSettings,
     /// This pad's steps in each pattern, as bits.
     patterns: [u64; BANK],
+    /// How hard each step plays, per pattern, 255 = full. Empty until a velocity is set.
+    velocity: Vec<[u8; MAX_STEPS]>,
+}
+
+impl Pad {
+    fn velocity(&self, pattern: usize, step: usize) -> u8 {
+        self.velocity.get(pattern).map_or(255, |v| v[step])
+    }
+
+    fn set_velocity(&mut self, pattern: usize, step: usize, v: u8) {
+        if self.velocity.len() < BANK {
+            self.velocity.resize(BANK, [255; MAX_STEPS]);
+        }
+        self.velocity[pattern][step] = v;
+    }
 }
 
 struct Doc {
@@ -156,7 +173,8 @@ impl Doc {
     /// continues a run of the same kind.
     fn checkpoint(&mut self, key: &str, before: Snapshot) {
         let now = Instant::now();
-        let merge = matches!(&self.history.last, Some((k, t)) if k == key && now.duration_since(*t) < MERGE_WINDOW);
+        // A recording take ("take:N") is one step however long it runs.
+        let merge = matches!(&self.history.last, Some((k, t)) if k == key && (key.starts_with("take:") || now.duration_since(*t) < MERGE_WINDOW));
         self.history.last = Some((key.to_string(), now));
         self.dirty = true;
         if merge {
@@ -177,11 +195,13 @@ pub struct SamplerState {
     doc: Mutex<Doc>,
     cache: Mutex<Cache>,
     handle: SamplerHandle,
+    /// Counts recording takes, so each take undoes as one step.
+    take: std::sync::atomic::AtomicU32,
 }
 
 impl SamplerState {
     pub fn new(handle: SamplerHandle) -> Self {
-        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle };
+        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle, take: Default::default() };
         s.apply_all(&s.doc.lock().unwrap());
         s
     }
@@ -190,6 +210,9 @@ impl SamplerState {
         let p = &doc.pads[pad];
         self.handle.set_pad(pad, &p.settings.params());
         self.handle.set_pattern(pad, p.patterns[doc.current]);
+        for step in 0..MAX_STEPS {
+            self.handle.set_velocity(pad, step, p.velocity(doc.current, step) as f32 / 255.0);
+        }
     }
 
     fn apply_all(&self, doc: &Doc) {
@@ -272,6 +295,8 @@ pub struct View {
     pattern: usize,
     /// Which patterns have any steps.
     patterns_used: Vec<bool>,
+    metronome: bool,
+    recording: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -288,9 +313,11 @@ struct PadView {
     settings: PadSettings,
     /// One entry per step of the pattern's length.
     steps: Vec<bool>,
+    /// How hard each step plays, 0..1, one per step.
+    velocity: Vec<f32>,
 }
 
-fn view(doc: &Doc) -> View {
+fn view(doc: &Doc, live: &SamplerHandle) -> View {
     let pads = doc
         .pads
         .iter()
@@ -308,6 +335,7 @@ fn view(doc: &Doc) -> View {
                 peaks: s.map(|s| s.peaks.clone()).unwrap_or_default(),
                 settings: p.settings,
                 steps: (0..doc.steps).map(|i| p.patterns[doc.current] & (1u64 << i) != 0).collect(),
+                velocity: (0..doc.steps).map(|i| p.velocity(doc.current, i) as f32 / 255.0).collect(),
             }
         })
         .collect();
@@ -323,6 +351,8 @@ fn view(doc: &Doc) -> View {
         can_redo: !doc.history.redo.is_empty(),
         pattern: doc.current,
         patterns_used: (0..BANK).map(|b| doc.pads.iter().any(|p| p.patterns[b] != 0)).collect(),
+        metronome: live.metronome(),
+        recording: live.is_recording(),
     }
 }
 
@@ -336,7 +366,7 @@ fn audio(app: &AppHandle) -> &'static Mutex<Audio> {
 
 /// Sends the document to every window, and returns it.
 fn publish(app: &AppHandle, doc: &Doc) -> View {
-    let v = view(doc);
+    let v = view(doc, &state(app).handle);
     let _ = app.emit("sampler:state", &v);
     v
 }
@@ -403,7 +433,7 @@ pub fn first_free_pad(app: &AppHandle) -> Option<usize> {
 pub fn sampler_state(app: AppHandle) -> View {
     let s = state(&app);
     let doc = s.doc.lock().unwrap();
-    view(&doc)
+    view(&doc, &s.handle)
 }
 
 #[tauri::command]
@@ -502,6 +532,63 @@ pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -
     })
 }
 
+/// How hard one step plays, 0..1, in the current pattern.
+#[tauri::command]
+pub fn sampler_velocity(pad: usize, step: usize, velocity: f32, app: AppHandle) -> Result<View, String> {
+    check_pad(pad)?;
+    if step >= MAX_STEPS {
+        return Err(format!("there is no step {}", step + 1));
+    }
+    edit(&app, "velocity", |s, doc| {
+        let cur = doc.current;
+        doc.pads[pad].set_velocity(cur, step, (velocity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        s.apply_pad(doc, pad);
+        Ok(())
+    })
+}
+
+/// Turns the click on or off. A live setting, not part of the project.
+#[tauri::command]
+pub fn sampler_metronome(on: bool, app: AppHandle) -> View {
+    let s = state(&app);
+    s.handle.set_metronome(on);
+    let doc = s.doc.lock().unwrap();
+    publish(&app, &doc)
+}
+
+/// Arms or disarms recording: pads played while the pattern runs are written into its steps.
+#[tauri::command]
+pub fn sampler_record(on: bool, app: AppHandle) -> View {
+    let s = state(&app);
+    if on && !s.handle.is_recording() {
+        s.take.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    s.handle.set_recording(on);
+    let doc = s.doc.lock().unwrap();
+    publish(&app, &doc)
+}
+
+/// Copies steps the engine recorded into the document, as one undo step per take.
+fn sync_recorded(app: &AppHandle) {
+    let s = state(app);
+    let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
+    let cur = doc.current;
+    let mut changed = false;
+    for pad in 0..PADS {
+        let live = s.handle.pattern(pad);
+        if doc.pads[pad].patterns[cur] != live {
+            doc.pads[pad].patterns[cur] = live;
+            changed = true;
+        }
+    }
+    if changed {
+        let take = s.take.load(std::sync::atomic::Ordering::Relaxed);
+        doc.checkpoint(&format!("take:{take}"), before);
+        publish(app, &doc);
+    }
+}
+
 /// Switches to pattern `index` (0 = A). While playing, the switch lands on the next step.
 #[tauri::command]
 pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
@@ -536,7 +623,7 @@ pub fn sampler_copy_pattern(from: usize, to: usize, app: AppHandle) -> Result<Vi
 pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
     let s = state(&app);
     let mut doc = s.doc.lock().unwrap();
-    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&doc)) };
+    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&doc, &s.handle)) };
     let now = doc.snapshot();
     doc.history.redo.push(now);
     s.restore(&app, &mut doc, snap)?;
@@ -548,7 +635,7 @@ pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
 pub fn sampler_redo(app: AppHandle) -> Result<View, String> {
     let s = state(&app);
     let mut doc = s.doc.lock().unwrap();
-    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&doc)) };
+    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&doc, &s.handle)) };
     let now = doc.snapshot();
     doc.history.undo.push(now);
     s.restore(&app, &mut doc, snap)?;
@@ -594,8 +681,14 @@ struct Tick {
 pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
     std::thread::spawn(move || {
         let mut last: Option<(bool, Option<usize>, Vec<u32>)> = None;
+        let mut recorded = handle.recorded();
         loop {
             std::thread::sleep(Duration::from_millis(33));
+            let r = handle.recorded();
+            if r != recorded {
+                recorded = r;
+                sync_recorded(&app);
+            }
             let now = (handle.is_playing(), handle.current_step(), (0..PADS).map(|p| handle.played(p)).collect::<Vec<_>>());
             if last.as_ref() != Some(&now) {
                 let _ = app.emit("sampler:tick", Tick { playing: now.0, step: now.1, played: now.2.clone() });
@@ -739,6 +832,9 @@ struct PadFile {
     /// This pad's steps in patterns A to D, one character per step: `x` plays, `.` rests.
     #[serde(default)]
     patterns: Vec<String>,
+    /// How hard each step plays (0..255), per pattern; left out while every step is full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    velocity: Vec<Vec<u8>>,
 }
 
 fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
@@ -765,6 +861,11 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
                             .to_string()
                     })
                     .collect(),
+                velocity: if p.velocity.iter().flatten().all(|&v| v == 255) {
+                    Vec::new()
+                } else {
+                    p.velocity.iter().map(|v| v.to_vec()).collect()
+                },
             }
         })
         .collect();
@@ -823,6 +924,11 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
                 patterns[b] = pattern_bits(text);
             }
             let mut pad = Pad { settings: pf.settings, patterns, ..Default::default() };
+            for (b, steps) in pf.velocity.iter().take(BANK).enumerate() {
+                for (i, &v) in steps.iter().take(MAX_STEPS).enumerate() {
+                    pad.set_velocity(b, i, v);
+                }
+            }
             if let Some(rel) = &pf.sample {
                 let p = Path::new(rel);
                 let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
@@ -1049,6 +1155,19 @@ mod tests {
         doc.swing = 0.5;
         doc.checkpoint("swing", before);
         assert!(doc.history.redo.is_empty(), "a new edit drops the redo steps");
+    }
+
+    #[test]
+    fn velocities_are_saved_only_when_set() {
+        let mut doc = Doc::default();
+        let file = to_file(&doc, Path::new("/tmp/a.tunek"));
+        assert!(file.pads[0].velocity.is_empty());
+        doc.pads[0].set_velocity(1, 3, 128);
+        let file = to_file(&doc, Path::new("/tmp/a.tunek"));
+        assert_eq!(file.pads[0].velocity.len(), BANK);
+        assert_eq!(file.pads[0].velocity[1][3], 128);
+        assert_eq!(file.pads[0].velocity[0][3], 255);
+        assert_eq!(doc.pads[1].velocity(2, 5), 255, "unset reads full");
     }
 
     #[test]
