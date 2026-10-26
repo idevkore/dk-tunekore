@@ -73,6 +73,7 @@ impl PadSettings {
             gate: self.gate,
             reverse: self.reverse,
             mute: self.mute,
+            choke: 0,
         }
     }
 }
