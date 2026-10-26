@@ -104,7 +104,7 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .auto input { accent-color: var(--violet); margin: 0; }
 
 /* ---- Pads ---- */
-.pads { display: grid; grid-template-columns: repeat(4, minmax(88px, 128px)); grid-auto-rows: minmax(76px, 96px); gap: 8px; flex-shrink: 0; }
+.pads { display: grid; grid-template-columns: repeat(4, minmax(64px, 1fr)); grid-auto-rows: minmax(76px, 96px); gap: 8px; flex: 1 1 536px; max-width: 536px; min-width: 0; align-content: start; }
 .pad { position: relative; overflow: hidden; border-radius: 10px; border: 1px solid #2a2a34; background: var(--card); padding: 7px 8px; display: flex; flex-direction: column; gap: 4px; text-align: left; color: var(--dim); touch-action: none; }
 .pad:hover { border-color: #3a3a46; }
 .pad.loaded { background: #1d1b27; color: var(--text); }
@@ -125,7 +125,7 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .wave-trim { fill: var(--ground); opacity: 0.72; }
 
 /* ---- Inspector ---- */
-.inspector { flex: 1; min-width: 250px; max-width: 420px; background: var(--card); border: 1px solid #26262f; border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
+.inspector { flex: 1 1 250px; min-width: 240px; max-width: 420px; background: var(--card); border: 1px solid #26262f; border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 9px; }
 .insp-name { display: flex; flex-direction: column; gap: 2px; font-size: 13.5px; font-weight: 600; overflow: hidden; }
 .insp-name .mono { font-size: 11px; font-weight: 400; }
 .insp-wave { width: 100%; height: 58px; background: var(--side); border-radius: 8px; }
@@ -191,7 +191,8 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .seg label { padding: 6px 14px; color: var(--dim); cursor: pointer; font-size: 12.5px; }
 .seg label.on { background: var(--violet); color: #fff; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--lime); outline-offset: -2px; }
-.seg input { position: absolute; opacity: 0; pointer-events: none; }
+.seg label { position: relative; }
+.seg input { position: absolute; inset: 0; opacity: 0; pointer-events: none; margin: 0; }
 
 .add-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 6px; border: 1.5px dashed #34343f; border-radius: 8px; }
 .add-row.over { border-color: var(--lime); background: #1e2414; }
