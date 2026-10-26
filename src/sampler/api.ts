@@ -132,6 +132,16 @@ export const onChopped = (handler: (folder: string) => void): Promise<UnlistenFn
 export const onConfirmQuit = (handler: () => void): Promise<UnlistenFn> => listen("app:confirm-quit", () => handler());
 export const quitApp = () => invoke<void>("app_quit");
 
+export interface Recovery {
+  projectName: string;
+  projectPath: string | null;
+  /** Unix seconds. */
+  savedAt: number;
+}
+export const autosaveCheck = () => invoke<Recovery | null>("autosave_check");
+export const autosaveRecover = () => invoke<SamplerView>("autosave_recover");
+export const autosaveDiscard = () => invoke<void>("autosave_discard");
+
 export const currentOutput = () => invoke<string | null | undefined>("current_output");
 export const setOutput = (deviceId: string | null) => invoke<void>("set_output", { deviceId });
 

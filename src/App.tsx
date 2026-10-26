@@ -73,6 +73,30 @@ export default function App() {
     return () => offs.forEach((off) => off());
   }, [take, fail]);
 
+  // After a crash: offer the unsaved work the last session left behind.
+  useEffect(() => {
+    api
+      .autosaveCheck()
+      .then(async (r) => {
+        if (!r) return;
+        const when = new Date(r.savedAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+        const recover = await ask(`tuneKore didn't close normally. Recover your unsaved work on “${r.projectName}” from ${when}?`, {
+          title: "Recover unsaved work",
+          kind: "info",
+          okLabel: "Recover",
+          cancelLabel: "Discard",
+        });
+        if (recover) {
+          const v = await api.autosaveRecover();
+          take(v);
+          say(`Recovered ${v.projectName}. Save it to keep it.`);
+        } else {
+          await api.autosaveDiscard();
+        }
+      })
+      .catch(fail);
+  }, [take, fail, say]);
+
   // Rescan the Library when the Analyzer writes samples into it.
   useEffect(
     () =>

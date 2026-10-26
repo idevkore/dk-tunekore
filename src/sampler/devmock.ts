@@ -136,6 +136,8 @@ export function installMocks() {
           return publish();
         case "sampler_chop":
           return { pads: [1, 2, 3, 4], folder: "/Users/test/Music/tuneKore/Samples/Chops/Kick chop 1" };
+        case "autosave_check":
+          return null;
         case "sampler_undo":
         case "sampler_redo":
           return publish();

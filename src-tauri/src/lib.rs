@@ -55,6 +55,8 @@ fn must_ask(app: &tauri::AppHandle) -> bool {
 #[tauri::command]
 fn app_quit(app: tauri::AppHandle) {
     QUIT_CONFIRMED.store(true, Ordering::Relaxed);
+    // The user chose to drop the unsaved work, so don't offer it back next time.
+    sampler::clear_autosave(&app);
     app.exit(0);
 }
 
@@ -188,6 +190,7 @@ pub fn run() {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
             sampler::spawn_tick(app.handle().clone(), pads);
+            sampler::spawn_autosave(app.handle().clone());
             // Open the default output now, so the pads play on the first click.
             std::thread::spawn(move || {
                 if let Err(e) = audio.lock().unwrap().ensure_open() {
@@ -246,6 +249,9 @@ pub fn run() {
             sampler::project_new,
             sampler::project_open,
             sampler::project_save,
+            sampler::autosave_check,
+            sampler::autosave_recover,
+            sampler::autosave_discard,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")

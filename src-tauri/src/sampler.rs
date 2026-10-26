@@ -128,6 +128,8 @@ struct Doc {
     path: Option<PathBuf>,
     dirty: bool,
     history: History,
+    /// Bumped on every change, so autosave writes only when something changed.
+    revision: u64,
 }
 
 impl Default for Doc {
@@ -141,6 +143,7 @@ impl Default for Doc {
             path: None,
             dirty: false,
             history: History::default(),
+            revision: 0,
         }
     }
 }
@@ -177,6 +180,7 @@ impl Doc {
         let merge = matches!(&self.history.last, Some((k, t)) if k == key && (key.starts_with("take:") || now.duration_since(*t) < MERGE_WINDOW));
         self.history.last = Some((key.to_string(), now));
         self.dirty = true;
+        self.revision += 1;
         if merge {
             return;
         }
@@ -250,6 +254,7 @@ impl SamplerState {
         doc.steps = snap.steps;
         doc.current = snap.current;
         doc.dirty = true;
+        doc.revision += 1;
         doc.history.last = None;
         self.apply_all(doc);
         Ok(())
@@ -897,79 +902,90 @@ pub fn project_new(app: AppHandle) -> Result<View, String> {
     drop(a);
     *doc = Doc::default();
     s.apply_all(&doc);
+    clear_autosave(&app);
     Ok(publish(&app, &doc))
 }
 
 #[tauri::command]
 pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> {
     let a = app.clone();
-    spawn_blocking(move || -> Result<View, String> {
+    let view = spawn_blocking(move || {
         let project = PathBuf::from(&path);
-        let text = std::fs::read_to_string(&project).map_err(|e| format!("can't read {}: {e}", project.display()))?;
-        let mut file: ProjectFile = serde_json::from_str(&text).map_err(|e| format!("not a tuneKore project ({e})"))?;
-        if file.format != FORMAT {
-            return Err("not a tuneKore project".into());
-        }
-        if file.version > VERSION {
-            return Err("this project was saved by a newer tuneKore".into());
-        }
-        let s = state(&a);
-        let base = project.parent().unwrap_or(Path::new("")).to_path_buf();
-        // Decode before taking the locks.
-        let mut pads: Vec<Pad> = Vec::with_capacity(PADS);
-        let listed = std::mem::take(&mut file.pads);
-        for pf in listed.into_iter().chain(std::iter::repeat_with(PadFile::default)).take(PADS) {
-            let mut patterns = [0u64; BANK];
-            for (b, text) in pf.patterns.iter().take(BANK).enumerate() {
-                patterns[b] = pattern_bits(text);
-            }
-            let mut pad = Pad { settings: pf.settings, patterns, ..Default::default() };
-            for (b, steps) in pf.velocity.iter().take(BANK).enumerate() {
-                for (i, &v) in steps.iter().take(MAX_STEPS).enumerate() {
-                    pad.set_velocity(b, i, v);
-                }
-            }
-            if let Some(rel) = &pf.sample {
-                let p = Path::new(rel);
-                let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
-                match s.decode(&full) {
-                    Ok(d) => {
-                        pad.sample = Some(Arc::new(Sample {
-                            name: file_stem(&full),
-                            rate: d.rate,
-                            peaks: peaks(&d.data, PAD_PEAKS),
-                            data: d.data.clone(),
-                            path: full,
-                        }))
-                    }
-                    Err(_) => pad.missing = Some(full),
-                }
-            }
-            pads.push(pad);
-        }
-        let mut doc = s.doc.lock().unwrap();
-        s.handle.set_playing(false);
-        let mut au = audio(&a).lock().unwrap();
-        for (i, pad) in pads.iter().enumerate() {
-            s.handle.cut(i);
-            au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
-        }
-        drop(au);
-        *doc = Doc {
-            pads,
-            tempo: file.tempo.clamp(40.0, 300.0),
-            swing: file.swing.clamp(0.0, 1.0),
-            steps: file.steps.clamp(1, MAX_STEPS),
-            current: file.current.min(BANK - 1),
-            path: Some(project),
-            dirty: false,
-            history: History::default(),
-        };
-        s.apply_all(&doc);
-        Ok(publish(&a, &doc))
+        load_project(&a, &project, Some(project.clone()), false)
     })
     .await
-    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())??;
+    clear_autosave(&app);
+    Ok(view)
+}
+
+/// Reads a project file into the document. `as_path` is the project it
+/// belongs to (the file itself, or the original project for a recovered
+/// autosave); `dirty` marks it unsaved. Blocking.
+fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: bool) -> Result<View, String> {
+    let text = std::fs::read_to_string(project).map_err(|e| format!("can't read {}: {e}", project.display()))?;
+    let mut file: ProjectFile = serde_json::from_str(&text).map_err(|e| format!("not a tuneKore project ({e})"))?;
+    if file.format != FORMAT {
+        return Err("not a tuneKore project".into());
+    }
+    if file.version > VERSION {
+        return Err("this project was saved by a newer tuneKore".into());
+    }
+    let s = state(a);
+    let base = project.parent().unwrap_or(Path::new("")).to_path_buf();
+    // Decode before taking the locks.
+    let mut pads: Vec<Pad> = Vec::with_capacity(PADS);
+    let listed = std::mem::take(&mut file.pads);
+    for pf in listed.into_iter().chain(std::iter::repeat_with(PadFile::default)).take(PADS) {
+        let mut patterns = [0u64; BANK];
+        for (b, text) in pf.patterns.iter().take(BANK).enumerate() {
+            patterns[b] = pattern_bits(text);
+        }
+        let mut pad = Pad { settings: pf.settings, patterns, ..Default::default() };
+        for (b, steps) in pf.velocity.iter().take(BANK).enumerate() {
+            for (i, &v) in steps.iter().take(MAX_STEPS).enumerate() {
+                pad.set_velocity(b, i, v);
+            }
+        }
+        if let Some(rel) = &pf.sample {
+            let p = Path::new(rel);
+            let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+            match s.decode(&full) {
+                Ok(d) => {
+                    pad.sample = Some(Arc::new(Sample {
+                        name: file_stem(&full),
+                        rate: d.rate,
+                        peaks: peaks(&d.data, PAD_PEAKS),
+                        data: d.data.clone(),
+                        path: full,
+                    }))
+                }
+                Err(_) => pad.missing = Some(full),
+            }
+        }
+        pads.push(pad);
+    }
+    let mut doc = s.doc.lock().unwrap();
+    s.handle.set_playing(false);
+    let mut au = audio(a).lock().unwrap();
+    for (i, pad) in pads.iter().enumerate() {
+        s.handle.cut(i);
+        au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
+    }
+    drop(au);
+    *doc = Doc {
+        pads,
+        tempo: file.tempo.clamp(40.0, 300.0),
+        swing: file.swing.clamp(0.0, 1.0),
+        steps: file.steps.clamp(1, MAX_STEPS),
+        current: file.current.min(BANK - 1),
+        path: as_path,
+        dirty,
+        history: History::default(),
+        revision: 1,
+    };
+    s.apply_all(&doc);
+    Ok(publish(a, &doc))
 }
 
 /// Saves to `path` (as `.tunek`), or to the project's own file when `path` is `None`.
@@ -987,7 +1003,99 @@ pub fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String
     std::fs::rename(&tmp, &project).map_err(|e| e.to_string())?;
     doc.path = Some(project);
     doc.dirty = false;
+    clear_autosave(&app);
     Ok(publish(&app, &doc))
+}
+
+// ---- Autosave and recovery ----
+
+/// How often unsaved work is written to the recovery file.
+const AUTOSAVE_EVERY: Duration = Duration::from_secs(20);
+
+fn autosave_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|d| d.join("autosave"))
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Recovery {
+    project_name: String,
+    project_path: Option<String>,
+    /// Unix seconds.
+    saved_at: u64,
+}
+
+/// Writes unsaved work to the app's data folder every 20 seconds while it
+/// changes, so a crash loses at most that much. Saving clears it.
+pub fn spawn_autosave(app: AppHandle) {
+    std::thread::spawn(move || {
+        let mut written = 0u64;
+        loop {
+            std::thread::sleep(AUTOSAVE_EVERY);
+            let Some(dir) = autosave_dir(&app) else { continue };
+            let file = dir.join("recovery.tunek");
+            let snapshot = {
+                let s = state(&app);
+                let doc = s.doc.lock().unwrap();
+                if !doc.dirty || doc.revision == written {
+                    None
+                } else {
+                    let meta = Recovery {
+                        project_name: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
+                        project_path: doc.path.as_ref().map(|p| p.display().to_string()),
+                        saved_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                    };
+                    Some((serde_json::to_string_pretty(&to_file(&doc, &file)), serde_json::to_string(&meta), doc.revision))
+                }
+            };
+            let Some((Ok(json), Ok(meta), rev)) = snapshot else { continue };
+            let write = || -> std::io::Result<()> {
+                std::fs::create_dir_all(&dir)?;
+                std::fs::write(dir.join("recovery.tunek.part"), json)?;
+                std::fs::rename(dir.join("recovery.tunek.part"), &file)?;
+                std::fs::write(dir.join("recovery.json"), meta)
+            };
+            if write().is_ok() {
+                written = rev;
+            }
+        }
+    });
+}
+
+/// Removes the recovery files: the work is saved, or the user chose to drop it.
+pub fn clear_autosave(app: &AppHandle) {
+    if let Some(dir) = autosave_dir(app) {
+        let _ = std::fs::remove_file(dir.join("recovery.tunek"));
+        let _ = std::fs::remove_file(dir.join("recovery.json"));
+    }
+}
+
+/// Unsaved work left by a session that didn't close normally, if any.
+#[tauri::command]
+pub fn autosave_check(app: AppHandle) -> Option<Recovery> {
+    let dir = autosave_dir(&app)?;
+    if !dir.join("recovery.tunek").exists() {
+        return None;
+    }
+    serde_json::from_str(&std::fs::read_to_string(dir.join("recovery.json")).ok()?).ok()
+}
+
+/// Loads the unsaved work, marked unsaved, under its original project's name.
+#[tauri::command]
+pub async fn autosave_recover(app: AppHandle) -> Result<View, String> {
+    let meta = autosave_check(app.clone()).ok_or("there is nothing to recover")?;
+    let dir = autosave_dir(&app).ok_or("no data folder")?;
+    let a = app.clone();
+    spawn_blocking(move || load_project(&a, &dir.join("recovery.tunek"), meta.project_path.map(PathBuf::from), true))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn autosave_discard(app: AppHandle) {
+    clear_autosave(&app);
 }
 
 // ---- Export ----
