@@ -2,7 +2,11 @@
 
 tuneKore is devKore's lightweight Ableton-style DAW: a platform for our own
 instruments, effects and tools, owned outright. macOS first, then Windows and
-Linux. Owner: Nate Soria. Tracker: `idevkore/kore-issues` (sidebar group KORE).
+Linux. Owner: Nate Soria. Tracker: issues on this repo, `idevkore/dk-tunekore`,
+on the GitHub Project "tuneKore" (`gh project item-add 4 --owner idevkore`).
+Client code and sidebar group: TUNE, so sessions are titled
+`TUNE #<issue> · <what>`. Issues before 26 October 2026 were moved here from
+`idevkore/kore-issues` (old #22–#30 are now #10–#15).
 
 - `docs/PLAN.md`: the stack, architecture, roadmap and licensing decisions. Read
   it before structural work, and update it in the same PR when a decision
