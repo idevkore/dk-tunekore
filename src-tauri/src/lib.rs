@@ -1,4 +1,5 @@
 mod analyzer;
+mod display;
 mod midi;
 mod recorder;
 mod sampler;
@@ -174,6 +175,11 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        // Windows reopen at the size, place and display they were left at.
+        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .manage(display::Zoom::default())
+        .menu(display::menu)
+        .on_menu_event(|app, event| display::on_menu(app, event.id().as_ref()))
         .manage(audio)
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
@@ -192,6 +198,10 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            let zoom = display::load(app.handle());
+            if (zoom - 1.0).abs() > 0.001 {
+                display::set(app.handle(), zoom);
+            }
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
             midi::spawn(app.handle().clone(), pads.clone(), midi_state);
@@ -227,6 +237,8 @@ pub fn run() {
             analyzer::analyzer_export,
             analyzer::analyzer_to_pads,
             analyzer::analyzer_tempo_key,
+            display::display_zoom,
+            display::set_display_zoom,
             sampler::sampler_state,
             sampler::sampler_load,
             sampler::sampler_clear,

@@ -27,6 +27,7 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 | [midir](https://github.com/Boddlnagg/midir) | 0.11.1 | MIT | Shell: MIDI controller input (CoreMIDI on macOS, WinMM on Windows, ALSA on Linux) |
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.5 | Apache-2.0 OR MIT | Shell: windows, menus, IPC |
 | [tauri-plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | 2.8.3 | Apache-2.0 OR MIT | Shell: the Open and Export folder dialogs |
+| [tauri-plugin-window-state](https://github.com/tauri-apps/plugins-workspace) | 2.5.0 | Apache-2.0 OR MIT | Shell: reopens windows at the size, place and display they were left at |
 | tauri-build | 2.7.4 | Apache-2.0 OR MIT | Shell: build step |
 | [tempfile](https://github.com/Stebalien/tempfile) | 3.27.0 | MIT OR Apache-2.0 | Tests only |
 

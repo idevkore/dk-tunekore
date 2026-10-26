@@ -1,6 +1,6 @@
 // Audio settings: which output device to play on, and a test tone to check it.
 import { useEffect, useState } from "react";
-import { engineVersion, getMaster, listOutputs, setMaster, startTone, stopTone, type OutputDevice } from "../engine";
+import { engineVersion, getDisplayZoom, getMaster, listOutputs, setDisplayZoom, setMaster, ZOOM_LEVELS, startTone, stopTone, type OutputDevice } from "../engine";
 import { chooseInput, chosenInput, currentOutput, inputDevices, midiInputs, setOutput, type InputDevice, type MidiInputInfo } from "./api";
 import Dialog from "./Dialog";
 
@@ -12,6 +12,7 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
   const [tone, setTone] = useState(false);
   const [version, setVersion] = useState("");
   const [master, setMasterDb] = useState(0);
+  const [zoom, setZoom] = useState(1);
   const [inputs, setInputs] = useState<InputDevice[]>([]);
   const [input, setInput] = useState(chosenInput() ?? DEFAULT);
   const [midi, setMidi] = useState<MidiInputInfo[]>([]);
@@ -21,6 +22,7 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
     currentOutput().then((d) => setDevice(d ?? DEFAULT)).catch(() => {});
     engineVersion().then(setVersion).catch(() => {});
     getMaster().then(setMasterDb).catch(() => {});
+    getDisplayZoom().then(setZoom).catch(() => {});
     inputDevices().then(setInputs).catch(() => {});
     const poll = () => midiInputs().then(setMidi).catch(() => {});
     poll();
@@ -66,6 +68,24 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
             </option>
           ))}
         </select>
+      </label>
+      <label className="field">
+        <span>Display size</span>
+        <select
+          value={ZOOM_LEVELS.reduce((a, b) => (Math.abs(b - zoom) < Math.abs(a - zoom) ? b : a))}
+          onChange={(e) => {
+            const z = Number(e.target.value);
+            setZoom(z);
+            setDisplayZoom(z).catch(onError);
+          }}
+        >
+          {ZOOM_LEVELS.map((z) => (
+            <option key={z} value={z}>
+              {Math.round(z * 100)}%{z === 1 ? " (actual size)" : ""}
+            </option>
+          ))}
+        </select>
+        <span className="dim small">Also View → Zoom In / Zoom Out / Actual Size (⌘+, ⌘−, ⌘0). Applies to every window and is remembered.</span>
       </label>
       <label className="field">
         <span>

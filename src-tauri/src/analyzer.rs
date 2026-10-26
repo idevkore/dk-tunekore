@@ -123,6 +123,7 @@ pub fn open_analyzer(app: AppHandle) -> Result<(), String> {
         .background_color(tauri::window::Color(18, 18, 23, 255))
         .build()
         .map_err(|e| e.to_string())?;
+    crate::display::apply(&window);
     // Closing the window stops the stems playing and any job in progress.
     let handle = app.clone();
     window.on_window_event(move |e| {

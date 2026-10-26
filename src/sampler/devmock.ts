@@ -178,6 +178,8 @@ export function installMocks() {
           return [{ path: `${a.dir}/Beat 1 - 01 Kick.wav`, seconds: 8, format: "pcm24" }];
         case "project_collect":
           return publish();
+        case "display_zoom":
+          return 1;
         case "autosave_check":
           return null;
         case "sampler_undo":
