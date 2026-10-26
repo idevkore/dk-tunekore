@@ -49,7 +49,13 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .app.dragging, .app.dragging * { cursor: grabbing !important; }
 .bar { height: 52px; flex-shrink: 0; background: var(--deep); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 14px; min-width: 0; }
 .bar-logo { height: 17px; flex-shrink: 0; }
-.project { display: flex; align-items: center; gap: 4px; min-width: 80px; max-width: 200px; padding-left: 6px; border-left: 1px solid var(--line-2); margin-left: 4px; }
+.project { position: relative; min-width: 80px; max-width: 200px; padding-left: 6px; border-left: 1px solid var(--line-2); margin-left: 4px; }
+.project-btn { display: flex; align-items: center; gap: 4px; max-width: 100%; border: 0; background: transparent; padding: 4px 6px; border-radius: 6px; color: var(--text); }
+.project-btn:hover { background: var(--card-2); }
+.menu { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; min-width: 280px; background: var(--card); border: 1px solid var(--line-2); border-radius: 10px; padding: 6px; display: flex; flex-direction: column; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+.menu [role=menuitem] { display: flex; justify-content: space-between; gap: 12px; text-align: left; border: 0; background: transparent; padding: 8px 10px; border-radius: 6px; font-size: 12.5px; color: var(--text); }
+.menu [role=menuitem]:hover:not(:disabled), .menu [role=menuitem]:focus-visible { background: #241e38; outline: none; }
+.menu-note { font-size: 10.5px; color: var(--faint); padding: 6px 10px 2px; overflow-wrap: anywhere; }
 .project-name { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .dirty { color: var(--lime); font-size: 18px; line-height: 1; }
 .group-btns { display: flex; gap: 4px; }

@@ -398,10 +398,21 @@ export default function App() {
       <header className="bar">
         <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
         <img src={mark} alt="tuneKore" className="bar-mark narrow-only" />
-        <div className="project" title={view.projectPath ?? "Not saved yet"}>
-          <span className="project-name">{view.projectName}</span>
-          {view.dirty && <span className="dirty" aria-label="unsaved changes">•</span>}
-        </div>
+        <ProjectMenu
+          name={view.projectName}
+          path={view.projectPath}
+          dirty={view.dirty}
+          onSaveAs={() => void doSave(true)}
+          onCollect={() =>
+            void api
+              .collectSamples()
+              .then((v) => {
+                take(v);
+                say(`Copied the samples into “${v.projectName} Samples” beside the project, and saved.`);
+              })
+              .catch(fail)
+          }
+        />
         <div className="group-btns">
           <button className="btn small" onClick={() => void doNew()} title={`New project (${mod}N)`}>New</button>
           <button className="btn small" onClick={() => void doOpen()} title={`Open a project (${mod}O)`}>Open</button>
@@ -592,6 +603,46 @@ export default function App() {
           onError={fail}
           disabled={!hasPattern}
         />
+      )}
+    </div>
+  );
+}
+
+/** The project's name in the top bar, opening a small menu of project actions. */
+function ProjectMenu(props: { name: string; path: string | null; dirty: boolean; onSaveAs: () => void; onCollect: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => ref.current?.contains(e.target as Node) || setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("pointerdown", away);
+    window.addEventListener("keydown", esc);
+    ref.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+    return () => {
+      window.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  const pick = (f: () => void) => () => {
+    setOpen(false);
+    f();
+  };
+  return (
+    <div className="project" ref={ref}>
+      <button className="project-btn" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} title={props.path ?? "Not saved yet"}>
+        <span className="project-name">{props.name}</span>
+        {props.dirty && <span className="dirty" aria-label="unsaved changes">•</span>}
+        <svg viewBox="0 0 10 10" width="8" height="8" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+      </button>
+      {open && (
+        <div className="menu" role="menu" aria-label="Project">
+          <button role="menuitem" onClick={pick(props.onSaveAs)}>Save as… <kbd>⇧⌘S</kbd></button>
+          <button role="menuitem" onClick={pick(props.onCollect)} disabled={!props.path} title={props.path ? undefined : "Save the project first"}>
+            Collect samples into the project folder
+          </button>
+          {props.path && <span className="menu-note mono">{props.path}</span>}
+        </div>
       )}
     </div>
   );

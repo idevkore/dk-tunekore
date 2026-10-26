@@ -1113,6 +1113,8 @@ struct RenderJob {
     samples: Vec<Option<Arc<Sample>>>,
     shared: SamplerShared,
     project: String,
+    /// Pad names, for stem file names.
+    names: Vec<String>,
 }
 
 fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
@@ -1125,6 +1127,9 @@ fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
     for (i, p) in doc.pads.iter().enumerate() {
         shared.set_pad(i, &p.settings.params());
         shared.set_pattern(i, p.patterns[doc.current]);
+        for step in 0..MAX_STEPS {
+            shared.set_velocity(i, step, p.velocity(doc.current, step) as f32 / 255.0);
+        }
     }
     shared.set_tempo(doc.tempo);
     shared.set_swing(doc.swing);
@@ -1133,11 +1138,12 @@ fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
         samples: doc.pads.iter().map(|p| p.sample.clone()).collect(),
         shared,
         project: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
+        names: doc.pads.iter().map(|p| p.sample.as_ref().map(|x| x.name.clone()).unwrap_or_default()).collect(),
     })
 }
 
-/// Renders `loops` passes of the pattern at 48 kHz. Blocking.
-fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
+/// The job's samples at the export rate.
+fn tracks(job: &RenderJob) -> Result<Vec<Option<Track>>, String> {
     let mut tracks: Vec<Option<Track>> = Vec::with_capacity(PADS);
     for s in &job.samples {
         tracks.push(match s {
@@ -1146,7 +1152,98 @@ fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
             Some(s) => Some(Arc::new(resample(&s.data, s.rate, EXPORT_RATE)?)),
         });
     }
-    Ok(render_pattern(&tracks, &job.shared, EXPORT_RATE, loops.clamp(1, 64)))
+    Ok(tracks)
+}
+
+/// Renders `loops` passes of the pattern at 48 kHz. Blocking.
+fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
+    Ok(render_pattern(&tracks(job)?, &job.shared, EXPORT_RATE, loops.clamp(1, 64)))
+}
+
+/// A file name with the characters macOS and Windows reject replaced.
+fn safe(name: &str) -> String {
+    name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect()
+}
+
+/// Renders each pad that plays in the pattern to its own 48 kHz WAV in
+/// `dir`, the same length as a full export, so the stems line up in any DAW.
+/// Choke groups still apply, so a stem sounds as it does in the mix.
+#[tauri::command]
+pub async fn sampler_export_stems(dir: String, loops: usize, app: AppHandle) -> Result<Vec<Exported>, String> {
+    let job = render_job(&app)?;
+    spawn_blocking(move || {
+        let tracks = tracks(&job)?;
+        let mut out = Vec::new();
+        for pad in 0..PADS {
+            if job.samples[pad].is_none() || job.shared.pattern(pad) == 0 {
+                continue;
+            }
+            // Keep every pad's pattern but silence the others, so chokes behave as in the mix.
+            let only: Vec<Option<Track>> = tracks.iter().enumerate().map(|(i, t)| if i == pad { t.clone() } else { None }).collect();
+            let audio = render_pattern(&only, &job.shared, EXPORT_RATE, loops.clamp(1, 64));
+            let path = Path::new(&dir).join(format!("{} - {:02} {}.wav", safe(&job.project), pad + 1, safe(&job.names[pad])));
+            let format = export_wav(&audio, EXPORT_RATE, &path)?;
+            out.push(Exported { seconds: audio[0].len() as f64 / EXPORT_RATE as f64, path: path.display().to_string(), format });
+        }
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Copies every sample that lives outside the project's folder into
+/// `<project> Samples/` beside it, points the pads there, and saves, so the
+/// project folder can move or be shared as one piece.
+#[tauri::command]
+pub async fn project_collect(app: AppHandle) -> Result<View, String> {
+    let (project, todo) = {
+        let s = state(&app);
+        let doc = s.doc.lock().unwrap();
+        let project = doc.path.clone().ok_or("save the project first, then collect its samples")?;
+        let base = project.parent().unwrap_or(Path::new("")).to_path_buf();
+        let todo: Vec<(usize, PathBuf)> = doc
+            .pads
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.sample.as_ref().map(|x| (i, x.path.clone())))
+            .filter(|(_, path)| !path.starts_with(&base))
+            .collect();
+        (project, todo)
+    };
+    let folder = project.with_file_name(format!("{} Samples", file_stem(&project)));
+    let copied = spawn_blocking(move || -> Result<Vec<(usize, PathBuf, PathBuf)>, String> {
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let mut done = Vec::new();
+        for (pad, from) in todo {
+            let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "sample.wav".into());
+            let size = std::fs::metadata(&from).map(|m| m.len()).ok();
+            // Reuse a copy already there (same name and size); otherwise find a free name.
+            let mut to = folder.join(&name);
+            let mut n = 2;
+            while to.exists() && std::fs::metadata(&to).map(|m| m.len()).ok() != size {
+                to = folder.join(format!("{} {n}.{}", file_stem(&from), from.extension().and_then(|e| e.to_str()).unwrap_or("wav")));
+                n += 1;
+            }
+            if !to.exists() {
+                std::fs::copy(&from, &to).map_err(|e| format!("can't copy {}: {e}", from.display()))?;
+            }
+            done.push((pad, from, to));
+        }
+        Ok(done)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    {
+        let s = state(&app);
+        let mut doc = s.doc.lock().unwrap();
+        for (pad, from, to) in copied {
+            // Only repoint a pad that still holds the sample we copied.
+            if let Some(x) = doc.pads[pad].sample.clone().filter(|x| x.path == from) {
+                doc.pads[pad].sample = Some(Arc::new(Sample { path: to, name: x.name.clone(), rate: x.rate, data: x.data.clone(), peaks: x.peaks.clone() }));
+            }
+        }
+    }
+    project_save(None, app)
 }
 
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.

@@ -136,6 +136,10 @@ export function installMocks() {
           return publish();
         case "sampler_chop":
           return { pads: [1, 2, 3, 4], folder: "/Users/test/Music/tuneKore/Samples/Chops/Kick chop 1" };
+        case "sampler_export_stems":
+          return [{ path: `${a.dir}/Beat 1 - 01 Kick.wav`, seconds: 8, format: "pcm24" }];
+        case "project_collect":
+          return publish();
         case "autosave_check":
           return null;
         case "sampler_undo":

@@ -1,7 +1,7 @@
 // Export the pattern as a WAV file, repeated a chosen number of times.
 import { useState } from "react";
-import { save } from "@tauri-apps/plugin-dialog";
-import { exportPattern } from "./api";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import { exportPattern, exportStems } from "./api";
 import Dialog from "./Dialog";
 
 const LOOPS = [1, 2, 4, 8];
@@ -22,6 +22,21 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
   const [loops, setLoops] = useState(4);
   const [busy, setBusy] = useState(false);
   const seconds = (loops * steps * 15) / tempo;
+
+  async function stems() {
+    const dir = await open({ directory: true, title: "Export stems to" }).catch(() => null);
+    if (typeof dir !== "string") return;
+    setBusy(true);
+    try {
+      const out = await exportStems(dir, loops);
+      onDone(`${out.length} stems to ${dir}`);
+      onClose();
+    } catch (e) {
+      onError(e);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function run() {
     const path = await save({
@@ -57,7 +72,8 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
       </fieldset>
       <p className="dim small">
         {seconds.toFixed(1)} s of audio, 48 kHz WAV. It ends exactly on the last step, so it loops cleanly.
-        Bounce puts it on the next empty pad, to chop, pitch or reverse like any sample.
+        Stems are one WAV per pad, all the same length, to line up in another DAW. Bounce puts the
+        mix on the next empty pad, to chop, pitch or reverse like any sample.
       </p>
       <div className="dialog-foot">
         <button className="btn small" onClick={onClose}>Cancel</button>
@@ -73,6 +89,9 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
           }}
         >
           Bounce to a pad
+        </button>
+        <button className="btn small" disabled={busy || disabled} onClick={() => void stems()}>
+          Export stems…
         </button>
         <button className="btn small primary" onClick={() => void run()} disabled={busy || disabled} autoFocus>
           {busy ? "Exporting…" : "Export WAV…"}

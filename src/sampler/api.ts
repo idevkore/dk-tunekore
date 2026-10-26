@@ -105,6 +105,8 @@ export const copyPattern = (from: number, to: number) => invoke<SamplerView>("sa
 export const setMetronome = (on: boolean) => invoke<SamplerView>("sampler_metronome", { on });
 export const setRecording = (on: boolean) => invoke<SamplerView>("sampler_record", { on });
 export const chop = (pad: number, count: number) => invoke<{ pads: number[]; folder: string }>("sampler_chop", { pad, count });
+export const exportStems = (dir: string, loops: number) => invoke<Exported[]>("sampler_export_stems", { dir, loops });
+export const collectSamples = () => invoke<SamplerView>("project_collect");
 export const undo = () => invoke<SamplerView>("sampler_undo");
 export const redo = () => invoke<SamplerView>("sampler_redo");
 export const bounce = (loops: number) => invoke<{ pad: number; path: string }>("sampler_bounce", { loops });

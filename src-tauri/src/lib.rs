@@ -234,6 +234,8 @@ pub fn run() {
             sampler::sampler_release,
             sampler::sampler_export,
             sampler::sampler_bounce,
+            sampler::sampler_export_stems,
+            sampler::project_collect,
             sampler::sampler_chop,
             sampler::sampler_undo,
             sampler::sampler_pattern,
