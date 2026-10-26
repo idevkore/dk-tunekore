@@ -6,10 +6,12 @@
 //! (`stems/tunekore_stems/separator.py`), so the app never depends on which
 //! model runs.
 
+mod chop;
 mod decode;
 mod stems;
 mod worker;
 
+pub use chop::{even, onsets, slices};
 pub use decode::{decode_file, Song, EXTENSIONS};
 pub use stems::{check, export_wav, peaks, read_planar, rms_db, write_planar, Checks, Stems, WavFormat, STEM_NAMES};
 pub use worker::{list_backends, run_job, BackendInfo, Cancel, Done, JobError, Request, WorkerConfig};

@@ -241,7 +241,7 @@ impl SamplerShared {
     fn step_frames(&self, step: usize, rate: f64) -> f64 {
         let sixteenth = rate * 60.0 / self.tempo() as f64 / 4.0;
         let push = sixteenth * self.swing() as f64 / 3.0;
-        if step % 2 == 0 { sixteenth + push } else { sixteenth - push }
+        if step.is_multiple_of(2) { sixteenth + push } else { sixteenth - push }
     }
 
     /// Frames that `loops` passes of the pattern last at `rate`.

@@ -22,3 +22,6 @@ serde = { version = "1", features = ["derive"] }
 tauri-plugin-dialog = "2.8.3"
 tunekore-analyzer = { version = "0.1.0", path = "../analyzer" }
 serde_json = "1.0.154"
+
+[dev-dependencies]
+tempfile = "3.27.0"
