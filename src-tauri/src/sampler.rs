@@ -26,6 +26,8 @@ const PAD_PEAKS: usize = 160;
 const EXPORT_RATE: u32 = 48_000;
 /// The Library lists at most this many files from one folder.
 const LIBRARY_LIMIT: usize = 20_000;
+/// Patterns in a project: A to D.
+pub const BANK: usize = 4;
 /// Undo steps kept.
 const UNDO_LIMIT: usize = 200;
 /// Edits of the same kind this close together undo as one (a slider drag, painting steps).
@@ -94,7 +96,8 @@ struct Pad {
     /// A sample the project names but that isn't on disk.
     missing: Option<PathBuf>,
     settings: PadSettings,
-    pattern: u64,
+    /// This pad's steps in each pattern, as bits.
+    patterns: [u64; BANK],
 }
 
 struct Doc {
@@ -102,6 +105,8 @@ struct Doc {
     tempo: f32,
     swing: f32,
     steps: usize,
+    /// The pattern that plays and is edited, 0..BANK.
+    current: usize,
     path: Option<PathBuf>,
     dirty: bool,
     history: History,
@@ -114,6 +119,7 @@ impl Default for Doc {
             tempo: 120.0,
             swing: 0.0,
             steps: 16,
+            current: 0,
             path: None,
             dirty: false,
             history: History::default(),
@@ -129,6 +135,7 @@ struct Snapshot {
     tempo: f32,
     swing: f32,
     steps: usize,
+    current: usize,
 }
 
 #[derive(Default)]
@@ -141,7 +148,7 @@ struct History {
 
 impl Doc {
     fn snapshot(&self) -> Snapshot {
-        Snapshot { pads: self.pads.clone(), tempo: self.tempo, swing: self.swing, steps: self.steps }
+        Snapshot { pads: self.pads.clone(), tempo: self.tempo, swing: self.swing, steps: self.steps, current: self.current }
     }
 
     /// Records `before` as an undo step for an edit of kind `key`, unless it
@@ -181,7 +188,7 @@ impl SamplerState {
     fn apply_pad(&self, doc: &Doc, pad: usize) {
         let p = &doc.pads[pad];
         self.handle.set_pad(pad, &p.settings.params());
-        self.handle.set_pattern(pad, p.pattern);
+        self.handle.set_pattern(pad, p.patterns[doc.current]);
     }
 
     fn apply_all(&self, doc: &Doc) {
@@ -217,6 +224,7 @@ impl SamplerState {
         doc.tempo = snap.tempo;
         doc.swing = snap.swing;
         doc.steps = snap.steps;
+        doc.current = snap.current;
         doc.dirty = true;
         doc.history.last = None;
         self.apply_all(doc);
@@ -259,6 +267,10 @@ pub struct View {
     dirty: bool,
     can_undo: bool,
     can_redo: bool,
+    /// The pattern being played and edited, 0 = A.
+    pattern: usize,
+    /// Which patterns have any steps.
+    patterns_used: Vec<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -294,7 +306,7 @@ fn view(doc: &Doc) -> View {
                 rate: s.map_or(0, |s| s.rate),
                 peaks: s.map(|s| s.peaks.clone()).unwrap_or_default(),
                 settings: p.settings,
-                steps: (0..doc.steps).map(|i| p.pattern & (1u64 << i) != 0).collect(),
+                steps: (0..doc.steps).map(|i| p.patterns[doc.current] & (1u64 << i) != 0).collect(),
             }
         })
         .collect();
@@ -308,6 +320,8 @@ fn view(doc: &Doc) -> View {
         dirty: doc.dirty,
         can_undo: !doc.history.undo.is_empty(),
         can_redo: !doc.history.redo.is_empty(),
+        pattern: doc.current,
+        patterns_used: (0..BANK).map(|b| doc.pads.iter().any(|p| p.patterns[b] != 0)).collect(),
     }
 }
 
@@ -451,8 +465,9 @@ pub fn sampler_step(pad: usize, step: usize, on: bool, app: AppHandle) -> Result
     }
     edit(&app, "steps", |s, doc| {
         let bit = 1u64 << step;
-        let p = &mut doc.pads[pad];
-        p.pattern = if on { p.pattern | bit } else { p.pattern & !bit };
+        let cur = doc.current;
+        let p = &mut doc.pads[pad].patterns[cur];
+        *p = if on { *p | bit } else { *p & !bit };
         s.apply_pad(doc, pad);
         Ok(())
     })
@@ -464,7 +479,8 @@ pub fn sampler_clear_steps(pad: Option<usize>, app: AppHandle) -> Result<View, S
     edit(&app, &format!("clear-steps:{pad:?}"), |s, doc| {
         for i in 0..PADS {
             if pad.is_none_or(|p| p == i) {
-                doc.pads[i].pattern = 0;
+                let cur = doc.current;
+                doc.pads[i].patterns[cur] = 0;
                 s.apply_pad(doc, i);
             }
         }
@@ -481,6 +497,35 @@ pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -
         s.handle.set_tempo(doc.tempo);
         s.handle.set_swing(doc.swing);
         s.handle.set_steps(doc.steps);
+        Ok(())
+    })
+}
+
+/// Switches to pattern `index` (0 = A). While playing, the switch lands on the next step.
+#[tauri::command]
+pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
+    if index >= BANK {
+        return Err(format!("there is no pattern {index}"));
+    }
+    edit(&app, "pattern", |s, doc| {
+        doc.current = index;
+        s.apply_all(doc);
+        Ok(())
+    })
+}
+
+/// Copies pattern `from` over pattern `to` and switches to it.
+#[tauri::command]
+pub fn sampler_copy_pattern(from: usize, to: usize, app: AppHandle) -> Result<View, String> {
+    if from >= BANK || to >= BANK {
+        return Err("there are only four patterns".into());
+    }
+    edit(&app, &format!("copy:{from}:{to}"), |s, doc| {
+        for p in doc.pads.iter_mut() {
+            p.patterns[to] = p.patterns[from];
+        }
+        doc.current = to;
+        s.apply_all(doc);
         Ok(())
     })
 }
@@ -677,6 +722,9 @@ struct ProjectFile {
     tempo: f32,
     swing: f32,
     steps: usize,
+    /// The pattern that was showing, 0 = A.
+    #[serde(default)]
+    current: usize,
     pads: Vec<PadFile>,
 }
 
@@ -687,9 +735,9 @@ struct PadFile {
     sample: Option<String>,
     #[serde(default)]
     settings: PadSettings,
-    /// One character per step: `x` plays, `.` rests.
+    /// This pad's steps in patterns A to D, one character per step: `x` plays, `.` rests.
     #[serde(default)]
-    pattern: String,
+    patterns: Vec<String>,
 }
 
 fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
@@ -705,15 +753,29 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
                     Err(_) => path.display().to_string(),
                 }),
                 settings: p.settings,
-                pattern: (0..MAX_STEPS)
-                    .map(|i| if p.pattern & (1u64 << i) != 0 { 'x' } else { '.' })
-                    .collect::<String>()
-                    .trim_end_matches('.')
-                    .to_string(),
+                patterns: p
+                    .patterns
+                    .iter()
+                    .map(|bits| {
+                        (0..MAX_STEPS)
+                            .map(|i| if bits & (1u64 << i) != 0 { 'x' } else { '.' })
+                            .collect::<String>()
+                            .trim_end_matches('.')
+                            .to_string()
+                    })
+                    .collect(),
             }
         })
         .collect();
-    ProjectFile { format: FORMAT.into(), version: VERSION, tempo: doc.tempo, swing: doc.swing, steps: doc.steps, pads }
+    ProjectFile {
+        format: FORMAT.into(),
+        version: VERSION,
+        tempo: doc.tempo,
+        swing: doc.swing,
+        steps: doc.steps,
+        current: doc.current,
+        pads,
+    }
 }
 
 fn pattern_bits(s: &str) -> u64 {
@@ -755,7 +817,11 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
         let mut pads: Vec<Pad> = Vec::with_capacity(PADS);
         let listed = std::mem::take(&mut file.pads);
         for pf in listed.into_iter().chain(std::iter::repeat_with(PadFile::default)).take(PADS) {
-            let mut pad = Pad { settings: pf.settings, pattern: pattern_bits(&pf.pattern), ..Default::default() };
+            let mut patterns = [0u64; BANK];
+            for (b, text) in pf.patterns.iter().take(BANK).enumerate() {
+                patterns[b] = pattern_bits(text);
+            }
+            let mut pad = Pad { settings: pf.settings, patterns, ..Default::default() };
             if let Some(rel) = &pf.sample {
                 let p = Path::new(rel);
                 let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
@@ -787,6 +853,7 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
             tempo: file.tempo.clamp(40.0, 300.0),
             swing: file.swing.clamp(0.0, 1.0),
             steps: file.steps.clamp(1, MAX_STEPS),
+            current: file.current.min(BANK - 1),
             path: Some(project),
             dirty: false,
             history: History::default(),
@@ -836,13 +903,13 @@ struct RenderJob {
 fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
     let s = state(app);
     let doc = s.doc.lock().unwrap();
-    if doc.pads.iter().all(|p| p.pattern == 0 || p.sample.is_none()) {
+    if doc.pads.iter().all(|p| p.patterns[doc.current] == 0 || p.sample.is_none()) {
         return Err("there is nothing in the pattern yet: add steps first".into());
     }
     let shared = SamplerShared::default();
     for (i, p) in doc.pads.iter().enumerate() {
         shared.set_pad(i, &p.settings.params());
-        shared.set_pattern(i, p.pattern);
+        shared.set_pattern(i, p.patterns[doc.current]);
     }
     shared.set_tempo(doc.tempo);
     shared.set_swing(doc.swing);
@@ -937,13 +1004,13 @@ mod tests {
     #[test]
     fn patterns_round_trip_through_text() {
         let mut doc = Doc::default();
-        doc.pads[0].pattern = 0b1000_0001;
-        doc.pads[2].pattern = 1u64 << 63;
+        doc.pads[0].patterns[0] = 0b1000_0001;
+        doc.pads[2].patterns[3] = 1u64 << 63;
         let file = to_file(&doc, Path::new("/tmp/beat.tunek"));
-        assert_eq!(file.pads[0].pattern, "x......x");
-        assert_eq!(file.pads[1].pattern, "");
-        assert_eq!(pattern_bits(&file.pads[0].pattern), 0b1000_0001);
-        assert_eq!(pattern_bits(&file.pads[2].pattern), 1u64 << 63);
+        assert_eq!(file.pads[0].patterns[0], "x......x");
+        assert_eq!(file.pads[1].patterns, vec![""; BANK]);
+        assert_eq!(pattern_bits(&file.pads[0].patterns[0]), 0b1000_0001);
+        assert_eq!(pattern_bits(&file.pads[2].patterns[3]), 1u64 << 63);
     }
 
     #[test]
@@ -964,11 +1031,11 @@ mod tests {
         let mut doc = Doc::default();
         for step in 0..4 {
             let before = doc.snapshot();
-            doc.pads[0].pattern |= 1 << step;
+            doc.pads[0].patterns[0] |= 1 << step;
             doc.checkpoint("steps", before);
         }
         assert_eq!(doc.history.undo.len(), 1, "painting four steps is one undo");
-        assert_eq!(doc.history.undo[0].pads[0].pattern, 0);
+        assert_eq!(doc.history.undo[0].pads[0].patterns[0], 0);
 
         let before = doc.snapshot();
         doc.tempo = 90.0;

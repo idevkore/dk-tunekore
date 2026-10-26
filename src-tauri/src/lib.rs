@@ -211,6 +211,8 @@ pub fn run() {
             sampler::sampler_export,
             sampler::sampler_bounce,
             sampler::sampler_undo,
+            sampler::sampler_pattern,
+            sampler::sampler_copy_pattern,
             sampler::sampler_redo,
             sampler::library_scan,
             sampler::library_default,
