@@ -34,7 +34,7 @@ from musiKore to tuneKore; the logo is "TUNE K›".
 | Time-stretch | Signalsmith Stretch (MIT), through a thin binding to its C++ header | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
 | Resampling | rubato (MIT/Apache) | Pure Rust. r8brain-free (MIT, C++) is the backup. |
 | Stems | A separate worker process behind a `Separator` interface. Phase 1: Python and PyTorch on Metal, run from the repo on Nate's Mac (`stems/`). To ship: the chosen model in ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML, or a vendor's SDK | The models we test are PyTorch research code (Demucs; SAM Audio, tested and dropped). Prototyping in PyTorch lets us choose the shipping model first, then run it natively. See section 6. |
-| Project files | Our own format. The Sampler MVP saves a `.tunekore` JSON file that points at its samples; Collect and Save (a folder with `project.json`, `audio/` and `plugins/`) comes with the Timeline | We read Ableton `.als` files later, if ever; we never copy the format. |
+| Project files | Our own format. The Sampler MVP saves a `.tunek` JSON file that points at its samples; Collect and Save (a folder with `project.json`, `audio/` and `plugins/`) comes with the Timeline | We read Ableton `.als` files later, if ever; we never copy the format. |
 
 ### Why not JUCE
 
@@ -210,7 +210,7 @@ below is ours.
 | Browser, Places, plugin browser, preview | Library | Phase 2 (a folder, search, preview); places and plugins in Phase 7 |
 | Splice in the browser (12.3) | Library → Splice | Phase 2 (`~/Splice` as a folder); full search needs a partnership |
 | Warping, warp markers, auto-warp, warp modes | Warp | Phase 8 |
-| Live Projects, Collect All and Save, File Manager | Projects | Phase 2 (a `.tunekore` file), grows over time |
+| Live Projects, Collect All and Save, File Manager | Projects | Phase 2 (a `.tunek` file), grows over time |
 | Racks, Drum Racks, built-in instruments and effects | Our own devices | Later. This is where tuneKore becomes ours. |
 
 ## 4. Roadmap
@@ -223,7 +223,7 @@ something to release.
 | --- | --- | --- | --- |
 | 0. Skeleton | Repo, Tauri shell with the brand, engine library building inside it, CI | The app opens on the Mac, lists audio devices and plays a test tone; CI builds macOS (and compiles on Windows and Linux) | 1 sprint |
 | 1. Analyzer: stems | Analyzer window: open a song (WAV, AIFF, FLAC, MP3, M4A), split it into Vocals, Drums, Bass and Other, then play, solo, mute and export the stems | A 4-minute song separates on this Mac in under 2 minutes in fast mode. Stems line up with the original to the sample and sum back to it within the model's error. | 2 sprints |
-| 2. Sampler (MVP) | The main window becomes the Sampler: a Library of samples (any folder, `~/Splice` included) with search and preview; 16 pads with gain, pan, pitch, start/end, reverse and one-shot or gate; a 16-step sequencer with tempo and swing; Analyzer stems sent to pads whole or chopped on transients; save and open a `.tunekore` project; export the pattern to WAV | You can open the app, build a beat from samples and chopped stems, hear it in time, save and reopen it, and export it, without touching code | 2 sprints |
+| 2. Sampler (MVP) | The main window becomes the Sampler: a Library of samples (any folder, `~/Splice` included) with search and preview; 16 pads with gain, pan, pitch, start/end, reverse and one-shot or gate; a 16-step sequencer with tempo and swing; Analyzer stems sent to pads whole or chopped on transients; save and open a `.tunek` project; export the pattern to WAV | You can open the app, build a beat from samples and chopped stems, hear it in time, save and reopen it, and export it, without touching code | 2 sprints |
 | 3. Plugins | Scanner, VST3 and CLAP instruments and effects, editor windows, MIDI keyboard input, state saved with the project. Starts from soundCraft's host crates. A plugin instrument can sit on a pad. | Every plugin in the test list (section 5) loads, plays, opens its editor and comes back after save and reopen | 2 to 3 sprints |
 | 4. Timeline | Tracks, audio and MIDI clips, recording, MIDI editor, automation lanes, undo | A short song can be recorded with Serum and Arturia, saved and reopened | 4 sprints |
 | 5. Clip Grid | Clip slots, scenes, launch quantization, recording into slots, moving clips to the Timeline. Sampler patterns become clips. | Scenes launch on the bar, in sync with the Timeline's clock | 2 sprints |

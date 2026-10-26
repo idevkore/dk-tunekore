@@ -6,6 +6,8 @@ export const PADS = 16;
 /** The computer keys that play pads 1–16, laid out like the 4×4 grid. */
 export const PAD_KEYS = ["1", "2", "3", "4", "q", "w", "e", "r", "a", "s", "d", "f", "z", "x", "c", "v"];
 export const STEP_CHOICES = [8, 16, 32];
+/** Project files: `Beat 1.tunek`. */
+export const PROJECT_EXT = "tunek";
 export const AUDIO_EXTENSIONS = ["wav", "aif", "aiff", "flac", "mp3", "m4a", "mp4"];
 
 export interface PadSettings {

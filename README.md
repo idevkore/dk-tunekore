@@ -21,7 +21,7 @@ Status: Phase 2, the Sampler (the MVP).
   arrow through samples to hear them, and drag them onto 16 pads (or select
   a pad and press Enter). Each pad has start and end, level, pan, pitch,
   gate, reverse and mute. Program a 16-step pattern with tempo and swing,
-  save it as a `.tunekore` project, and export it as a WAV.
+  save it as a `.tunek` project, and export it as a WAV.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
   or chopped at its hits from the playhead. Separation runs on this Mac in a

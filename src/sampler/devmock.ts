@@ -95,7 +95,7 @@ export function installMocks() {
           v.dirty = false;
           return publish();
         case "project_save":
-          Object.assign(v, { dirty: false, projectName: "Beat 1", projectPath: "/Users/test/Beat 1.tunekore" });
+          Object.assign(v, { dirty: false, projectName: "Beat 1", projectPath: "/Users/test/Beat 1.tunek" });
           return publish();
         case "list_outputs":
           return [{ id: "coreaudio:built-in", name: "MacBook Pro Speakers", channels: 2, sampleRates: [44100, 48000], preferredRate: 48000, isDefault: true }];
@@ -104,7 +104,7 @@ export function installMocks() {
         case "plugin:dialog|open":
           return "/Users/test/Music/Kick.wav";
         case "plugin:dialog|save":
-          return "/Users/test/Music/Beat 1.tunekore";
+          return "/Users/test/Music/Beat 1.tunek";
         case "plugin:dialog|ask":
           return true;
         case "sampler_export":

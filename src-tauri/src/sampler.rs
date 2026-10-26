@@ -28,6 +28,8 @@ const EXPORT_RATE: u32 = 48_000;
 const LIBRARY_LIMIT: usize = 20_000;
 /// Decoded files kept in memory, so previews and reloads are instant.
 const CACHE_FILES: usize = 48;
+/// Project files end in `.tunek`.
+pub const PROJECT_EXT: &str = "tunek";
 const FORMAT: &str = "tunekore-project";
 const VERSION: u32 = 1;
 
@@ -679,17 +681,17 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
     .map_err(|e| e.to_string())?
 }
 
-/// Saves to `path`, or to the project's own file when `path` is `None`.
+/// Saves to `path` (as `.tunek`), or to the project's own file when `path` is `None`.
 #[tauri::command]
 pub fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String> {
     let s = state(&app);
     let mut doc = s.doc.lock().unwrap();
     let mut project = path.map(PathBuf::from).or_else(|| doc.path.clone()).ok_or("choose where to save the project")?;
-    if project.extension().and_then(|e| e.to_str()) != Some("tunekore") {
-        project.set_extension("tunekore");
+    if project.extension().and_then(|e| e.to_str()) != Some(PROJECT_EXT) {
+        project.set_extension(PROJECT_EXT);
     }
     let json = serde_json::to_string_pretty(&to_file(&doc, &project)).map_err(|e| e.to_string())?;
-    let tmp = project.with_extension("tunekore.part");
+    let tmp = project.with_extension(format!("{PROJECT_EXT}.part"));
     std::fs::write(&tmp, json + "\n").map_err(|e| format!("can't write {}: {e}", project.display()))?;
     std::fs::rename(&tmp, &project).map_err(|e| e.to_string())?;
     doc.path = Some(project);
@@ -765,7 +767,7 @@ mod tests {
         let mut doc = Doc::default();
         doc.pads[0].pattern = 0b1000_0001;
         doc.pads[2].pattern = 1u64 << 63;
-        let file = to_file(&doc, Path::new("/tmp/beat.tunekore"));
+        let file = to_file(&doc, Path::new("/tmp/beat.tunek"));
         assert_eq!(file.pads[0].pattern, "x......x");
         assert_eq!(file.pads[1].pattern, "");
         assert_eq!(pattern_bits(&file.pads[0].pattern), 0b1000_0001);
@@ -777,7 +779,7 @@ mod tests {
         let mut doc = Doc::default();
         doc.pads[0].missing = Some(PathBuf::from("/music/beats/kick.wav"));
         doc.pads[1].missing = Some(PathBuf::from("/elsewhere/snare.wav"));
-        let file = to_file(&doc, Path::new("/music/beats/song.tunekore"));
+        let file = to_file(&doc, Path::new("/music/beats/song.tunek"));
         assert_eq!(file.pads[0].sample.as_deref(), Some("kick.wav"));
         assert_eq!(file.pads[1].sample.as_deref(), Some("/elsewhere/snare.wav"));
         let json = serde_json::to_string(&file).unwrap();

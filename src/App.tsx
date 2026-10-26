@@ -169,7 +169,7 @@ export default function App() {
   );
 
   const doOpen = useCallback(async () => {
-    const f = await open({ title: "Open a project", filters: [{ name: "tuneKore project", extensions: ["tunekore"] }] }).catch(() => null);
+    const f = await open({ title: "Open a project", filters: [{ name: "tuneKore project", extensions: [api.PROJECT_EXT] }] }).catch(() => null);
     if (typeof f === "string") await openPath(f);
   }, [openPath]);
 
@@ -179,8 +179,8 @@ export default function App() {
       if (as || !viewRef.current?.projectPath) {
         path = await save({
           title: "Save project",
-          defaultPath: `${viewRef.current?.projectName ?? "Untitled"}.tunekore`,
-          filters: [{ name: "tuneKore project", extensions: ["tunekore"] }],
+          defaultPath: `${viewRef.current?.projectName ?? "Untitled"}.${api.PROJECT_EXT}`,
+          filters: [{ name: "tuneKore project", extensions: [api.PROJECT_EXT] }],
         }).catch(() => null);
         if (!path) return;
       }
@@ -293,7 +293,7 @@ export default function App() {
         else if (p.type === "leave") setDropPad(null);
         else if (p.type === "drop") {
           setDropPad(null);
-          const project = p.paths.find((f) => f.toLowerCase().endsWith(".tunekore"));
+          const project = p.paths.find((f) => f.toLowerCase().endsWith(`.${api.PROJECT_EXT}`));
           if (project) return void openPath(project);
           const files = p.paths.filter(isAudio);
           if (files.length === 0) {
