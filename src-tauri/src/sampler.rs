@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_analyzer::{decode_file, even, export_wav, onsets, peaks, slices, WavFormat, EXTENSIONS};
-use tunekore_engine::{render_pattern, resample, PadParams, SamplerHandle, SamplerShared, Track, MAX_STEPS, PADS, PREVIEW};
+use tunekore_engine::{render_pattern, render_song, resample, CHAIN_MAX, PadParams, SamplerHandle, SamplerShared, Track, MAX_STEPS, PADS, PREVIEW};
 
 use crate::Audio;
 
@@ -138,9 +138,32 @@ struct Pad {
     patterns: [u64; BANK],
     /// How hard each step plays, per pattern, 255 = full. Empty until a velocity is set.
     velocity: Vec<[u8; MAX_STEPS]>,
+    /// How likely each step is to play, per pattern, 255 = always. Empty until set.
+    chance: Vec<[u8; MAX_STEPS]>,
+    /// Hits per step (1..=4), per pattern. Empty until set.
+    ratchet: Vec<[u8; MAX_STEPS]>,
 }
 
 impl Pad {
+    fn chance(&self, pattern: usize, step: usize) -> u8 {
+        self.chance.get(pattern).map_or(255, |v| v[step])
+    }
+
+    fn ratchet(&self, pattern: usize, step: usize) -> u8 {
+        self.ratchet.get(pattern).map_or(1, |v| v[step].max(1))
+    }
+
+    fn set_extras(&mut self, pattern: usize, step: usize, chance: u8, ratchet: u8) {
+        if self.chance.len() < BANK {
+            self.chance.resize(BANK, [255; MAX_STEPS]);
+        }
+        if self.ratchet.len() < BANK {
+            self.ratchet.resize(BANK, [1; MAX_STEPS]);
+        }
+        self.chance[pattern][step] = chance;
+        self.ratchet[pattern][step] = ratchet.clamp(1, 4);
+    }
+
     fn velocity(&self, pattern: usize, step: usize) -> u8 {
         self.velocity.get(pattern).map_or(255, |v| v[step])
     }
@@ -160,6 +183,10 @@ struct Doc {
     steps: usize,
     /// The pattern that plays and is edited, 0..BANK.
     current: usize,
+    /// Song mode: the patterns to play in order, and whether it plays the chain or loops one pattern.
+    chain: Vec<u8>,
+    song_mode: bool,
+    song_loop: bool,
     path: Option<PathBuf>,
     dirty: bool,
     history: History,
@@ -175,6 +202,9 @@ impl Default for Doc {
             swing: 0.0,
             steps: 16,
             current: 0,
+            chain: Vec::new(),
+            song_mode: false,
+            song_loop: true,
             path: None,
             dirty: false,
             history: History::default(),
@@ -192,6 +222,9 @@ struct Snapshot {
     swing: f32,
     steps: usize,
     current: usize,
+    chain: Vec<u8>,
+    song_mode: bool,
+    song_loop: bool,
 }
 
 #[derive(Default)]
@@ -204,7 +237,16 @@ struct History {
 
 impl Doc {
     fn snapshot(&self) -> Snapshot {
-        Snapshot { pads: self.pads.clone(), tempo: self.tempo, swing: self.swing, steps: self.steps, current: self.current }
+        Snapshot {
+            pads: self.pads.clone(),
+            tempo: self.tempo,
+            swing: self.swing,
+            steps: self.steps,
+            current: self.current,
+            chain: self.chain.clone(),
+            song_mode: self.song_mode,
+            song_loop: self.song_loop,
+        }
     }
 
     /// Records `before` as an undo step for an edit of kind `key`, unless it
@@ -248,9 +290,14 @@ impl SamplerState {
     fn apply_pad(&self, doc: &Doc, pad: usize) {
         let p = &doc.pads[pad];
         self.handle.set_pad(pad, &p.settings.params());
-        self.handle.set_pattern(pad, p.patterns[doc.current]);
-        for step in 0..MAX_STEPS {
-            self.handle.set_velocity(pad, step, p.velocity(doc.current, step) as f32 / 255.0);
+        // The engine holds every pattern, so song mode can move between them on the bar.
+        for b in 0..BANK {
+            self.handle.set_bank_pattern(b, pad, p.patterns[b]);
+            for step in 0..MAX_STEPS {
+                self.handle.set_bank_velocity(b, pad, step, p.velocity(b, step) as f32 / 255.0);
+                self.handle.set_chance(b, pad, step, p.chance(b, step) as f32 / 255.0);
+                self.handle.set_ratchet(b, pad, step, p.ratchet(b, step));
+            }
         }
     }
 
@@ -261,6 +308,10 @@ impl SamplerState {
         self.handle.set_tempo(doc.tempo);
         self.handle.set_swing(doc.swing);
         self.handle.set_steps(doc.steps);
+        self.handle.set_bank(doc.current);
+        self.handle.set_chain(&doc.chain);
+        self.handle.set_song_mode(doc.song_mode);
+        self.handle.set_song_loop(doc.song_loop);
     }
 
     /// Whether the document has changes that aren't saved.
@@ -288,6 +339,9 @@ impl SamplerState {
         doc.swing = snap.swing;
         doc.steps = snap.steps;
         doc.current = snap.current;
+        doc.chain = snap.chain;
+        doc.song_mode = snap.song_mode;
+        doc.song_loop = snap.song_loop;
         doc.dirty = true;
         doc.revision += 1;
         doc.history.last = None;
@@ -337,6 +391,9 @@ pub struct View {
     patterns_used: Vec<bool>,
     metronome: bool,
     recording: bool,
+    chain: Vec<u8>,
+    song_mode: bool,
+    song_loop: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -355,6 +412,10 @@ struct PadView {
     steps: Vec<bool>,
     /// How hard each step plays, 0..1, one per step.
     velocity: Vec<f32>,
+    /// How likely each step is to play, 0..1.
+    chance: Vec<f32>,
+    /// Hits per step, 1..=4.
+    ratchet: Vec<u8>,
 }
 
 fn view(doc: &Doc, live: &SamplerHandle) -> View {
@@ -376,6 +437,8 @@ fn view(doc: &Doc, live: &SamplerHandle) -> View {
                 settings: p.settings,
                 steps: (0..doc.steps).map(|i| p.patterns[doc.current] & (1u64 << i) != 0).collect(),
                 velocity: (0..doc.steps).map(|i| p.velocity(doc.current, i) as f32 / 255.0).collect(),
+                chance: (0..doc.steps).map(|i| p.chance(doc.current, i) as f32 / 255.0).collect(),
+                ratchet: (0..doc.steps).map(|i| p.ratchet(doc.current, i)).collect(),
             }
         })
         .collect();
@@ -393,6 +456,9 @@ fn view(doc: &Doc, live: &SamplerHandle) -> View {
         patterns_used: (0..BANK).map(|b| doc.pads.iter().any(|p| p.patterns[b] != 0)).collect(),
         metronome: live.metronome(),
         recording: live.is_recording(),
+        chain: doc.chain.clone(),
+        song_mode: doc.song_mode,
+        song_loop: doc.song_loop,
     }
 }
 
@@ -616,10 +682,16 @@ fn sync_recorded(app: &AppHandle) {
     let cur = doc.current;
     let mut changed = false;
     for pad in 0..PADS {
-        let live = s.handle.pattern(pad);
+        let live = s.handle.bank_pattern(cur, pad);
+        let added = live & !doc.pads[pad].patterns[cur];
         if doc.pads[pad].patterns[cur] != live {
             doc.pads[pad].patterns[cur] = live;
             changed = true;
+        }
+        // Recorded hits carry how hard they were played.
+        for step in (0..MAX_STEPS).filter(|i| added & (1u64 << i) != 0) {
+            let v = (s.handle.bank_velocity(cur, pad, step) * 255.0).round() as u8;
+            doc.pads[pad].set_velocity(cur, step, v);
         }
     }
     if changed {
@@ -627,6 +699,34 @@ fn sync_recorded(app: &AppHandle) {
         doc.checkpoint(&format!("take:{take}"), before);
         publish(app, &doc);
     }
+}
+
+/// A step's chance to play (0..1) and its ratchet (1..=4 hits), in the current pattern.
+#[tauri::command]
+pub fn sampler_step_extras(pad: usize, step: usize, chance: f32, ratchet: u8, app: AppHandle) -> Result<View, String> {
+    check_pad(pad)?;
+    if step >= MAX_STEPS {
+        return Err(format!("there is no step {}", step + 1));
+    }
+    edit(&app, &format!("extras:{pad}:{step}"), |s, doc| {
+        let cur = doc.current;
+        doc.pads[pad].set_extras(cur, step, (chance.clamp(0.0, 1.0) * 255.0).round() as u8, ratchet);
+        s.apply_pad(doc, pad);
+        Ok(())
+    })
+}
+
+/// Song mode: `chain` lists the patterns (0 = A) to play in order; with
+/// `song_mode` on, play runs through them, looping at the end if `song_loop`.
+#[tauri::command]
+pub fn sampler_song(chain: Vec<u8>, song_mode: bool, song_loop: bool, app: AppHandle) -> Result<View, String> {
+    edit(&app, "song", |s, doc| {
+        doc.chain = chain.into_iter().filter(|&b| (b as usize) < BANK).take(CHAIN_MAX).collect();
+        doc.song_mode = song_mode;
+        doc.song_loop = song_loop;
+        s.apply_all(doc);
+        Ok(())
+    })
 }
 
 /// Switches to pattern `index` (0 = A). While playing, the switch lands on the next step.
@@ -651,6 +751,11 @@ pub fn sampler_copy_pattern(from: usize, to: usize, app: AppHandle) -> Result<Vi
     edit(&app, &format!("copy:{from}:{to}"), |s, doc| {
         for p in doc.pads.iter_mut() {
             p.patterns[to] = p.patterns[from];
+            for step in 0..MAX_STEPS {
+                let (v, c, r) = (p.velocity(from, step), p.chance(from, step), p.ratchet(from, step));
+                p.set_velocity(to, step, v);
+                p.set_extras(to, step, c, r);
+            }
         }
         doc.current = to;
         s.apply_all(doc);
@@ -714,13 +819,15 @@ struct Tick {
     playing: bool,
     step: Option<usize>,
     played: Vec<u32>,
+    /// Which chain entry the song is on, in song mode.
+    chain_position: Option<usize>,
 }
 
 /// Sends the step and each pad's play count to the UI about 30 times a
 /// second while anything changes.
 pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
     std::thread::spawn(move || {
-        let mut last: Option<(bool, Option<usize>, Vec<u32>)> = None;
+        let mut last: Option<(bool, Option<usize>, Vec<u32>, Option<usize>)> = None;
         let mut recorded = handle.recorded();
         loop {
             std::thread::sleep(Duration::from_millis(33));
@@ -729,9 +836,9 @@ pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
                 recorded = r;
                 sync_recorded(&app);
             }
-            let now = (handle.is_playing(), handle.current_step(), (0..PADS).map(|p| handle.played(p)).collect::<Vec<_>>());
+            let now = (handle.is_playing(), handle.current_step(), (0..PADS).map(|p| handle.played(p)).collect::<Vec<_>>(), handle.chain_position());
             if last.as_ref() != Some(&now) {
-                let _ = app.emit("sampler:tick", Tick { playing: now.0, step: now.1, played: now.2.clone() });
+                let _ = app.emit("sampler:tick", Tick { playing: now.0, step: now.1, played: now.2.clone(), chain_position: now.3 });
                 last = Some(now);
             }
         }
@@ -859,7 +966,18 @@ struct ProjectFile {
     /// The pattern that was showing, 0 = A.
     #[serde(default)]
     current: usize,
+    /// Song mode's chain of patterns (0 = A), and its switches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chain: Vec<u8>,
+    #[serde(default)]
+    song_mode: bool,
+    #[serde(default = "yes")]
+    song_loop: bool,
     pads: Vec<PadFile>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -875,6 +993,12 @@ struct PadFile {
     /// How hard each step plays (0..255), per pattern; left out while every step is full.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     velocity: Vec<Vec<u8>>,
+    /// Chance per step (255 = always), per pattern; left out while every step always plays.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    chance: Vec<Vec<u8>>,
+    /// Hits per step (1..=4), per pattern; left out while every step plays once.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ratchet: Vec<Vec<u8>>,
 }
 
 fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
@@ -906,6 +1030,16 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
                 } else {
                     p.velocity.iter().map(|v| v.to_vec()).collect()
                 },
+                chance: if p.chance.iter().flatten().all(|&v| v == 255) {
+                    Vec::new()
+                } else {
+                    p.chance.iter().map(|v| v.to_vec()).collect()
+                },
+                ratchet: if p.ratchet.iter().flatten().all(|&v| v <= 1) {
+                    Vec::new()
+                } else {
+                    p.ratchet.iter().map(|v| v.to_vec()).collect()
+                },
             }
         })
         .collect();
@@ -916,6 +1050,9 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
         swing: doc.swing,
         steps: doc.steps,
         current: doc.current,
+        chain: doc.chain.clone(),
+        song_mode: doc.song_mode,
+        song_loop: doc.song_loop,
         pads,
     }
 }
@@ -982,6 +1119,13 @@ fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: 
                 pad.set_velocity(b, i, v);
             }
         }
+        for b in 0..BANK.min(pf.chance.len().max(pf.ratchet.len())) {
+            for i in 0..MAX_STEPS {
+                let c = pf.chance.get(b).and_then(|v| v.get(i)).copied().unwrap_or(255);
+                let r = pf.ratchet.get(b).and_then(|v| v.get(i)).copied().unwrap_or(1);
+                pad.set_extras(b, i, c, r);
+            }
+        }
         if let Some(rel) = &pf.sample {
             let p = Path::new(rel);
             let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
@@ -1014,6 +1158,9 @@ fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: 
         swing: file.swing.clamp(0.0, 1.0),
         steps: file.steps.clamp(1, MAX_STEPS),
         current: file.current.min(BANK - 1),
+        chain: file.chain.iter().copied().filter(|&b| (b as usize) < BANK).take(CHAIN_MAX).collect(),
+        song_mode: file.song_mode,
+        song_loop: file.song_loop,
         path: as_path,
         dirty,
         history: History::default(),
@@ -1150,22 +1297,36 @@ struct RenderJob {
     project: String,
     /// Pad names, for stem file names.
     names: Vec<String>,
+    /// Render the song chain once instead of looping the current pattern.
+    song: bool,
 }
 
-fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
+/// Copies the document for a render. With `song`, the render is the song
+/// mode chain played once; otherwise `loops` passes of the current pattern.
+fn render_job(app: &AppHandle, song: bool) -> Result<RenderJob, String> {
     let s = state(app);
     let doc = s.doc.lock().unwrap();
-    if doc.pads.iter().all(|p| p.patterns[doc.current] == 0 || p.sample.is_none()) {
-        return Err("there is nothing in the pattern yet: add steps first".into());
+    let banks: Vec<usize> = if song { doc.chain.iter().map(|&b| b as usize).collect() } else { vec![doc.current] };
+    if song && banks.is_empty() {
+        return Err("the song is empty: add patterns to it first".into());
+    }
+    if doc.pads.iter().all(|p| p.sample.is_none() || banks.iter().all(|&b| p.patterns[b] == 0)) {
+        return Err("there is nothing to play yet: add steps first".into());
     }
     let shared = SamplerShared::default();
     for (i, p) in doc.pads.iter().enumerate() {
         shared.set_pad(i, &p.settings.params());
-        shared.set_pattern(i, p.patterns[doc.current]);
-        for step in 0..MAX_STEPS {
-            shared.set_velocity(i, step, p.velocity(doc.current, step) as f32 / 255.0);
+        for b in 0..BANK {
+            shared.set_bank_pattern(b, i, p.patterns[b]);
+            for step in 0..MAX_STEPS {
+                shared.set_bank_velocity(b, i, step, p.velocity(b, step) as f32 / 255.0);
+                shared.set_chance(b, i, step, p.chance(b, step) as f32 / 255.0);
+                shared.set_ratchet(b, i, step, p.ratchet(b, step));
+            }
         }
     }
+    shared.set_bank(doc.current);
+    shared.set_chain(&doc.chain);
     shared.set_tempo(doc.tempo);
     shared.set_swing(doc.swing);
     shared.set_steps(doc.steps);
@@ -1174,6 +1335,7 @@ fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
         shared,
         project: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
         names: doc.pads.iter().map(|p| p.sample.as_ref().map(|x| x.name.clone()).unwrap_or_default()).collect(),
+        song,
     })
 }
 
@@ -1192,7 +1354,15 @@ fn tracks(job: &RenderJob) -> Result<Vec<Option<Track>>, String> {
 
 /// Renders `loops` passes of the pattern at 48 kHz. Blocking.
 fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
-    Ok(render_pattern(&tracks(job)?, &job.shared, EXPORT_RATE, loops.clamp(1, 64)))
+    Ok(render_with(job, &tracks(job)?, loops))
+}
+
+fn render_with(job: &RenderJob, tracks: &[Option<Track>], loops: usize) -> Vec<Vec<f32>> {
+    if job.song {
+        render_song(tracks, &job.shared, EXPORT_RATE)
+    } else {
+        render_pattern(tracks, &job.shared, EXPORT_RATE, loops.clamp(1, 64))
+    }
 }
 
 /// A file name with the characters macOS and Windows reject replaced.
@@ -1204,18 +1374,22 @@ fn safe(name: &str) -> String {
 /// `dir`, the same length as a full export, so the stems line up in any DAW.
 /// Choke groups still apply, so a stem sounds as it does in the mix.
 #[tauri::command]
-pub async fn sampler_export_stems(dir: String, loops: usize, app: AppHandle) -> Result<Vec<Exported>, String> {
-    let job = render_job(&app)?;
+pub async fn sampler_export_stems(dir: String, loops: usize, song: bool, app: AppHandle) -> Result<Vec<Exported>, String> {
+    let job = render_job(&app, song)?;
     spawn_blocking(move || {
         let tracks = tracks(&job)?;
         let mut out = Vec::new();
         for pad in 0..PADS {
-            if job.samples[pad].is_none() || job.shared.pattern(pad) == 0 {
+            let plays = (0..BANK).any(|b| job.shared.bank_pattern(b, pad) != 0);
+            if job.samples[pad].is_none() || !plays {
                 continue;
             }
             // Keep every pad's pattern but silence the others, so chokes behave as in the mix.
             let only: Vec<Option<Track>> = tracks.iter().enumerate().map(|(i, t)| if i == pad { t.clone() } else { None }).collect();
-            let audio = render_pattern(&only, &job.shared, EXPORT_RATE, loops.clamp(1, 64));
+            let audio = render_with(&job, &only, loops);
+            if audio[0].iter().all(|&x| x == 0.0) {
+                continue; // this pad doesn't play in what's rendered
+            }
             let path = Path::new(&dir).join(format!("{} - {:02} {}.wav", safe(&job.project), pad + 1, safe(&job.names[pad])));
             let format = export_wav(&audio, EXPORT_RATE, &path)?;
             out.push(Exported { seconds: audio[0].len() as f64 / EXPORT_RATE as f64, path: path.display().to_string(), format });
@@ -1283,8 +1457,8 @@ pub async fn project_collect(app: AppHandle) -> Result<View, String> {
 
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.
 #[tauri::command]
-pub async fn sampler_export(path: String, loops: usize, app: AppHandle) -> Result<Exported, String> {
-    let job = render_job(&app)?;
+pub async fn sampler_export(path: String, loops: usize, song: bool, app: AppHandle) -> Result<Exported, String> {
+    let job = render_job(&app, song)?;
     spawn_blocking(move || {
         let mut path = PathBuf::from(path);
         if path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() != Some("wav") {
@@ -1308,8 +1482,8 @@ pub struct Bounced {
 /// Resamples: renders `loops` passes of the pattern and puts the result on
 /// the first empty pad. The WAV goes in Music/tuneKore/Samples/Bounces.
 #[tauri::command]
-pub async fn sampler_bounce(loops: usize, app: AppHandle) -> Result<Bounced, String> {
-    let job = render_job(&app)?;
+pub async fn sampler_bounce(loops: usize, song: bool, app: AppHandle) -> Result<Bounced, String> {
+    let job = render_job(&app, song)?;
     let pad = first_free_pad(&app).ok_or("every pad is in use: clear one to bounce onto it")?;
     let dir = app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore/Samples/Bounces");
     let a = app.clone();
