@@ -5,7 +5,15 @@ platform to build our own instruments, effects and tools on. It runs on macOS
 first, then Windows, then Linux. It hosts the plugins Nate already owns (Serum 1
 and 2 through Splice Rent-to-Own, Arturia V Collection, Native Instruments). The
 first tool is the **Analyzer**, a separate window that splits a song into stems
-and lets you work on one stem at a time.
+and lets you work on one stem at a time. The second, and the MVP, is the
+**Sampler**: pads, a step sequencer and a sample Library, fed by the Analyzer's
+stems.
+
+**Focus (2026-10-26): new tech only.** tuneKore starts with no users and no
+old projects to carry, so it supports only current technology and leaves the
+legacy formats out: VST3 and CLAP plugins (no VST2, no Audio Units), 64-bit
+Apple silicon first, and a Rust engine. What it is for, in order: sampling,
+AI tooling and stems, then plugins and arranging.
 
 Written 2026-10-23. The licensing facts were checked on the web that day; the
 Ableton behavior comes from Ableton's own manual and release notes. Sources are
@@ -20,13 +28,13 @@ from musiKore to tuneKore; the logo is "TUNE K›".
 | Engine | Our own engine in Rust: the `tunekore-engine` crate, in one Cargo workspace with the shell | No garbage collector on the audio thread, memory safety in our own code, and one language and build from the engine to the shell. Plugin hosting from Rust is proven on Serum 1 and 2 (see "Why Rust"). Every line is ours. |
 | UI | TypeScript and React in the system webview, with Canvas and WebGL for the timeline, waveforms and meters | Fast to build and change, and it matches the stack Nate already works in. The UI never runs on the audio thread. |
 | App shell | Tauri 2 (MIT/Apache) | Windows, menus, dialogs, installers, signing and auto-update on all three OSes, with a small app size. Its Rust commands call the engine crate directly. |
-| Plugin formats | VST3 everywhere and Audio Units on macOS. CLAP later. No VST2. Hosted through the `vst3` crate (MIT/Apache bindings to the SDK) and `objc2-audio-toolbox` (Zlib/MIT/Apache). | The VST3 SDK has been MIT since 3.8 (Oct 2025). Steinberg no longer licenses VST2 to new hosts. All of Nate's plugins ship as VST3 and AU; none ship CLAP. |
+| Plugin formats | VST3 and CLAP, on every OS. No Audio Units and no VST2 (changed 2026-10-26: new tech only). Hosted with our own bindings or the `vst3` crate (MIT/Apache), starting from soundCraft's `vst3-host` and `clap-host` crates (MIT/Apache, see "soundCraft" below). | The VST3 SDK has been MIT since 3.8 (Oct 2025), and CLAP is MIT and the newest open format. Steinberg no longer licenses VST2 to new hosts. Every plugin Nate owns ships as VST3, so dropping AU loses none of them. None ship CLAP yet; we support it for what comes next. |
 | Audio and MIDI I/O | cpal (Apache-2.0) and midir (MIT) | CoreAudio, WASAPI, ASIO, ALSA and JACK behind one API |
 | Audio files | Symphonia (MPL-2.0, used unmodified) for WAV, AIFF, FLAC, MP3 and Ogg, plus the OS decoders for AAC/M4A | Pure Rust, and no LGPL dependency to manage |
 | Time-stretch | Signalsmith Stretch (MIT), through a thin binding to its C++ header | Good quality with no license fee. Bungee (MPL-2.0) is the backup. |
 | Resampling | rubato (MIT/Apache) | Pure Rust. r8brain-free (MIT, C++) is the backup. |
 | Stems | A separate worker process behind a `Separator` interface. Phase 1: Python and PyTorch on Metal, run from the repo on Nate's Mac (`stems/`). To ship: the chosen model in ONNX Runtime (MIT) through the `ort` crate (MIT/Apache), on Core ML, or a vendor's SDK | The models we test are PyTorch research code (Demucs; SAM Audio, tested and dropped). Prototyping in PyTorch lets us choose the shipping model first, then run it natively. See section 6. |
-| Project files | Our own format: a `.mkore` folder with `project.json`, `audio/` and `plugins/` | We read Ableton `.als` files later, if ever; we never copy the format. |
+| Project files | Our own format. The Sampler MVP saves a `.tunekore` JSON file that points at its samples; Collect and Save (a folder with `project.json`, `audio/` and `plugins/`) comes with the Timeline | We read Ableton `.als` files later, if ever; we never copy the format. |
 
 ### Why not JUCE
 
@@ -47,7 +55,7 @@ Tracktion Engine would hand us a whole DAW engine, but it needs a JUCE license
 as well as its own ($35 to $300 a seat a month, or GPL), and the core of the
 product wouldn't be ours.
 
-**Fallback.** If plugin hosting eats more than its share of Phase 2, JUCE's
+**Fallback.** If plugin hosting eats more than its share of Phase 3, JUCE's
 plugin layer can go behind our `PluginHost` interface, as a small C++ library
 with a C interface. That decision would cost a JUCE license, not a rewrite.
 
@@ -84,6 +92,28 @@ toolchain for the engine and the shell.
 | Swift / AppKit only | Best on a Mac, but it closes off Windows and Linux |
 | Qt | LGPL obligations or a costly commercial license, and a C++ UI |
 
+### soundCraft
+
+[soundCraft](https://github.com/storytold/soundcraft) is the open-source DAW
+in ArtCraft's suite: a Rust rewrite of a Pro Tools-style workstation with an
+egui interface. Checked 2026-10-26 at commit `7dc56a4` (v0.13.1, pre-alpha).
+
+- **License:** MIT OR Apache-2.0, which fits our rule. The ArtCraft name and
+  logos are excluded, and we use neither.
+- **What we can take:** its `vst3-host` and `clap-host` crates. Each scans
+  the standard folders, loads plugins in process and exposes them through one
+  `Plugin` trait, with almost no dependencies (`serde`, `thiserror`, `log`,
+  plus its own `dsp` crate for the trait). They are the starting point for
+  Phase 3. Its `dsp` (EQ, dynamics, reverb, pitch, meters, all written from
+  textbook methods) and `midi` (SMF read and write, quantize) crates may save
+  time later.
+- **What we leave:** its egui interface, its Pro Tools-style session model and
+  timebases, and its video and Audio Unit code.
+- **How:** copy the crates we use into this repo, unmodified at first, keep
+  its license and NOTICE text with them, record them in `THIRD_PARTY.md`, and
+  test them against the section 5 list before relying on them. It is
+  pre-alpha, so we own the testing.
+
 ## 2. Architecture
 
 ```mermaid
@@ -100,7 +130,7 @@ flowchart LR
   Engine --> Scanner
   Engine --> Stems
   Engine <--> Audio["Audio and MIDI devices"]
-  Engine <--> Plugins["VST3 / AU plugins<br/>(native editor windows)"]
+  Engine <--> Plugins["VST3 / CLAP plugins<br/>(native editor windows)"]
 ```
 
 ### The engine
@@ -136,15 +166,16 @@ flowchart LR
   requires. We support event lists, parameter changes, the process context,
   sidechain and extra output buses (Kontakt), and state through
   `getState`/`setState`.
-- **Audio Units.** Through AudioToolbox. AUv2 loads in process; AUv3 can load
-  out of process. Editors come from `kAudioUnitProperty_CocoaUI` or
-  `requestViewController`.
+- **CLAP.** Through its C ABI (MIT), with the same host context, events and
+  state. soundCraft's `clap-host` crate is the starting point.
+- **No Audio Units.** Dropped on 2026-10-26 (new tech only). Every plugin on
+  the test list ships as VST3.
 - **C++ exceptions** thrown by a plugin are caught by a small C++ shim around
   each plugin call, since Rust can't catch them.
 - **Editors** open in their own native windows, as in Live. They float over the
   main window, and their titles follow the track name.
 - **Automation.** Each plugin parameter can be automated sample-accurately in
-  VST3 and at block rate in AU.
+  VST3 and CLAP.
 - **macOS signing.** We ship a notarized Developer ID build, not through the
   Mac App Store, since the sandbox would block plugins. Entitlements needed:
   - `com.apple.security.cs.disable-library-validation`: required to load other
@@ -169,16 +200,17 @@ below is ours.
 | Live (manual) | tuneKore name | When |
 | --- | --- | --- |
 | Stem separation (12.3, Suite) | Analyzer → Stems | Phase 1 |
-| Plug-in devices, plug-in windows, rescan | Plugins | Phase 2 |
-| Arrangement View, audio and MIDI clips, recording, MIDI editor, automation | Timeline | Phase 3 |
-| Session View: clip slots, scenes, launch quantization, stop buttons | Clip Grid | Phase 4 |
-| Follow Actions | Clip Grid rules | After Phase 4 |
-| Mixer: sends and returns, group tracks, Main track, sidechain, delay compensation | Mixer | Phase 5 |
-| Freeze, flatten, export, render stems | Bounce and Export | Phase 5 |
-| Browser, Places, plugin browser, preview | Library | Phase 6 |
-| Splice in the browser (12.3) | Library → Splice | Phase 6 (local folder); full search needs a partnership |
-| Warping, warp markers, auto-warp, warp modes | Warp | Phase 7 |
-| Live Projects, Collect All and Save, File Manager | Projects | Phase 3, grows over time |
+| Drum Rack pads, Simpler slicing, a step sequencer, the browser's preview | Sampler: Pads, Steps, Chop, Library | Phase 2 (MVP) |
+| Plug-in devices, plug-in windows, rescan | Plugins | Phase 3 |
+| Arrangement View, audio and MIDI clips, recording, MIDI editor, automation | Timeline | Phase 4 |
+| Session View: clip slots, scenes, launch quantization, stop buttons | Clip Grid | Phase 5 |
+| Follow Actions | Clip Grid rules | After Phase 5 |
+| Mixer: sends and returns, group tracks, Main track, sidechain, delay compensation | Mixer | Phase 6 |
+| Freeze, flatten, export, render stems | Bounce and Export | Phase 6 (the Sampler exports a pattern in Phase 2) |
+| Browser, Places, plugin browser, preview | Library | Phase 2 (a folder, search, preview); places and plugins in Phase 7 |
+| Splice in the browser (12.3) | Library → Splice | Phase 2 (`~/Splice` as a folder); full search needs a partnership |
+| Warping, warp markers, auto-warp, warp modes | Warp | Phase 8 |
+| Live Projects, Collect All and Save, File Manager | Projects | Phase 2 (a `.tunekore` file), grows over time |
 | Racks, Drum Racks, built-in instruments and effects | Our own devices | Later. This is where tuneKore becomes ours. |
 
 ## 4. Roadmap
@@ -191,21 +223,26 @@ something to release.
 | --- | --- | --- | --- |
 | 0. Skeleton | Repo, Tauri shell with the brand, engine library building inside it, CI | The app opens on the Mac, lists audio devices and plays a test tone; CI builds macOS (and compiles on Windows and Linux) | 1 sprint |
 | 1. Analyzer: stems | Analyzer window: open a song (WAV, AIFF, FLAC, MP3, M4A), split it into Vocals, Drums, Bass and Other, then play, solo, mute and export the stems | A 4-minute song separates on this Mac in under 2 minutes in fast mode. Stems line up with the original to the sample and sum back to it within the model's error. | 2 sprints |
-| 2. Plugins | Scanner, VST3 and AU instruments and effects, editor windows, MIDI keyboard input, state saved with the project | Every plugin in the test list (section 5) loads, plays, opens its editor and comes back after save and reopen | 3 sprints |
-| 3. Timeline | Tracks, audio and MIDI clips, recording, MIDI editor, automation lanes, undo | A short song can be recorded with Serum and Arturia, saved and reopened | 4 sprints |
-| 4. Clip Grid | Clip slots, scenes, launch quantization, recording into slots, moving clips to the Timeline | Scenes launch on the bar, in sync with the Timeline's clock | 2 sprints |
-| 5. Mixer and export | Sends and returns, groups, sidechain, delay compensation, bounce, freeze, export | A test set with high-latency plugins exports sample-aligned | 3 sprints |
-| 6. Library and Splice | Places (including `~/Splice`), search, preview in tempo, drag and drop | Splice samples and Splice Bridge work in a set | 1 sprint |
-| 7. Warp | Signalsmith Stretch, warp markers, tempo detection | A song from the Analyzer follows the set's tempo | 2 sprints |
-| 8. Windows | WASAPI and ASIO, VST3, WebView2, signed installer | The plugin test list passes on Windows | 2 sprints |
-| 9. Linux | ALSA, JACK and PipeWire, VST3, WebKitGTK, Flatpak or AppImage | Serum 2 (native beta) plays | 2 sprints |
+| 2. Sampler (MVP) | The main window becomes the Sampler: a Library of samples (any folder, `~/Splice` included) with search and preview; 16 pads with gain, pan, pitch, start/end, reverse and one-shot or gate; a 16-step sequencer with tempo and swing; Analyzer stems sent to pads whole or chopped on transients; save and open a `.tunekore` project; export the pattern to WAV | You can open the app, build a beat from samples and chopped stems, hear it in time, save and reopen it, and export it, without touching code | 2 sprints |
+| 3. Plugins | Scanner, VST3 and CLAP instruments and effects, editor windows, MIDI keyboard input, state saved with the project. Starts from soundCraft's host crates. A plugin instrument can sit on a pad. | Every plugin in the test list (section 5) loads, plays, opens its editor and comes back after save and reopen | 2 to 3 sprints |
+| 4. Timeline | Tracks, audio and MIDI clips, recording, MIDI editor, automation lanes, undo | A short song can be recorded with Serum and Arturia, saved and reopened | 4 sprints |
+| 5. Clip Grid | Clip slots, scenes, launch quantization, recording into slots, moving clips to the Timeline. Sampler patterns become clips. | Scenes launch on the bar, in sync with the Timeline's clock | 2 sprints |
+| 6. Mixer and export | Sends and returns, groups, sidechain, delay compensation, bounce, freeze, export | A test set with high-latency plugins exports sample-aligned | 3 sprints |
+| 7. Library and Splice | Places, plugin browser, preview in tempo and key, drag from the Splice app | Splice samples and Splice Bridge work in a set | 1 sprint |
+| 8. Warp | Signalsmith Stretch, warp markers, tempo detection | A song from the Analyzer follows the set's tempo | 2 sprints |
+| 9. Windows | WASAPI and ASIO, VST3 and CLAP, WebView2, signed installer | The plugin test list passes on Windows | 2 sprints |
+| 10. Linux | ALSA, JACK and PipeWire, VST3 and CLAP, WebKitGTK, Flatpak or AppImage | Serum 2 (native beta) plays | 2 sprints |
 
-Phase 1 comes first, as asked. It needs only the shell, the audio output and
-the stem worker, so it ships before plugin hosting.
+Phase 1 came first, as asked. On 2026-10-26 the Sampler moved ahead of
+plugin hosting (idevkore/kore-issues#28): it needs only our own engine, it
+turns the Analyzer's stems into something to play, and it makes tuneKore an
+app you can open and use. Plugins follow, and then a plugin instrument can
+play from a pad.
 
 ## 5. Plugins and hardware: what "support Serum, Arturia and Splice" means
 
-On this Mac every plugin is installed as both AU and VST3, with no CLAP:
+On this Mac every plugin is installed as both AU and VST3, with no CLAP.
+tuneKore hosts the VST3 builds (section 1):
 
 - **Xfer:** Serum, Serum 2
 - **Arturia V Collection:** Analog Lab V, about 30 V instruments (Jup-8 V4,
@@ -228,7 +265,8 @@ and Serum 2 are installed so far:
 | Serum 2 | 2.1.5 | Rent-to-Own, now owned | Installed |
 
 Serum and Serum 2 show as owned, so their licenses no longer depend on Splice.
-The other Splice apps install as ordinary plugins. Check their formats (AU,
+The other Splice apps install as ordinary plugins. Check their formats (VST3,
+CLAP,
 VST3) once they're installed. Astra and Beatmaker sequence to the host's clock,
 and may send MIDI out, so the host must route a plugin's MIDI output to other
 tracks.
@@ -241,7 +279,7 @@ tracks.
 | Native Instruments | AU, VST3 | VST3 | None. Native Access 2 fails under Wine. |
 | Splice Instrument, Astra, Beatmaker, Bridge, Sounds Plugin | AU, VST3 (to confirm) | VST3 | None |
 
-**Phase 2 test list** (in order): Serum 2, Serum, Analog Lab V, one heavy V
+**Phase 3 test list** (in order): Serum 2, Serum, Analog Lab V, one heavy V
 instrument (Jup-8 V4), Kontakt 7 (multiple outputs), Guitar Rig 7 (effect),
 Solid Bus Comp (sidechain), Splice Instrument, Astra and Beatmaker (synced to
 the host's clock), Splice Bridge.
@@ -256,8 +294,8 @@ the host's clock), Splice Bridge.
    - The Splice app downloads to `~/Splice`. The Library adds it as a place.
    - Dragging a sample from the Splice app into tuneKore works like any file
      drop.
-   - Splice Bridge and the new Splice Sounds plugin are ordinary VST3/AU
-     plugins, so they work once Phase 2 does, as long as we send tempo and
+   - Splice Bridge and the new Splice Sounds plugin are ordinary VST3
+     plugins, so they work once Phase 3 does, as long as we send tempo and
      transport.
 3. **In-app catalog search, like Live 12.3.** Splice has no public API. Live,
    Studio One and Pro Tools each did a partnership deal. That is a business
@@ -478,7 +516,7 @@ What to ask each:
 
 Update the table as replies come in. The shipping model, a vendor's or our
 own, is chosen by the end of Phase 1, so it can be in place before
-Phase 8 (Windows) at the latest.
+Phase 9 (Windows) at the latest.
 
 ### What tuneKore can ship (checked 2026-10-24)
 
@@ -606,17 +644,17 @@ and add the vendor model as Best when a deal closes.
 Write it once, keep each OS behind small interfaces, and build all three in CI
 from Phase 0, even while only the Mac is tested. Each OS needs:
 
-| | macOS (now) | Windows (Phase 8) | Linux (Phase 9) |
+| | macOS (now) | Windows (Phase 9) | Linux (Phase 10) |
 | --- | --- | --- | --- |
 | Audio | CoreAudio | WASAPI, plus ASIO for audio interfaces | ALSA, JACK, PipeWire |
-| Plugins | AU, VST3 | VST3 | VST3 (LV2 maybe) |
+| Plugins | VST3, CLAP | VST3, CLAP | VST3, CLAP |
 | UI webview | WKWebView | WebView2 | WebKitGTK (slowest; watch canvas performance) |
 | Ship as | Notarized DMG (Developer ID) | Signed MSI or EXE (Azure Trusted Signing or EV certificate) | Flatpak or AppImage |
 | Your plugins | All | All | Serum 2 beta only |
 
 - **ASIO.** Its SDK is GPLv3 or a free proprietary license that you sign and
-  mail to Steinberg, and replies are taking 5+ weeks. Send it in Phase 4 so it's
-  back by Phase 8.
+  mail to Steinberg, and replies are taking 5+ weeks. Send it in Phase 5 so it's
+  back by Phase 9.
 - **Linux comes last.** Nate's Arturia and NI plugins don't run there, so it's
   worth building only for users who live on Linux.
 
@@ -653,26 +691,25 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 
 | Risk | What we do |
 | --- | --- |
-| Plugin quirks (threading, editor sizing, state) | Test the list in section 5 from Phase 2. Keep JUCE's plugin layer as a paid fallback. |
+| Plugin quirks (threading, editor sizing, state) | Test the list in section 5 from Phase 3. Keep JUCE's plugin layer as a paid fallback. |
 | Audio dropouts from our own code | Real-time rules plus RealtimeSanitizer (`rtsan-standalone`) in CI. An offline render test compares projects to reference WAVs. |
-| Webview UI slows down on big sets | Canvas/WebGL drawing, virtualized lists, binary channels. Profile at 100 tracks in Phase 3. |
+| Webview UI slows down on big sets | Canvas/WebGL drawing, virtualized lists, binary channels. Profile at 100 tracks in Phase 4. |
 | No commercial stem model | Decide in Phase 1. Budget for a license, or plan the data for our own. |
 | Splice catalog needs a deal | Ship the local-folder layer. Approach Splice once there are users. |
-| ASIO license delay | Send the agreement early (Phase 4) |
+| ASIO license delay | Send the agreement early (Phase 5) |
 
 ## 10. Next steps
 
-1. **Pick the stack** in section 1, or change it.
-2. **Create the repo** (private) and its `kore-issues` item, with branches named
-   `nate/...`.
-3. **Run Phase 0:**
-   - Tauri app with the tuneKore icon
-   - Rust engine crate called from the Tauri shell
-   - Device list and test tone
-   - CI on macOS, plus Windows and Linux compile jobs
-4. **With Live 12.3 Suite installed,** split the same three songs in Live and,
-   later, in tuneKore, to compare quality and speed. Study Live as described
-   in section 8.
+Phases 0 and 1 are done. As of 2026-10-26:
+
+1. **Phase 2, the Sampler** (idevkore/kore-issues#28), branch
+   `nate/feature/sampler-mvp`.
+2. **Choose the stem model to ship** (section 6): test Spleeter against
+   Demucs, or price a vendor SDK. Demucs's weights can't ship.
+3. **Phase 3, plugins:** bring in soundCraft's `vst3-host` and `clap-host`
+   and run the section 5 test list.
+4. **With Live 12.3 Suite installed,** split the same three songs in Live and
+   in tuneKore, to compare quality and speed (section 8).
 
 ## Sources
 

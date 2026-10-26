@@ -33,6 +33,8 @@ Linux. Owner: Nate Soria. Tracker: `idevkore/kore-issues` (sidebar group KORE).
   thread. Hand data across with lock-free queues.
 - **Stems.** Demucs weights are for prototyping on Nate's machine only. Never
   bundle or ship them (see `docs/PLAN.md` section 6).
-- **Plugins to test with** are installed on Nate's Mac as AU and VST3: Serum,
+- **New tech only.** VST3 and CLAP plugins; no VST2 and no Audio Units
+  (`docs/PLAN.md`, Focus).
+- **Plugins to test with** are installed on Nate's Mac as VST3 (and AU, unused): Serum,
   Serum 2 (Splice Rent-to-Own), Arturia V Collection 11 and Native
   Instruments. The test list is in `docs/PLAN.md` section 5.
