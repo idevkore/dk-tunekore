@@ -280,3 +280,4 @@ select.choke { height: 26px; background: var(--deep); border: 1px solid var(--li
 .song-add .add.unused { opacity: 0.6; }
 .loop { display: flex; align-items: center; gap: 5px; font-size: 11.5px; color: var(--dim); }
 .loop input { margin: 0; accent-color: var(--violet); }
+.status .ver { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--faint); }

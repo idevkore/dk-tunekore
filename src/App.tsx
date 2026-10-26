@@ -584,6 +584,7 @@ export default function App() {
             <kbd>Space</kbd> play · <kbd>1</kbd>–<kbd>V</kbd> pads · <kbd>↑</kbd><kbd>↓</kbd> browse · <kbd>Enter</kbd> load on pad {selected + 1} · <kbd>/</kbd> search
           </span>
         )}
+        <span className="ver mono" title="tuneKore version">v{__APP_VERSION__}</span>
       </footer>
 
       {drag?.moving && (
