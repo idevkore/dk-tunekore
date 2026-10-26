@@ -5,6 +5,23 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.3: DAW essentials
+
+idevkore/dk-tunekore#15, PR #9
+
+- Song mode: chain patterns A–D into a song, played once or looped, and
+  export the whole song.
+- Per-step chance and repeats (ratchets), in an editor on right-click.
+- Per-pad amp envelope (attack, decay, sustain, release) and a low, high or
+  band-pass filter, on the pad's Shape tab.
+- MIDI controllers play pads 1–16 (notes 36–51) at the velocity played.
+- Sample from a microphone or audio interface onto a pad.
+- A master level and a limiter that keeps the output under -0.3 dBFS.
+- Autosave with recovery after a crash; collect a project's samples into
+  a folder beside it; export stems, one WAV per pad.
+- Adapted from soundCraft (MIT OR Apache-2.0): the limiter, the filter and
+  envelope decay, the input recorder's safeguards and the step-chance PRNG.
+
 ## 0.1.2: the Sampler's second pass
 
 idevkore/dk-tunekore#14, PR #8
