@@ -158,6 +158,59 @@ export const autosaveDiscard = () => invoke<void>("autosave_discard");
 export const currentOutput = () => invoke<string | null | undefined>("current_output");
 export const setOutput = (deviceId: string | null) => invoke<void>("set_output", { deviceId });
 
+// MIDI controllers (src-tauri/src/midi.rs): notes 36–51 play pads 1–16.
+export interface MidiInputInfo {
+  name: string;
+  connected: boolean;
+}
+export const midiInputs = () => invoke<MidiInputInfo[]>("midi_inputs");
+/** A pad was played from a controller; at most ~30 a second. */
+export const onMidiActivity = (handler: (pad: number) => void): Promise<UnlistenFn> =>
+  listen<number>("midi:activity", (e) => handler(e.payload));
+
+// Sampling from an audio input (src-tauri/src/recorder.rs).
+export interface InputDevice {
+  id: string;
+  name: string;
+  channels: number;
+  preferredRate: number;
+  isDefault: boolean;
+}
+export interface InputLevel {
+  /** 0..1, a little over 1 when the input clips. */
+  peak: number;
+  seconds: number;
+  /** The take hit its 10-minute cap. */
+  full: boolean;
+}
+export const inputDevices = () => invoke<InputDevice[]>("input_devices");
+export const samplingStart = (pad: number, deviceId: string | null) => invoke<void>("sampling_start", { pad, deviceId });
+export const samplingStop = () => invoke<{ pad: number; path: string; seconds: number }>("sampling_stop");
+export const samplingCancel = () => invoke<void>("sampling_cancel");
+export const onInputLevel = (handler: (l: InputLevel) => void): Promise<UnlistenFn> =>
+  listen<InputLevel>("input:level", (e) => handler(e.payload));
+/** The input went away or stopped while recording; the take can't go on. */
+export const onInputError = (handler: (message: string) => void): Promise<UnlistenFn> =>
+  listen<string>("input:error", (e) => handler(e.payload));
+
+/** The input device to sample from ("" = the system default), kept between runs. */
+export const INPUT_DEVICE_KEY = "tunekore.inputDevice";
+export function chosenInput(): string | null {
+  try {
+    return localStorage.getItem(INPUT_DEVICE_KEY) || null;
+  } catch {
+    return null;
+  }
+}
+export function chooseInput(id: string | null) {
+  try {
+    if (id) localStorage.setItem(INPUT_DEVICE_KEY, id);
+    else localStorage.removeItem(INPUT_DEVICE_KEY);
+  } catch {
+    // no storage: the choice lasts until the window closes
+  }
+}
+
 /** Subscribes to a Tauri event from a React effect; returns the cleanup. */
 export function subscribe(start: Promise<UnlistenFn>): () => void {
   let off: UnlistenFn | undefined;

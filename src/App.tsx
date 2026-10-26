@@ -15,6 +15,7 @@ import Pads from "./sampler/Pads";
 import Inspector from "./sampler/Inspector";
 import Steps from "./sampler/Steps";
 import AudioDialog from "./sampler/AudioDialog";
+import MidiDot from "./sampler/MidiDot";
 import ExportDialog from "./sampler/ExportDialog";
 
 type Drag =
@@ -484,6 +485,7 @@ export default function App() {
         <button className="btn small icon" onClick={() => setAudioOpen(true)} aria-label="Audio settings" title="Audio settings">
           <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2zM11.5 5.5a3.5 3.5 0 0 1 0 5M13 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
+        <MidiDot />
         <div className={`meter${limiting ? " limiting" : ""}`} title={limiting ? "The limiter is holding the output under -0.3 dBFS" : "Output level"} role="meter" aria-label="Output level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={meterPosition(level)}>
           <div className="meter-fill" style={{ transform: `scaleX(${meterPosition(level)})` }} />
         </div>

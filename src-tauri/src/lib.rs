@@ -1,4 +1,6 @@
 mod analyzer;
+mod midi;
+mod recorder;
 mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
@@ -166,6 +168,7 @@ pub fn run() {
     let meter = engine.meter();
     let player = engine.player();
     let pads = engine.sampler();
+    let midi_state = midi::state();
     // One engine for the life of the app.
     let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
 
@@ -174,6 +177,8 @@ pub fn run() {
         .manage(audio)
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
+        .manage(midi_state.clone())
+        .manage(recorder::RecorderState::default())
         .manage(sampler::SamplerState::new(pads.clone()))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
@@ -189,6 +194,7 @@ pub fn run() {
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
+            midi::spawn(app.handle().clone(), pads.clone(), midi_state);
             sampler::spawn_tick(app.handle().clone(), pads);
             sampler::spawn_autosave(app.handle().clone());
             // Open the default output now, so the pads play on the first click.
@@ -254,6 +260,11 @@ pub fn run() {
             sampler::autosave_check,
             sampler::autosave_recover,
             sampler::autosave_discard,
+            midi::midi_inputs,
+            recorder::input_devices,
+            recorder::sampling_start,
+            recorder::sampling_stop,
+            recorder::sampling_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")

@@ -27,6 +27,11 @@ Status: Phase 2, the Sampler (the MVP).
   metronome clicks on the beat. Undo and redo cover every edit. Save it as
   a `.tunek` project, export the pattern as a WAV, or bounce it onto a pad
   to resample it, or chop any pad's sample at its hits onto the empty pads.
+  Plug in a MIDI controller and notes C1 to D♯2 (36 to 51) play pads 1 to 16;
+  it connects by itself. Select a pad and press Sample from input to record
+  from a microphone or audio interface (pick it in Audio settings): the take
+  is trimmed and saved in `Music/tuneKore/Samples/Recordings`. macOS asks
+  for microphone access the first time.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
   or chopped at its hits from the playhead. It finds the song's tempo and key
