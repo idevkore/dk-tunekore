@@ -21,6 +21,7 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 | [rubato](https://github.com/HEnquist/rubato) | 5.0.1 | MIT OR Apache-2.0 | Engine: resamples stems to the output device's rate (off the audio thread) |
 | [symphonia](https://github.com/pdeljanov/Symphonia) | 0.6.1 | MPL-2.0 (unmodified) | Analyzer: decodes WAV, AIFF, FLAC, MP3 and M4A (AAC, ALAC) |
 | [hound](https://github.com/ruuda/hound) | 3.5.1 | Apache-2.0 | Analyzer: writes the exported stems as WAV |
+| [rustfft](https://github.com/ejmahler/RustFFT) | 6.4.1 | MIT OR Apache-2.0 | Analyzer: the FFTs behind tempo and key detection (also pulled in by rubato) |
 | [serde](https://github.com/serde-rs/serde) | 1.0.229 | MIT OR Apache-2.0 | Engine, Analyzer and shell: data sent to the UI and the stem worker |
 | [serde_json](https://github.com/serde-rs/json) | 1.0.154 | MIT OR Apache-2.0 | Analyzer and shell: the stem worker's JSON-lines protocol |
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.5 | Apache-2.0 OR MIT | Shell: windows, menus, IPC |
