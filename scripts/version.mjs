@@ -28,8 +28,9 @@ const cargoPackage = (file) => ({
 const OURS = ["tunekore", "tunekore-engine", "tunekore-analyzer"];
 const cargoLock = {
   file: "Cargo.lock",
-  read: (text) => OURS.map((n) => text.match(new RegExp(`name = "${n}"\\nversion = "([^"]+)"`))?.[1]),
-  write: (text, v) => OURS.reduce((t, n) => t.replace(new RegExp(`(name = "${n}"\\nversion = ")[^"]+(")`), `$1${v}$2`), text),
+  // \r?\n: Windows checkouts have CRLF line endings.
+  read: (text) => OURS.map((n) => text.match(new RegExp(`name = "${n}"\\r?\\nversion = "([^"]+)"`))?.[1]),
+  write: (text, v) => OURS.reduce((t, n) => t.replace(new RegExp(`(name = "${n}"\\r?\\nversion = ")[^"]+(")`), `$1${v}$2`), text),
 };
 const shellDeps = {
   file: "src-tauri/Cargo.toml",
