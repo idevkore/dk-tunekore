@@ -14,7 +14,7 @@ mod sampler;
 mod tone;
 
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
-pub use sampler::{render_pattern, PadParams, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
+pub use sampler::{render_pattern, PadParams, FILTER_BAND_PASS, FILTER_HIGH_PASS, FILTER_LOW_PASS, FILTER_OFF, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 

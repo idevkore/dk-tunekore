@@ -76,6 +76,13 @@ impl PadSettings {
             reverse: self.reverse,
             mute: self.mute,
             choke: self.choke.min(8),
+            attack: 0.0,
+            decay: 0.0,
+            sustain: 1.0,
+            release: 0.004,
+            filter: 0,
+            cutoff: 20_000.0,
+            resonance: 0.0,
         }
     }
 }
