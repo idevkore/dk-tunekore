@@ -915,16 +915,47 @@ pub async fn library_scan(dir: String) -> Result<LibraryScan, String> {
     spawn_blocking(move || scan(Path::new(&dir))).await.map_err(|e| e.to_string())?
 }
 
-/// The folder the Library opens on first: Splice's sounds, then tuneKore's
-/// own samples (where stems are chopped to), then Music.
+/// The folder the Library opens on first: Splice's library (wherever
+/// Splice is set to keep it, then `~/Splice`, then a `Splice` folder at the
+/// top of any mounted drive), then tuneKore's own samples (where stems are
+/// chopped to), then Music. A Splice folder opens at its `sounds` folder.
 #[tauri::command]
 pub fn library_default(app: AppHandle) -> Option<String> {
     let home = app.path().home_dir().ok()?;
     let music = app.path().audio_dir().unwrap_or_else(|_| home.join("Music"));
-    [home.join("Splice/sounds"), home.join("Splice"), music.join("tuneKore/Samples"), music]
+    let drives: Vec<PathBuf> = std::fs::read_dir("/Volumes")
+        .map(|d| d.flatten().map(|e| e.path().join("Splice")).collect())
+        .unwrap_or_default();
+    splice_configured(&home)
         .into_iter()
+        .chain(std::iter::once(home.join("Splice")))
+        .chain(drives)
         .find(|p| p.is_dir())
+        .map(|p| if p.join("sounds").is_dir() { p.join("sounds") } else { p })
+        .or_else(|| [music.join("tuneKore/Samples"), music].into_iter().find(|p| p.is_dir()))
         .map(|p| p.display().to_string())
+}
+
+/// The folder Splice is set to keep its library in. Splice writes it only
+/// to its helper log, as `"splice_folder":"<path>"`, each time it starts.
+fn splice_configured(home: &Path) -> Option<PathBuf> {
+    use std::io::{Read, Seek, SeekFrom};
+    let log = home.join("Library/Application Support/com.splice.Splice/logs/log-helper-core.log");
+    let mut f = std::fs::File::open(log).ok()?;
+    // The setting is logged at every start, so the last few megabytes are enough.
+    let len = f.metadata().ok()?.len();
+    f.seek(SeekFrom::Start(len.saturating_sub(4 << 20))).ok()?;
+    let mut bytes = Vec::new();
+    f.read_to_end(&mut bytes).ok()?;
+    last_splice_folder(&String::from_utf8_lossy(&bytes))
+}
+
+fn last_splice_folder(log: &str) -> Option<PathBuf> {
+    const KEY: &str = "\"splice_folder\":\"";
+    let start = log.rfind(KEY)? + KEY.len();
+    let end = log[start..].find('"')?;
+    let path = log[start..start + end].replace("\\/", "/");
+    (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 /// Plays a file from the Library on the preview slot.
@@ -1639,6 +1670,16 @@ mod tests {
         assert_eq!(file.pads[0].velocity[1][3], 128);
         assert_eq!(file.pads[0].velocity[0][3], 255);
         assert_eq!(doc.pads[1].velocity(2, 5), 255, "unset reads full");
+    }
+
+    #[test]
+    fn splice_folder_comes_from_the_last_start_in_its_log() {
+        let log = r#"x {"splice_folder":"/Users/n/Splice"} y
+z Loaded user settings {"a":1,"splice_folder":"/Volumes/fitMusic/Splice","b":2}"#;
+        assert_eq!(last_splice_folder(log), Some(PathBuf::from("/Volumes/fitMusic/Splice")));
+        assert_eq!(last_splice_folder(r#"{"splice_folder":"\/Volumes\/X\/Splice"}"#), Some(PathBuf::from("/Volumes/X/Splice")));
+        assert_eq!(last_splice_folder("nothing here"), None);
+        assert_eq!(last_splice_folder(r#"{"splice_folder":""}"#), None);
     }
 
     #[test]

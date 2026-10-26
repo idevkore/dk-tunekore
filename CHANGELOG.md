@@ -17,6 +17,8 @@ idevkore/dk-tunekore#15, PR #9
 - MIDI controllers play pads 1–16 (notes 36–51) at the velocity played.
 - Sample from a microphone or audio interface onto a pad.
 - A master level and a limiter that keeps the output under -0.3 dBFS.
+- The Library opens on your Splice library wherever Splice keeps it, including
+  an external drive.
 - Autosave with recovery after a crash; collect a project's samples into
   a folder beside it; export stems, one WAV per pad.
 - Adapted from soundCraft (MIT OR Apache-2.0): the limiter, the filter and
