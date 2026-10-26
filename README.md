@@ -26,10 +26,11 @@ Status: Phase 2, the Sampler (the MVP).
   a step), or arm Record and play the pads while the pattern runs. A
   metronome clicks on the beat. Undo and redo cover every edit. Save it as
   a `.tunek` project, export the pattern as a WAV, or bounce it onto a pad
-  to resample it.
+  to resample it, or chop any pad's sample at its hits onto the empty pads.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
-  or chopped at its hits from the playhead. Separation runs on this Mac in a
+  or chopped at its hits from the playhead. It finds the song's tempo and key
+  (with its Camelot code) and can set the Sampler to that tempo. Separation runs on this Mac in a
   separate worker process, with Demucs. Its weights are research-only, so a
   model we may ship replaces it before release (see `docs/PLAN.md` section 6).
 
