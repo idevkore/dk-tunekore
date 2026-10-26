@@ -8,11 +8,13 @@
 //! any thread. The audio callback runs on the device's thread: no allocation,
 //! locks, logging or I/O there.
 
+mod input;
 mod player;
 mod resample;
 mod sampler;
 mod tone;
 
+pub use input::{list_inputs, InputDevice, InputMeter, Recorder, Take, MAX_SECONDS};
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
 pub use sampler::{render_pattern, PadParams, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
 pub use resample::resample;
