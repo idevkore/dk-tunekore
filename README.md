@@ -66,6 +66,9 @@ output unless `CI` is set): `cargo test -p tunekore-engine`.
 
 - [`docs/PLAN.md`](docs/PLAN.md): the stack, architecture, roadmap, plugin
   support, stems and cross-platform path
+- [`CHANGELOG.md`](CHANGELOG.md): what each version added. Every pull request
+  that adds to the app bumps the patch number with `npm run version:bump`
+  (CI checks the copies agree); the version shows in the app's status bar.
 - [`THIRD_PARTY.md`](THIRD_PARTY.md): every dependency and its licence
 - [`stems/`](stems/README.md): the stem worker and the model comparison tools
 - [`brand/`](brand/README.md): the logo, the K› icon and the macOS app icon

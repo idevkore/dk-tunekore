@@ -1,7 +1,7 @@
 {
   "name": "tunekore",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.2",
   "type": "module",
   "license": "UNLICENSED",
   "scripts": {
@@ -9,7 +9,9 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
-    "licenses": "node scripts/check-licenses.mjs"
+    "licenses": "node scripts/check-licenses.mjs",
+    "version:check": "node scripts/version.mjs",
+    "version:bump": "node scripts/version.mjs patch"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.4",

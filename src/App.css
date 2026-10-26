@@ -220,3 +220,4 @@ select.choke { height: 26px; background: var(--deep); border: 1px solid var(--li
 .bank .len { margin-left: 10px; }
 
 .chop-menu { height: 28px; margin-right: auto; background: var(--card-2); border: 1px solid var(--violet); border-radius: 8px; color: var(--violet-soft); font-size: 12px; font-weight: 600; padding: 0 6px; }
+.status .ver { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--faint); }

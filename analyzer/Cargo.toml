@@ -1,6 +1,6 @@
 [package]
 name = "tunekore-analyzer"
-version = "0.1.0"
+version = "0.1.2"
 description = "tuneKore's Analyzer: decode a song, split it into stems in the worker, check and export them"
 edition.workspace = true
 rust-version.workspace = true
