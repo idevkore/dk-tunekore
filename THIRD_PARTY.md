@@ -116,6 +116,15 @@ we ship.
 | Windows | WASAPI, Media Foundation, WebView2 | Microsoft system components |
 | Linux | ALSA (`libasound`, through cpal), WebKitGTK, GTK | LGPL. Linked dynamically from the system, never bundled. Phase 0 only compiles on Linux; settle how to ship before Phase 9. |
 
+## Code adapted from other projects
+
+Source we copied or closely translated, not linked as a dependency. Each file
+carries a header comment with the source, the licence and the copyright line.
+
+| Source | Licence | Where | Use |
+| --- | --- | --- | --- |
+| [soundCraft](https://github.com/storytold/soundcraft) `crates/midi/src/rng.rs` (commit 7dc56a4), Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | MIT OR Apache-2.0 (taken as MIT) | `engine/src/sampler.rs` (`XorShift`) | Engine: the small xorshift64* generator behind step probability, so an offline render repeats |
+
 ## Our own
 
 The tuneKore name, logo and app icon (`brand/`) and all source in this repo
