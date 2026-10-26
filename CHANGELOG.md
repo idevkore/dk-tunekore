@@ -5,6 +5,20 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.4: big screens
+
+idevkore/dk-tunekore#25
+
+- The Sampler scales with the window: bigger pads, a wider pad panel and
+  waveform, a wider Library, and steps that fill the window with near-square
+  cells. 1280 and the 1040 minimum look as before.
+- A velocity lane under the steps: drag the selected pad's bars up and down.
+- Display zoom, 80–150%: View → Zoom In / Zoom Out / Actual Size (⌘+, ⌘−,
+  ⌘0) or Display size in the Audio dialog; applies to every window and is
+  remembered.
+- Windows reopen at the size, place and display they were left at
+  (tauri-plugin-window-state).
+
 ## 0.1.3: DAW essentials
 
 idevkore/dk-tunekore#15, PR #9
