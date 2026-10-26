@@ -18,7 +18,10 @@ mod tone;
 pub use limiter::{Limiter, CEILING};
 pub use input::{list_inputs, InputDevice, InputMeter, Recorder, Take, MAX_SECONDS};
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
-pub use sampler::{render_pattern, PadParams, FILTER_BAND_PASS, FILTER_HIGH_PASS, FILTER_LOW_PASS, FILTER_OFF, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
+pub use sampler::{
+    render_pattern, render_song, PadParams, Sampler, SamplerShared, BANKS, CHAIN_MAX, FILTER_BAND_PASS, FILTER_HIGH_PASS, FILTER_LOW_PASS,
+    FILTER_OFF, MAX_STEPS, PADS, PREVIEW, SLOTS,
+};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 
