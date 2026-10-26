@@ -17,3 +17,10 @@ strip = true
 # Audio and DSP code runs too slowly unoptimized to test by ear.
 [profile.dev.package.tunekore-engine]
 opt-level = 2
+
+# The Analyzer's tempo and key detection and its tests run FFTs over minutes of audio.
+[profile.dev.package.tunekore-analyzer]
+opt-level = 2
+
+[profile.dev.package.rustfft]
+opt-level = 2

@@ -9,7 +9,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tunekore_analyzer::{
-    check, decode_file, even, export_wav, list_backends, onsets, peaks, rms_db, separate, slices, BackendInfo, Cancel, Checks, JobError,
+    check, decode_file, even, export_wav, key as detect_key, list_backends, onsets, peaks, rms_db, separate, slices, tempo as detect_tempo,
+    BackendInfo, Cancel, Checks, JobError,
     Song, Stems, WavFormat, WorkerConfig, STEM_NAMES,
 };
 use tunekore_engine::{Player, Source};
@@ -289,6 +290,64 @@ pub fn analyzer_seek(seconds: f64, player: State<'_, Player>) {
 #[tauri::command]
 pub fn analyzer_track(index: usize, gain: f32, mute: bool, solo: bool, player: State<'_, Player>) {
     player.set_track(index, gain, mute, solo);
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempoKey {
+    bpm: Option<f32>,
+    bpm_confidence: Option<f32>,
+    key: Option<String>,
+    camelot: Option<String>,
+    key_confidence: Option<f32>,
+}
+
+/// Finds the tempo (70 to 180 BPM) and key of the open song, from at most
+/// 90 seconds in its middle. With a `stem` name both come from that stem
+/// (`"song"` is the original mix). Without one the key comes from the song,
+/// and the tempo from the song or, when the song has been separated, from
+/// whichever of the song and its drums stem is surer of it.
+#[tauri::command]
+pub async fn analyzer_tempo_key(stem: Option<String>, state: State<'_, Analyzer>) -> Result<TempoKey, String> {
+    let (loaded, stems) = {
+        let inner = state.0.lock().unwrap();
+        (inner.song.clone().ok_or("open a song first")?, inner.stems.clone())
+    };
+    spawn_blocking(move || {
+        let song = (&loaded.song.channels[..], loaded.song.sample_rate);
+        let drums = stems.as_ref().and_then(|s| s.get("drums").map(|d| (d, s.sample_rate)));
+        let (for_tempo, for_key) = match stem.as_deref() {
+            None => (None, song),
+            Some("song") => (Some(song), song),
+            Some(name) => {
+                let stems = stems.as_ref().ok_or("separate the song first")?;
+                let audio = (stems.get(name).ok_or_else(|| format!("no stem called {name}"))?, stems.sample_rate);
+                (Some(audio), audio)
+            }
+        };
+        let tempo = match for_tempo {
+            Some((audio, rate)) => detect_tempo(audio, rate),
+            None => {
+                let mix = detect_tempo(song.0, song.1);
+                let kit = drums.and_then(|(audio, rate)| detect_tempo(audio, rate));
+                match (mix, kit) {
+                    (Some(m), Some(k)) if k.confidence > m.confidence => Some(k),
+                    (Some(m), _) => Some(m),
+                    (None, k) => k,
+                }
+            }
+        };
+        let key = detect_key(for_key.0, for_key.1);
+        Ok(TempoKey {
+            bpm: tempo.map(|t| t.bpm),
+            bpm_confidence: tempo.map(|t| t.confidence),
+            camelot: key.as_ref().map(|k| k.camelot.clone()),
+            key_confidence: key.as_ref().map(|k| k.confidence),
+            key: key.map(|k| k.name),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[derive(Serialize)]
