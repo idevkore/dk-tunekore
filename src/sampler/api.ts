@@ -25,6 +25,17 @@ export interface PadSettings {
   mute: boolean;
   /** 0 = none; pads in the same group 1–8 cut each other off. */
   choke: number;
+  /** Amp envelope: seconds, seconds, level 0..1, seconds. */
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+  /** 0 off, 1 low-pass, 2 high-pass, 3 band-pass. */
+  filter: number;
+  /** Hz, 20..20,000. */
+  cutoff: number;
+  /** 0..1 */
+  resonance: number;
 }
 
 export interface PadView {

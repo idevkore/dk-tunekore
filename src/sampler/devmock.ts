@@ -15,7 +15,7 @@ const LIB = [
 export function installMocks() {
   const pad = (index: number): PadView => ({
     index, name: null, path: null, missing: false, seconds: 0, channels: 0, rate: 0, peaks: [],
-    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0 },
+    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0, attack: 0, decay: 0, sustain: 1, release: 0.004, filter: 0, cutoff: 20000, resonance: 0 },
     steps: Array(16).fill(false),
     velocity: Array(16).fill(1),
   });

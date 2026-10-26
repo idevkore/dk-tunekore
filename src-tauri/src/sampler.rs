@@ -55,11 +55,39 @@ pub struct PadSettings {
     pub mute: bool,
     /// 0 = none; pads in the same group 1..=8 cut each other off (open and closed hats).
     pub choke: u8,
+    /// Amp envelope: seconds, seconds, level 0..1, seconds.
+    pub attack: f32,
+    pub decay: f32,
+    pub sustain: f32,
+    pub release: f32,
+    /// 0 off, 1 low-pass, 2 high-pass, 3 band-pass.
+    pub filter: u8,
+    /// Hz.
+    pub cutoff: f32,
+    /// 0..1.
+    pub resonance: f32,
 }
 
 impl Default for PadSettings {
     fn default() -> Self {
-        Self { gain_db: 0.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false, choke: 0 }
+        Self {
+            gain_db: 0.0,
+            pan: 0.0,
+            pitch: 0.0,
+            start: 0.0,
+            end: 1.0,
+            gate: false,
+            reverse: false,
+            mute: false,
+            choke: 0,
+            attack: 0.0,
+            decay: 0.0,
+            sustain: 1.0,
+            release: 0.004,
+            filter: 0,
+            cutoff: 20_000.0,
+            resonance: 0.0,
+        }
     }
 }
 
@@ -76,13 +104,13 @@ impl PadSettings {
             reverse: self.reverse,
             mute: self.mute,
             choke: self.choke.min(8),
-            attack: 0.0,
-            decay: 0.0,
-            sustain: 1.0,
-            release: 0.004,
-            filter: 0,
-            cutoff: 20_000.0,
-            resonance: 0.0,
+            attack: self.attack,
+            decay: self.decay,
+            sustain: self.sustain,
+            release: self.release,
+            filter: self.filter,
+            cutoff: self.cutoff,
+            resonance: self.resonance,
         }
     }
 }
