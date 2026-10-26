@@ -1,4 +1,5 @@
 mod analyzer;
+mod midi;
 mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
@@ -146,6 +147,7 @@ pub fn run() {
     let meter = engine.meter();
     let player = engine.player();
     let pads = engine.sampler();
+    let midi_state = midi::state();
     // One engine for the life of the app.
     let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
 
@@ -154,6 +156,7 @@ pub fn run() {
         .manage(audio)
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
+        .manage(midi_state.clone())
         .manage(sampler::SamplerState::new(pads.clone()))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
@@ -169,6 +172,7 @@ pub fn run() {
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
+            midi::spawn(app.handle().clone(), pads.clone(), midi_state);
             sampler::spawn_tick(app.handle().clone(), pads);
             // Open the default output now, so the pads play on the first click.
             std::thread::spawn(move || {
@@ -226,6 +230,7 @@ pub fn run() {
             sampler::project_new,
             sampler::project_open,
             sampler::project_save,
+            midi::midi_inputs,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")
