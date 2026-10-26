@@ -12,6 +12,9 @@ interface Props {
   onClearSteps: () => void;
   /** Plays the pad, to hear a trim. */
   onAudition: () => void;
+  /** Slices the sample at its hits onto the empty pads. */
+  onChop: (count: number) => void;
+  freePads: number;
 }
 
 const fmtDb = (db: number) => (db <= -60 ? "off" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`);
@@ -19,7 +22,7 @@ const fmtPan = (p: number) => (Math.abs(p) < 0.005 ? "C" : `${Math.round(Math.ab
 const fmtPitch = (st: number) => `${st > 0 ? "+" : ""}${st} st`;
 const fmtTime = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(2)} s`);
 
-export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition }: Props) {
+export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition, onChop, freePads }: Props) {
   // Local copy so sliders move smoothly; each change is sent as it happens.
   const [s, setS] = useState(pad.settings);
   useEffect(() => setS(pad.settings), [pad.settings, pad.index]);
@@ -101,6 +104,23 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
 
       {pad.name && (
         <div className="insp-foot">
+          {loaded && (
+            <select
+              className="chop-menu"
+              value=""
+              disabled={freePads < 2}
+              aria-label="Chop this sample onto the empty pads"
+              title={freePads < 2 ? "Clear some pads to chop onto them" : "Slice between start and end at the hits, onto the empty pads"}
+              onChange={(e) => onChop(Number(e.target.value))}
+            >
+              <option value="" disabled>Chop…</option>
+              {(freePads >= 4 ? [4, 8, 16].filter((n) => n <= freePads) : [freePads]).map((n) => (
+                <option key={n} value={n}>
+                  Into {n} slices
+                </option>
+              ))}
+            </select>
+          )}
           <button className="btn small" onClick={onClearSteps} disabled={!pad.steps.some(Boolean)}>
             Clear steps
           </button>

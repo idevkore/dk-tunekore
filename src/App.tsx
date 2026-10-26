@@ -473,6 +473,13 @@ export default function App() {
               onLoadFile={(f) => loadSample(selected, f)}
               onClear={() => void api.clearPad(selected).then(take).catch(fail)}
               onClearSteps={() => void api.clearSteps(selected).then(take).catch(fail)}
+              freePads={view.pads.filter((x) => !x.name).length}
+              onChop={(n) =>
+                void api
+                  .chop(selected, n)
+                  .then((c) => say(`Chopped into ${c.pads.length} slices on pads ${c.pads.map((x) => x + 1).join(", ")}.`))
+                  .catch(fail)
+              }
               onAudition={() => {
                 press(selected);
                 setTimeout(() => unpress(selected), 300);

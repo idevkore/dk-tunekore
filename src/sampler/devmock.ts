@@ -134,6 +134,8 @@ export function installMocks() {
         case "sampler_record":
           v.recording = a.on as boolean;
           return publish();
+        case "sampler_chop":
+          return { pads: [1, 2, 3, 4], folder: "/Users/test/Music/tuneKore/Samples/Chops/Kick chop 1" };
         case "sampler_undo":
         case "sampler_redo":
           return publish();

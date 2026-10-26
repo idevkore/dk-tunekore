@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
-use tunekore_analyzer::{decode_file, export_wav, peaks, WavFormat, EXTENSIONS};
+use tunekore_analyzer::{decode_file, even, export_wav, onsets, peaks, slices, WavFormat, EXTENSIONS};
 use tunekore_engine::{render_pattern, resample, PadParams, SamplerHandle, SamplerShared, Track, MAX_STEPS, PADS, PREVIEW};
 
 use crate::Audio;
@@ -1092,6 +1092,63 @@ pub async fn sampler_bounce(loops: usize, app: AppHandle) -> Result<Bounced, Str
         if let Some(folder) = Path::new(&b.path).parent() {
             let _ = app.emit("sampler:chopped", folder.display().to_string());
         }
+    }
+    result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Chopped {
+    pads: Vec<usize>,
+    folder: String,
+}
+
+/// Slices a pad's sample (between its start and end) at its hits into up to
+/// `count` pieces, and puts them on the empty pads in order. The WAVs go in
+/// Music/tuneKore/Samples/Chops.
+#[tauri::command]
+pub async fn sampler_chop(pad: usize, count: usize, app: AppHandle) -> Result<Chopped, String> {
+    check_pad(pad)?;
+    let (sample, settings, free) = {
+        let s = state(&app);
+        let doc = s.doc.lock().unwrap();
+        let p = &doc.pads[pad];
+        let sample = p.sample.clone().ok_or("put a sample on this pad first")?;
+        let free: Vec<usize> = doc.pads.iter().enumerate().filter(|(_, x)| x.sample.is_none() && x.missing.is_none()).map(|(i, _)| i).collect();
+        (sample, p.settings, free)
+    };
+    if free.is_empty() {
+        return Err("there are no empty pads to chop onto: clear some first".into());
+    }
+    let count = count.clamp(2, PADS).min(free.len());
+    let root = app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore/Samples/Chops");
+    let a = app.clone();
+    let result = spawn_blocking(move || -> Result<Chopped, String> {
+        let name: String = sample.name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let folder = (1..).map(|n| root.join(format!("{name} chop {n}"))).find(|p| !p.exists()).expect("an unused name");
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let frames = sample.data[0].len();
+        let from = (settings.start as f64 * frames as f64) as usize;
+        let to = ((settings.end as f64 * frames as f64) as usize).min(frames);
+        let mut starts = onsets(&sample.data, sample.rate, from, to, count);
+        if starts.len() < 2 {
+            starts = even(from, to, count);
+        }
+        let mut pads = Vec::new();
+        for (i, (st, en)) in slices(&starts, to, to - from).into_iter().enumerate() {
+            let path = folder.join(format!("{name} {:02}.wav", i + 1));
+            let piece: Vec<Vec<f32>> = sample.data.iter().map(|c| c[st..en].to_vec()).collect();
+            export_wav(&piece, sample.rate, &path)?;
+            load_pad(&a, free[i], &path, PadSettings { pitch: settings.pitch, gain_db: settings.gain_db, ..Default::default() })?;
+            pads.push(free[i]);
+        }
+        Ok(Chopped { pads, folder: folder.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    publish_now(&app);
+    if let Ok(c) = &result {
+        let _ = app.emit("sampler:chopped", &c.folder);
     }
     result
 }
