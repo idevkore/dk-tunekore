@@ -186,3 +186,5 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .seg label.on { background: var(--violet); color: #fff; }
 .seg label:has(input:focus-visible) { outline: 2px solid var(--lime); outline-offset: -2px; }
 .seg input { position: absolute; opacity: 0; pointer-events: none; }
+
+.status .ver { margin-left: auto; padding-left: 12px; font-size: 10.5px; color: var(--faint); }

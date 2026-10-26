@@ -48,6 +48,7 @@ jobs:
           uv run --frozen pytest -q tests
 
       - run: npm ci
+      - run: npm run version:check
       - run: npm run typecheck
         if: runner.os == 'macOS'
       - name: Licences
