@@ -18,6 +18,11 @@ export const startTone = (deviceId: string | null, frequency: number) =>
   invoke<void>("start_tone", { deviceId, frequency });
 export const stopTone = () => invoke<void>("stop_tone");
 
+/** Interface zoom, 1 = 100%. Also in the View menu (⌘+, ⌘−, ⌘0). */
+export const getDisplayZoom = () => invoke<number>("display_zoom");
+export const setDisplayZoom = (zoom: number) => invoke<void>("set_display_zoom", { zoom });
+export const ZOOM_LEVELS = [0.8, 0.9, 1, 1.1, 1.25, 1.35, 1.5];
+
 export const setMaster = (db: number) => invoke<void>("set_master", { db });
 export const getMaster = () => invoke<number>("master");
 /** The master limiter's gain reduction in dB (negative) while it works. */

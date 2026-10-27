@@ -26,7 +26,8 @@ Status: Phase 2, the Sampler (the MVP).
     (attack, decay, sustain, release) and a low, high or band-pass filter.
     Chop any pad's sample at its hits onto the empty pads.
   - **Steps:** four patterns (A–D) of 8, 16 or 32 steps with tempo and swing.
-    Right-click a step for its velocity, chance and repeats (ratchets). Arm
+    Right-click a step for its velocity, chance and repeats (ratchets), or
+    drag the velocity lane under the steps. Arm
     Record and play pads (keys or a MIDI controller) while it runs; a
     metronome clicks on the beat.
   - **Song:** chain patterns into a song and play it through, looped or once.
@@ -36,6 +37,8 @@ Status: Phase 2, the Sampler (the MVP).
     microphone access the first time.
   - **MIDI:** plug in a controller and notes C1 to D♯2 (36 to 51) play pads 1
     to 16 at the velocity you play; it connects by itself.
+  - **Display:** the layout scales to big screens; View → Zoom In / Zoom Out
+    (⌘+, ⌘−, ⌘0) sizes the whole interface; windows reopen where you left them.
   - **Output:** a master level, and a limiter that keeps the output under
     -0.3 dBFS.
   - **Projects:** undo and redo cover every edit; save as `.tunek`, collect

@@ -152,6 +152,7 @@ export default function Steps(props: Props) {
   }
 
   const [fr, fs] = [Math.min(focus[0], rows.length - 1), Math.min(focus[1], steps - 1)];
+  const lanePad = rows.find((p) => p.index === selected) ?? rows[0];
 
   function moveFocus(r: number, s: number) {
     const nr = (r + rows.length) % rows.length;
@@ -169,7 +170,12 @@ export default function Steps(props: Props) {
         role="grid"
         aria-label={`Pattern, ${steps} steps`}
         ref={gridRef}
-        style={{ gridTemplateColumns: `minmax(150px, 190px) 30px repeat(${steps}, minmax(18px, 1fr))` }}
+        style={{
+          ["--rows" as string]: rows.length,
+          // Cells stay near square (at most 44 px); spare width stays empty instead of stretching them.
+          gridTemplateColumns: `minmax(150px, 190px) 30px repeat(${steps}, minmax(18px, 44px))`,
+          gridTemplateRows: `auto repeat(${rows.length}, minmax(26px, 44px)) minmax(56px, 110px)`,
+        }}
       >
         <div role="row" className="grid-row grid-head">
           <span role="columnheader" className="corner">Pad</span>
@@ -264,9 +270,64 @@ export default function Steps(props: Props) {
             })}
           </div>
         ))}
+        <VelocityLane pad={lanePad} steps={steps} current={current} onVelocity={onVelocity} />
       </div>
       {addRow}
       {editor}
     </section>
+  );
+}
+
+/** Velocity bars for one pad's steps: drag up and down across them to set how hard each step plays. */
+function VelocityLane({ pad, steps, current, onVelocity }: { pad: PadView; steps: number; current: number | null; onVelocity: (pad: number, step: number, v: number) => void }) {
+  const dragging = useRef(false);
+  const set = (x: number, y: number) => {
+    const cell = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-vel]");
+    if (!cell) return;
+    const step = Number(cell.dataset.vel);
+    if (!pad.steps[step]) return;
+    const r = cell.getBoundingClientRect();
+    const v = Math.round(Math.min(1, Math.max(0.05, 1 - (y - r.top) / r.height)) * 100) / 100;
+    if (Math.abs(v - (pad.velocity[step] ?? 1)) >= 0.01) onVelocity(pad.index, step, v);
+  };
+  return (
+    <div
+      role="row"
+      className="grid-row vel-row"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        dragging.current = true;
+        try {
+          (e.target as Element).setPointerCapture(e.pointerId); // the row itself has no box to capture
+        } catch {
+          // a drag that leaves the window just stops
+        }
+        set(e.clientX, e.clientY);
+      }}
+      onPointerMove={(e) => dragging.current && set(e.clientX, e.clientY)}
+      onPointerUp={() => (dragging.current = false)}
+      onPointerCancel={() => (dragging.current = false)}
+    >
+      <span className="vel-label" role="rowheader" title="Drag the bars up and down to set how hard each step plays">
+        Velocity
+        <b>{pad.index + 1} · {pad.name}</b>
+      </span>
+      {Array.from({ length: steps }, (_, s) => {
+        const on = pad.steps[s] ?? false;
+        const v = pad.velocity[s] ?? 1;
+        return (
+          <span
+            key={s}
+            role="gridcell"
+            data-vel={s}
+            aria-label={on ? `Step ${s + 1}, velocity ${Math.round(v * 100)}%` : `Step ${s + 1}, off`}
+            className={`vel-cell${on ? "" : " off"}${current === s ? " now" : ""}`}
+          >
+            {on && <i style={{ height: `${v * 100}%` }} />}
+          </span>
+        );
+      })}
+    </div>
   );
 }
