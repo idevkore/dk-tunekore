@@ -10,12 +10,12 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
-use tunekore_analyzer::{decode_file, export_wav, peaks, WavFormat, EXTENSIONS};
+use tunekore_analyzer::{decode_file, even, export_wav, onsets, peaks, slices, WavFormat, EXTENSIONS};
 use tunekore_engine::{render_pattern, resample, PadParams, SamplerHandle, SamplerShared, Track, MAX_STEPS, PADS, PREVIEW};
 
 use crate::Audio;
@@ -26,6 +26,12 @@ const PAD_PEAKS: usize = 160;
 const EXPORT_RATE: u32 = 48_000;
 /// The Library lists at most this many files from one folder.
 const LIBRARY_LIMIT: usize = 20_000;
+/// Patterns in a project: A to D.
+pub const BANK: usize = 4;
+/// Undo steps kept.
+const UNDO_LIMIT: usize = 200;
+/// Edits of the same kind this close together undo as one (a slider drag, painting steps).
+const MERGE_WINDOW: Duration = Duration::from_millis(700);
 /// Decoded files kept in memory, so previews and reloads are instant.
 const CACHE_FILES: usize = 48;
 /// Project files end in `.tunek`.
@@ -47,11 +53,13 @@ pub struct PadSettings {
     pub gate: bool,
     pub reverse: bool,
     pub mute: bool,
+    /// 0 = none; pads in the same group 1..=8 cut each other off (open and closed hats).
+    pub choke: u8,
 }
 
 impl Default for PadSettings {
     fn default() -> Self {
-        Self { gain_db: 0.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false }
+        Self { gain_db: 0.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false, choke: 0 }
     }
 }
 
@@ -67,6 +75,7 @@ impl PadSettings {
             gate: self.gate,
             reverse: self.reverse,
             mute: self.mute,
+            choke: self.choke.min(8),
         }
     }
 }
@@ -84,13 +93,29 @@ struct Sample {
     peaks: Vec<f32>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Pad {
     sample: Option<Arc<Sample>>,
     /// A sample the project names but that isn't on disk.
     missing: Option<PathBuf>,
     settings: PadSettings,
-    pattern: u64,
+    /// This pad's steps in each pattern, as bits.
+    patterns: [u64; BANK],
+    /// How hard each step plays, per pattern, 255 = full. Empty until a velocity is set.
+    velocity: Vec<[u8; MAX_STEPS]>,
+}
+
+impl Pad {
+    fn velocity(&self, pattern: usize, step: usize) -> u8 {
+        self.velocity.get(pattern).map_or(255, |v| v[step])
+    }
+
+    fn set_velocity(&mut self, pattern: usize, step: usize, v: u8) {
+        if self.velocity.len() < BANK {
+            self.velocity.resize(BANK, [255; MAX_STEPS]);
+        }
+        self.velocity[pattern][step] = v;
+    }
 }
 
 struct Doc {
@@ -98,13 +123,68 @@ struct Doc {
     tempo: f32,
     swing: f32,
     steps: usize,
+    /// The pattern that plays and is edited, 0..BANK.
+    current: usize,
     path: Option<PathBuf>,
     dirty: bool,
+    history: History,
 }
 
 impl Default for Doc {
     fn default() -> Self {
-        Self { pads: (0..PADS).map(|_| Pad::default()).collect(), tempo: 120.0, swing: 0.0, steps: 16, path: None, dirty: false }
+        Self {
+            pads: (0..PADS).map(|_| Pad::default()).collect(),
+            tempo: 120.0,
+            swing: 0.0,
+            steps: 16,
+            current: 0,
+            path: None,
+            dirty: false,
+            history: History::default(),
+        }
+    }
+}
+
+/// The parts of the document that undo restores. Samples are shared, so a
+/// snapshot costs a few hundred bytes.
+#[derive(Clone)]
+struct Snapshot {
+    pads: Vec<Pad>,
+    tempo: f32,
+    swing: f32,
+    steps: usize,
+    current: usize,
+}
+
+#[derive(Default)]
+struct History {
+    undo: Vec<Snapshot>,
+    redo: Vec<Snapshot>,
+    /// The kind and time of the last edit, to merge a run of them into one step.
+    last: Option<(String, Instant)>,
+}
+
+impl Doc {
+    fn snapshot(&self) -> Snapshot {
+        Snapshot { pads: self.pads.clone(), tempo: self.tempo, swing: self.swing, steps: self.steps, current: self.current }
+    }
+
+    /// Records `before` as an undo step for an edit of kind `key`, unless it
+    /// continues a run of the same kind.
+    fn checkpoint(&mut self, key: &str, before: Snapshot) {
+        let now = Instant::now();
+        // A recording take ("take:N") is one step however long it runs.
+        let merge = matches!(&self.history.last, Some((k, t)) if k == key && (key.starts_with("take:") || now.duration_since(*t) < MERGE_WINDOW));
+        self.history.last = Some((key.to_string(), now));
+        self.dirty = true;
+        if merge {
+            return;
+        }
+        self.history.undo.push(before);
+        if self.history.undo.len() > UNDO_LIMIT {
+            self.history.undo.remove(0);
+        }
+        self.history.redo.clear();
     }
 }
 
@@ -115,11 +195,13 @@ pub struct SamplerState {
     doc: Mutex<Doc>,
     cache: Mutex<Cache>,
     handle: SamplerHandle,
+    /// Counts recording takes, so each take undoes as one step.
+    take: std::sync::atomic::AtomicU32,
 }
 
 impl SamplerState {
     pub fn new(handle: SamplerHandle) -> Self {
-        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle };
+        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle, take: Default::default() };
         s.apply_all(&s.doc.lock().unwrap());
         s
     }
@@ -127,7 +209,10 @@ impl SamplerState {
     fn apply_pad(&self, doc: &Doc, pad: usize) {
         let p = &doc.pads[pad];
         self.handle.set_pad(pad, &p.settings.params());
-        self.handle.set_pattern(pad, p.pattern);
+        self.handle.set_pattern(pad, p.patterns[doc.current]);
+        for step in 0..MAX_STEPS {
+            self.handle.set_velocity(pad, step, p.velocity(doc.current, step) as f32 / 255.0);
+        }
     }
 
     fn apply_all(&self, doc: &Doc) {
@@ -137,6 +222,37 @@ impl SamplerState {
         self.handle.set_tempo(doc.tempo);
         self.handle.set_swing(doc.swing);
         self.handle.set_steps(doc.steps);
+    }
+
+    /// Whether the document has changes that aren't saved.
+    pub fn is_dirty(&self) -> bool {
+        self.doc.lock().unwrap().dirty
+    }
+
+    /// Puts `snap` back, reloading only the pads whose sample changed.
+    fn restore(&self, app: &AppHandle, doc: &mut Doc, snap: Snapshot) -> Result<(), String> {
+        let mut a = audio(app).lock().unwrap();
+        for (pad, (now, then)) in doc.pads.iter().zip(&snap.pads).enumerate() {
+            let same = match (&now.sample, &then.sample) {
+                (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                (None, None) => true,
+                _ => false,
+            };
+            if !same {
+                self.handle.cut(pad);
+                a.engine.load_sample(pad, then.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
+            }
+        }
+        drop(a);
+        doc.pads = snap.pads;
+        doc.tempo = snap.tempo;
+        doc.swing = snap.swing;
+        doc.steps = snap.steps;
+        doc.current = snap.current;
+        doc.dirty = true;
+        doc.history.last = None;
+        self.apply_all(doc);
+        Ok(())
     }
 
     fn decode(&self, path: &Path) -> Result<Arc<Decoded>, String> {
@@ -173,6 +289,14 @@ pub struct View {
     project_name: String,
     project_path: Option<String>,
     dirty: bool,
+    can_undo: bool,
+    can_redo: bool,
+    /// The pattern being played and edited, 0 = A.
+    pattern: usize,
+    /// Which patterns have any steps.
+    patterns_used: Vec<bool>,
+    metronome: bool,
+    recording: bool,
 }
 
 #[derive(Serialize, Clone)]
@@ -189,9 +313,11 @@ struct PadView {
     settings: PadSettings,
     /// One entry per step of the pattern's length.
     steps: Vec<bool>,
+    /// How hard each step plays, 0..1, one per step.
+    velocity: Vec<f32>,
 }
 
-fn view(doc: &Doc) -> View {
+fn view(doc: &Doc, live: &SamplerHandle) -> View {
     let pads = doc
         .pads
         .iter()
@@ -208,7 +334,8 @@ fn view(doc: &Doc) -> View {
                 rate: s.map_or(0, |s| s.rate),
                 peaks: s.map(|s| s.peaks.clone()).unwrap_or_default(),
                 settings: p.settings,
-                steps: (0..doc.steps).map(|i| p.pattern & (1u64 << i) != 0).collect(),
+                steps: (0..doc.steps).map(|i| p.patterns[doc.current] & (1u64 << i) != 0).collect(),
+                velocity: (0..doc.steps).map(|i| p.velocity(doc.current, i) as f32 / 255.0).collect(),
             }
         })
         .collect();
@@ -220,6 +347,12 @@ fn view(doc: &Doc) -> View {
         project_name: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
         project_path: doc.path.as_ref().map(|p| p.display().to_string()),
         dirty: doc.dirty,
+        can_undo: !doc.history.undo.is_empty(),
+        can_redo: !doc.history.redo.is_empty(),
+        pattern: doc.current,
+        patterns_used: (0..BANK).map(|b| doc.pads.iter().any(|p| p.patterns[b] != 0)).collect(),
+        metronome: live.metronome(),
+        recording: live.is_recording(),
     }
 }
 
@@ -233,17 +366,19 @@ fn audio(app: &AppHandle) -> &'static Mutex<Audio> {
 
 /// Sends the document to every window, and returns it.
 fn publish(app: &AppHandle, doc: &Doc) -> View {
-    let v = view(doc);
+    let v = view(doc, &state(app).handle);
     let _ = app.emit("sampler:state", &v);
     v
 }
 
-/// Runs `f` on the document, marks it changed, and publishes it.
-fn edit(app: &AppHandle, f: impl FnOnce(&SamplerState, &mut Doc) -> Result<(), String>) -> Result<View, String> {
+/// Runs `f` on the document as an undoable edit of kind `key`, marks it
+/// changed, and publishes it.
+fn edit(app: &AppHandle, key: &str, f: impl FnOnce(&SamplerState, &mut Doc) -> Result<(), String>) -> Result<View, String> {
     let s = state(app);
     let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
     f(&s, &mut doc)?;
-    doc.dirty = true;
+    doc.checkpoint(key, before);
     Ok(publish(app, &doc))
 }
 
@@ -265,6 +400,7 @@ pub fn load_pad(app: &AppHandle, pad: usize, path: &Path, settings: PadSettings)
         peaks: peaks(&d.data, PAD_PEAKS),
     });
     let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
     s.handle.cut(pad);
     audio(app).lock().unwrap().engine.load_sample(pad, Some((d.rate, d.data.clone())))?;
     let p = &mut doc.pads[pad];
@@ -272,7 +408,8 @@ pub fn load_pad(app: &AppHandle, pad: usize, path: &Path, settings: PadSettings)
     p.missing = None;
     p.settings = settings;
     s.apply_pad(&doc, pad);
-    doc.dirty = true;
+    // A run of loads (a Finder drop, a chop) undoes as one step.
+    doc.checkpoint("load", before);
     Ok(())
 }
 
@@ -296,7 +433,7 @@ pub fn first_free_pad(app: &AppHandle) -> Option<usize> {
 pub fn sampler_state(app: AppHandle) -> View {
     let s = state(&app);
     let doc = s.doc.lock().unwrap();
-    view(&doc)
+    view(&doc, &s.handle)
 }
 
 #[tauri::command]
@@ -311,7 +448,7 @@ pub async fn sampler_load(pad: usize, path: String, app: AppHandle) -> Result<Vi
 #[tauri::command]
 pub fn sampler_clear(pad: usize, app: AppHandle) -> Result<View, String> {
     check_pad(pad)?;
-    edit(&app, |s, doc| {
+    edit(&app, &format!("clear:{pad}"), |s, doc| {
         s.handle.cut(pad);
         audio(&app).lock().unwrap().engine.load_sample(pad, None)?;
         doc.pads[pad] = Pad::default();
@@ -328,7 +465,7 @@ pub fn sampler_move(from: usize, to: usize, app: AppHandle) -> Result<View, Stri
     if from == to {
         return Ok(sampler_state(app));
     }
-    edit(&app, |s, doc| {
+    edit(&app, &format!("move:{from}:{to}"), |s, doc| {
         doc.pads.swap(from, to);
         let mut a = audio(&app).lock().unwrap();
         for pad in [from, to] {
@@ -344,7 +481,7 @@ pub fn sampler_move(from: usize, to: usize, app: AppHandle) -> Result<View, Stri
 #[tauri::command]
 pub fn sampler_settings(pad: usize, settings: PadSettings, app: AppHandle) -> Result<View, String> {
     check_pad(pad)?;
-    edit(&app, |s, doc| {
+    edit(&app, &format!("settings:{pad}"), |s, doc| {
         doc.pads[pad].settings = settings;
         s.apply_pad(doc, pad);
         Ok(())
@@ -357,10 +494,11 @@ pub fn sampler_step(pad: usize, step: usize, on: bool, app: AppHandle) -> Result
     if step >= MAX_STEPS {
         return Err(format!("there is no step {}", step + 1));
     }
-    edit(&app, |s, doc| {
+    edit(&app, "steps", |s, doc| {
         let bit = 1u64 << step;
-        let p = &mut doc.pads[pad];
-        p.pattern = if on { p.pattern | bit } else { p.pattern & !bit };
+        let cur = doc.current;
+        let p = &mut doc.pads[pad].patterns[cur];
+        *p = if on { *p | bit } else { *p & !bit };
         s.apply_pad(doc, pad);
         Ok(())
     })
@@ -369,10 +507,11 @@ pub fn sampler_step(pad: usize, step: usize, on: bool, app: AppHandle) -> Result
 /// Clears one pad's steps, or every pad's when `pad` is `None`.
 #[tauri::command]
 pub fn sampler_clear_steps(pad: Option<usize>, app: AppHandle) -> Result<View, String> {
-    edit(&app, |s, doc| {
+    edit(&app, &format!("clear-steps:{pad:?}"), |s, doc| {
         for i in 0..PADS {
             if pad.is_none_or(|p| p == i) {
-                doc.pads[i].pattern = 0;
+                let cur = doc.current;
+                doc.pads[i].patterns[cur] = 0;
                 s.apply_pad(doc, i);
             }
         }
@@ -382,7 +521,7 @@ pub fn sampler_clear_steps(pad: Option<usize>, app: AppHandle) -> Result<View, S
 
 #[tauri::command]
 pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -> Result<View, String> {
-    edit(&app, |s, doc| {
+    edit(&app, "transport", |s, doc| {
         doc.tempo = tempo.clamp(40.0, 300.0);
         doc.swing = swing.clamp(0.0, 1.0);
         doc.steps = steps.clamp(1, MAX_STEPS);
@@ -391,6 +530,116 @@ pub fn sampler_transport(tempo: f32, swing: f32, steps: usize, app: AppHandle) -
         s.handle.set_steps(doc.steps);
         Ok(())
     })
+}
+
+/// How hard one step plays, 0..1, in the current pattern.
+#[tauri::command]
+pub fn sampler_velocity(pad: usize, step: usize, velocity: f32, app: AppHandle) -> Result<View, String> {
+    check_pad(pad)?;
+    if step >= MAX_STEPS {
+        return Err(format!("there is no step {}", step + 1));
+    }
+    edit(&app, "velocity", |s, doc| {
+        let cur = doc.current;
+        doc.pads[pad].set_velocity(cur, step, (velocity.clamp(0.0, 1.0) * 255.0).round() as u8);
+        s.apply_pad(doc, pad);
+        Ok(())
+    })
+}
+
+/// Turns the click on or off. A live setting, not part of the project.
+#[tauri::command]
+pub fn sampler_metronome(on: bool, app: AppHandle) -> View {
+    let s = state(&app);
+    s.handle.set_metronome(on);
+    let doc = s.doc.lock().unwrap();
+    publish(&app, &doc)
+}
+
+/// Arms or disarms recording: pads played while the pattern runs are written into its steps.
+#[tauri::command]
+pub fn sampler_record(on: bool, app: AppHandle) -> View {
+    let s = state(&app);
+    if on && !s.handle.is_recording() {
+        s.take.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    s.handle.set_recording(on);
+    let doc = s.doc.lock().unwrap();
+    publish(&app, &doc)
+}
+
+/// Copies steps the engine recorded into the document, as one undo step per take.
+fn sync_recorded(app: &AppHandle) {
+    let s = state(app);
+    let mut doc = s.doc.lock().unwrap();
+    let before = doc.snapshot();
+    let cur = doc.current;
+    let mut changed = false;
+    for pad in 0..PADS {
+        let live = s.handle.pattern(pad);
+        if doc.pads[pad].patterns[cur] != live {
+            doc.pads[pad].patterns[cur] = live;
+            changed = true;
+        }
+    }
+    if changed {
+        let take = s.take.load(std::sync::atomic::Ordering::Relaxed);
+        doc.checkpoint(&format!("take:{take}"), before);
+        publish(app, &doc);
+    }
+}
+
+/// Switches to pattern `index` (0 = A). While playing, the switch lands on the next step.
+#[tauri::command]
+pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
+    if index >= BANK {
+        return Err(format!("there is no pattern {index}"));
+    }
+    edit(&app, "pattern", |s, doc| {
+        doc.current = index;
+        s.apply_all(doc);
+        Ok(())
+    })
+}
+
+/// Copies pattern `from` over pattern `to` and switches to it.
+#[tauri::command]
+pub fn sampler_copy_pattern(from: usize, to: usize, app: AppHandle) -> Result<View, String> {
+    if from >= BANK || to >= BANK {
+        return Err("there are only four patterns".into());
+    }
+    edit(&app, &format!("copy:{from}:{to}"), |s, doc| {
+        for p in doc.pads.iter_mut() {
+            p.patterns[to] = p.patterns[from];
+        }
+        doc.current = to;
+        s.apply_all(doc);
+        Ok(())
+    })
+}
+
+/// Steps back one edit.
+#[tauri::command]
+pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
+    let s = state(&app);
+    let mut doc = s.doc.lock().unwrap();
+    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&doc, &s.handle)) };
+    let now = doc.snapshot();
+    doc.history.redo.push(now);
+    s.restore(&app, &mut doc, snap)?;
+    Ok(publish(&app, &doc))
+}
+
+/// Steps forward again after an undo.
+#[tauri::command]
+pub fn sampler_redo(app: AppHandle) -> Result<View, String> {
+    let s = state(&app);
+    let mut doc = s.doc.lock().unwrap();
+    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&doc, &s.handle)) };
+    let now = doc.snapshot();
+    doc.history.undo.push(now);
+    s.restore(&app, &mut doc, snap)?;
+    Ok(publish(&app, &doc))
 }
 
 /// Starts the pattern from step 1, or stops it.
@@ -432,8 +681,14 @@ struct Tick {
 pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
     std::thread::spawn(move || {
         let mut last: Option<(bool, Option<usize>, Vec<u32>)> = None;
+        let mut recorded = handle.recorded();
         loop {
             std::thread::sleep(Duration::from_millis(33));
+            let r = handle.recorded();
+            if r != recorded {
+                recorded = r;
+                sync_recorded(&app);
+            }
             let now = (handle.is_playing(), handle.current_step(), (0..PADS).map(|p| handle.played(p)).collect::<Vec<_>>());
             if last.as_ref() != Some(&now) {
                 let _ = app.emit("sampler:tick", Tick { playing: now.0, step: now.1, played: now.2.clone() });
@@ -561,6 +816,9 @@ struct ProjectFile {
     tempo: f32,
     swing: f32,
     steps: usize,
+    /// The pattern that was showing, 0 = A.
+    #[serde(default)]
+    current: usize,
     pads: Vec<PadFile>,
 }
 
@@ -571,9 +829,12 @@ struct PadFile {
     sample: Option<String>,
     #[serde(default)]
     settings: PadSettings,
-    /// One character per step: `x` plays, `.` rests.
+    /// This pad's steps in patterns A to D, one character per step: `x` plays, `.` rests.
     #[serde(default)]
-    pattern: String,
+    patterns: Vec<String>,
+    /// How hard each step plays (0..255), per pattern; left out while every step is full.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    velocity: Vec<Vec<u8>>,
 }
 
 fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
@@ -589,15 +850,34 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
                     Err(_) => path.display().to_string(),
                 }),
                 settings: p.settings,
-                pattern: (0..MAX_STEPS)
-                    .map(|i| if p.pattern & (1u64 << i) != 0 { 'x' } else { '.' })
-                    .collect::<String>()
-                    .trim_end_matches('.')
-                    .to_string(),
+                patterns: p
+                    .patterns
+                    .iter()
+                    .map(|bits| {
+                        (0..MAX_STEPS)
+                            .map(|i| if bits & (1u64 << i) != 0 { 'x' } else { '.' })
+                            .collect::<String>()
+                            .trim_end_matches('.')
+                            .to_string()
+                    })
+                    .collect(),
+                velocity: if p.velocity.iter().flatten().all(|&v| v == 255) {
+                    Vec::new()
+                } else {
+                    p.velocity.iter().map(|v| v.to_vec()).collect()
+                },
             }
         })
         .collect();
-    ProjectFile { format: FORMAT.into(), version: VERSION, tempo: doc.tempo, swing: doc.swing, steps: doc.steps, pads }
+    ProjectFile {
+        format: FORMAT.into(),
+        version: VERSION,
+        tempo: doc.tempo,
+        swing: doc.swing,
+        steps: doc.steps,
+        current: doc.current,
+        pads,
+    }
 }
 
 fn pattern_bits(s: &str) -> u64 {
@@ -639,7 +919,16 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
         let mut pads: Vec<Pad> = Vec::with_capacity(PADS);
         let listed = std::mem::take(&mut file.pads);
         for pf in listed.into_iter().chain(std::iter::repeat_with(PadFile::default)).take(PADS) {
-            let mut pad = Pad { settings: pf.settings, pattern: pattern_bits(&pf.pattern), ..Default::default() };
+            let mut patterns = [0u64; BANK];
+            for (b, text) in pf.patterns.iter().take(BANK).enumerate() {
+                patterns[b] = pattern_bits(text);
+            }
+            let mut pad = Pad { settings: pf.settings, patterns, ..Default::default() };
+            for (b, steps) in pf.velocity.iter().take(BANK).enumerate() {
+                for (i, &v) in steps.iter().take(MAX_STEPS).enumerate() {
+                    pad.set_velocity(b, i, v);
+                }
+            }
             if let Some(rel) = &pf.sample {
                 let p = Path::new(rel);
                 let full = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
@@ -671,8 +960,10 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
             tempo: file.tempo.clamp(40.0, 300.0),
             swing: file.swing.clamp(0.0, 1.0),
             steps: file.steps.clamp(1, MAX_STEPS),
+            current: file.current.min(BANK - 1),
             path: Some(project),
             dirty: false,
+            history: History::default(),
         };
         s.apply_all(&doc);
         Ok(publish(&a, &doc))
@@ -709,45 +1000,157 @@ pub struct Exported {
     format: WavFormat,
 }
 
+/// What a render needs, copied out of the document so the render runs without its lock.
+struct RenderJob {
+    samples: Vec<Option<Arc<Sample>>>,
+    shared: SamplerShared,
+    project: String,
+}
+
+fn render_job(app: &AppHandle) -> Result<RenderJob, String> {
+    let s = state(app);
+    let doc = s.doc.lock().unwrap();
+    if doc.pads.iter().all(|p| p.patterns[doc.current] == 0 || p.sample.is_none()) {
+        return Err("there is nothing in the pattern yet: add steps first".into());
+    }
+    let shared = SamplerShared::default();
+    for (i, p) in doc.pads.iter().enumerate() {
+        shared.set_pad(i, &p.settings.params());
+        shared.set_pattern(i, p.patterns[doc.current]);
+    }
+    shared.set_tempo(doc.tempo);
+    shared.set_swing(doc.swing);
+    shared.set_steps(doc.steps);
+    Ok(RenderJob {
+        samples: doc.pads.iter().map(|p| p.sample.clone()).collect(),
+        shared,
+        project: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
+    })
+}
+
+/// Renders `loops` passes of the pattern at 48 kHz. Blocking.
+fn render(job: &RenderJob, loops: usize) -> Result<Vec<Vec<f32>>, String> {
+    let mut tracks: Vec<Option<Track>> = Vec::with_capacity(PADS);
+    for s in &job.samples {
+        tracks.push(match s {
+            None => None,
+            Some(s) if s.rate == EXPORT_RATE => Some(s.data.clone()),
+            Some(s) => Some(Arc::new(resample(&s.data, s.rate, EXPORT_RATE)?)),
+        });
+    }
+    Ok(render_pattern(&tracks, &job.shared, EXPORT_RATE, loops.clamp(1, 64)))
+}
+
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.
 #[tauri::command]
 pub async fn sampler_export(path: String, loops: usize, app: AppHandle) -> Result<Exported, String> {
-    let (samples, shared) = {
-        let s = state(&app);
-        let doc = s.doc.lock().unwrap();
-        let shared = SamplerShared::default();
-        for (i, p) in doc.pads.iter().enumerate() {
-            shared.set_pad(i, &p.settings.params());
-            shared.set_pattern(i, p.pattern);
-        }
-        shared.set_tempo(doc.tempo);
-        shared.set_swing(doc.swing);
-        shared.set_steps(doc.steps);
-        let samples: Vec<Option<Arc<Sample>>> = doc.pads.iter().map(|p| p.sample.clone()).collect();
-        if doc.pads.iter().all(|p| p.pattern == 0 || p.sample.is_none()) {
-            return Err("there is nothing in the pattern to export".into());
-        }
-        (samples, shared)
-    };
+    let job = render_job(&app)?;
     spawn_blocking(move || {
         let mut path = PathBuf::from(path);
         if path.extension().and_then(|e| e.to_str()).map(str::to_lowercase).as_deref() != Some("wav") {
             path.set_extension("wav");
         }
-        let mut tracks: Vec<Option<Track>> = Vec::with_capacity(PADS);
-        for s in &samples {
-            tracks.push(match s {
-                None => None,
-                Some(s) if s.rate == EXPORT_RATE => Some(s.data.clone()),
-                Some(s) => Some(Arc::new(resample(&s.data, s.rate, EXPORT_RATE)?)),
-            });
-        }
-        let out = render_pattern(&tracks, &shared, EXPORT_RATE, loops.clamp(1, 64));
+        let out = render(&job, loops)?;
         let format = export_wav(&out, EXPORT_RATE, &path)?;
         Ok(Exported { seconds: out[0].len() as f64 / EXPORT_RATE as f64, path: path.display().to_string(), format })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Bounced {
+    pad: usize,
+    path: String,
+}
+
+/// Resamples: renders `loops` passes of the pattern and puts the result on
+/// the first empty pad. The WAV goes in Music/tuneKore/Samples/Bounces.
+#[tauri::command]
+pub async fn sampler_bounce(loops: usize, app: AppHandle) -> Result<Bounced, String> {
+    let job = render_job(&app)?;
+    let pad = first_free_pad(&app).ok_or("every pad is in use: clear one to bounce onto it")?;
+    let dir = app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore/Samples/Bounces");
+    let a = app.clone();
+    let result = spawn_blocking(move || -> Result<Bounced, String> {
+        std::fs::create_dir_all(&dir).map_err(|e| format!("can't make {}: {e}", dir.display()))?;
+        let name: String = job.project.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let path = (1..)
+            .map(|n| dir.join(format!("{name} bounce {n}.wav")))
+            .find(|p| !p.exists())
+            .expect("an unused name");
+        let out = render(&job, loops)?;
+        export_wav(&out, EXPORT_RATE, &path)?;
+        load_pad(&a, pad, &path, PadSettings::default())?;
+        Ok(Bounced { pad, path: path.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    publish_now(&app);
+    if let Ok(b) = &result {
+        if let Some(folder) = Path::new(&b.path).parent() {
+            let _ = app.emit("sampler:chopped", folder.display().to_string());
+        }
+    }
+    result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Chopped {
+    pads: Vec<usize>,
+    folder: String,
+}
+
+/// Slices a pad's sample (between its start and end) at its hits into up to
+/// `count` pieces, and puts them on the empty pads in order. The WAVs go in
+/// Music/tuneKore/Samples/Chops.
+#[tauri::command]
+pub async fn sampler_chop(pad: usize, count: usize, app: AppHandle) -> Result<Chopped, String> {
+    check_pad(pad)?;
+    let (sample, settings, free) = {
+        let s = state(&app);
+        let doc = s.doc.lock().unwrap();
+        let p = &doc.pads[pad];
+        let sample = p.sample.clone().ok_or("put a sample on this pad first")?;
+        let free: Vec<usize> = doc.pads.iter().enumerate().filter(|(_, x)| x.sample.is_none() && x.missing.is_none()).map(|(i, _)| i).collect();
+        (sample, p.settings, free)
+    };
+    if free.is_empty() {
+        return Err("there are no empty pads to chop onto: clear some first".into());
+    }
+    let count = count.clamp(2, PADS).min(free.len());
+    let root = app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore/Samples/Chops");
+    let a = app.clone();
+    let result = spawn_blocking(move || -> Result<Chopped, String> {
+        let name: String = sample.name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+        let folder = (1..).map(|n| root.join(format!("{name} chop {n}"))).find(|p| !p.exists()).expect("an unused name");
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let frames = sample.data[0].len();
+        let from = (settings.start as f64 * frames as f64) as usize;
+        let to = ((settings.end as f64 * frames as f64) as usize).min(frames);
+        let mut starts = onsets(&sample.data, sample.rate, from, to, count);
+        if starts.len() < 2 {
+            starts = even(from, to, count);
+        }
+        let mut pads = Vec::new();
+        for (i, (st, en)) in slices(&starts, to, to - from).into_iter().enumerate() {
+            let path = folder.join(format!("{name} {:02}.wav", i + 1));
+            let piece: Vec<Vec<f32>> = sample.data.iter().map(|c| c[st..en].to_vec()).collect();
+            export_wav(&piece, sample.rate, &path)?;
+            load_pad(&a, free[i], &path, PadSettings { pitch: settings.pitch, gain_db: settings.gain_db, ..Default::default() })?;
+            pads.push(free[i]);
+        }
+        Ok(Chopped { pads, folder: folder.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    publish_now(&app);
+    if let Ok(c) = &result {
+        let _ = app.emit("sampler:chopped", &c.folder);
+    }
+    result
 }
 
 fn file_stem(path: &Path) -> String {
@@ -765,13 +1168,13 @@ mod tests {
     #[test]
     fn patterns_round_trip_through_text() {
         let mut doc = Doc::default();
-        doc.pads[0].pattern = 0b1000_0001;
-        doc.pads[2].pattern = 1u64 << 63;
+        doc.pads[0].patterns[0] = 0b1000_0001;
+        doc.pads[2].patterns[3] = 1u64 << 63;
         let file = to_file(&doc, Path::new("/tmp/beat.tunek"));
-        assert_eq!(file.pads[0].pattern, "x......x");
-        assert_eq!(file.pads[1].pattern, "");
-        assert_eq!(pattern_bits(&file.pads[0].pattern), 0b1000_0001);
-        assert_eq!(pattern_bits(&file.pads[2].pattern), 1u64 << 63);
+        assert_eq!(file.pads[0].patterns[0], "x......x");
+        assert_eq!(file.pads[1].patterns, vec![""; BANK]);
+        assert_eq!(pattern_bits(&file.pads[0].patterns[0]), 0b1000_0001);
+        assert_eq!(pattern_bits(&file.pads[2].patterns[3]), 1u64 << 63);
     }
 
     #[test]
@@ -785,6 +1188,43 @@ mod tests {
         let json = serde_json::to_string(&file).unwrap();
         let back: ProjectFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pads.len(), PADS);
+    }
+
+    #[test]
+    fn edits_of_one_kind_in_a_run_undo_as_one_step() {
+        let mut doc = Doc::default();
+        for step in 0..4 {
+            let before = doc.snapshot();
+            doc.pads[0].patterns[0] |= 1 << step;
+            doc.checkpoint("steps", before);
+        }
+        assert_eq!(doc.history.undo.len(), 1, "painting four steps is one undo");
+        assert_eq!(doc.history.undo[0].pads[0].patterns[0], 0);
+
+        let before = doc.snapshot();
+        doc.tempo = 90.0;
+        doc.checkpoint("transport", before);
+        assert_eq!(doc.history.undo.len(), 2, "a different kind of edit is a new step");
+        assert!(doc.dirty);
+
+        doc.history.redo.push(doc.snapshot());
+        let before = doc.snapshot();
+        doc.swing = 0.5;
+        doc.checkpoint("swing", before);
+        assert!(doc.history.redo.is_empty(), "a new edit drops the redo steps");
+    }
+
+    #[test]
+    fn velocities_are_saved_only_when_set() {
+        let mut doc = Doc::default();
+        let file = to_file(&doc, Path::new("/tmp/a.tunek"));
+        assert!(file.pads[0].velocity.is_empty());
+        doc.pads[0].set_velocity(1, 3, 128);
+        let file = to_file(&doc, Path::new("/tmp/a.tunek"));
+        assert_eq!(file.pads[0].velocity.len(), BANK);
+        assert_eq!(file.pads[0].velocity[1][3], 128);
+        assert_eq!(file.pads[0].velocity[0][3], 255);
+        assert_eq!(doc.pads[1].velocity(2, 5), 255, "unset reads full");
     }
 
     #[test]

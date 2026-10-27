@@ -1,6 +1,6 @@
 [package]
 name = "tunekore-analyzer"
-version = "0.1.1"
+version = "0.1.2"
 description = "tuneKore's Analyzer: decode a song, split it into stems in the worker, check and export them"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,7 @@ symphonia = { version = "0.6.1", default-features = false, features = ["wav", "a
 hound = "3.5.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.154"
+rustfft = "6.4.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"

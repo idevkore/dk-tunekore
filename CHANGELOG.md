@@ -5,6 +5,20 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.2: the Sampler's second pass
+
+idevkore/dk-tunekore#14, PR #8
+
+- Patterns A–D, switched while playing and copied between.
+- Record pads into the steps while the pattern runs; a metronome on the beat.
+- Per-step velocity, choke groups, and undo and redo for every edit.
+- Chop any pad's sample at its hits onto the empty pads; bounce the pattern
+  back onto a pad.
+- Trim handles on the waveform, an Add a sound row, and a prompt before
+  closing with unsaved changes.
+- The Analyzer finds a song's tempo and key (with its Camelot code) and can
+  set the Sampler's tempo.
+
 ## 0.1.1: the Sampler (MVP)
 
 idevkore/dk-tunekore#13, PR #7

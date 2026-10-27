@@ -15,10 +15,11 @@ const LIB = [
 export function installMocks() {
   const pad = (index: number): PadView => ({
     index, name: null, path: null, missing: false, seconds: 0, channels: 0, rate: 0, peaks: [],
-    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false },
+    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0 },
     steps: Array(16).fill(false),
+    velocity: Array(16).fill(1),
   });
-  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false };
+  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false };
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
@@ -29,7 +30,11 @@ export function installMocks() {
     void emit("sampler:state", copy);
     return copy;
   };
-  const resize = () => v.pads.forEach((p) => (p.steps = Array.from({ length: v.steps }, (_, i) => p.steps[i] ?? false)));
+  const resize = () =>
+    v.pads.forEach((p) => {
+      p.steps = Array.from({ length: v.steps }, (_, i) => p.steps[i] ?? false);
+      p.velocity = Array.from({ length: v.steps }, (_, i) => p.velocity[i] ?? 1);
+    });
 
   setInterval(() => {
     if (!playing) return;
@@ -107,6 +112,33 @@ export function installMocks() {
           return "/Users/test/Music/Beat 1.tunek";
         case "plugin:dialog|ask":
           return true;
+        case "sampler_bounce": {
+          const free = v.pads.find((p) => !p.name);
+          if (!free) throw "every pad is in use";
+          Object.assign(free, { name: "Untitled bounce 1", path: "/Users/test/Music/tuneKore/Samples/Bounces/Untitled bounce 1.wav", seconds: 8, channels: 2, rate: 48000, peaks: peaks(3) });
+          publish();
+          return { pad: free.index, path: free.path };
+        }
+        case "sampler_velocity":
+          v.pads[a.pad as number].velocity[a.step as number] = a.velocity as number;
+          return publish();
+        case "sampler_pattern":
+          v.pattern = a.index as number;
+          return publish();
+        case "sampler_copy_pattern":
+          v.pattern = a.to as number;
+          return publish();
+        case "sampler_metronome":
+          v.metronome = a.on as boolean;
+          return publish();
+        case "sampler_record":
+          v.recording = a.on as boolean;
+          return publish();
+        case "sampler_chop":
+          return { pads: [1, 2, 3, 4], folder: "/Users/test/Music/tuneKore/Samples/Chops/Kick chop 1" };
+        case "sampler_undo":
+        case "sampler_redo":
+          return publish();
         case "sampler_export":
           return { path: a.path, seconds: 8, format: "pcm24" };
         default:

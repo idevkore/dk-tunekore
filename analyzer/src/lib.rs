@@ -9,11 +9,13 @@
 mod chop;
 mod decode;
 mod stems;
+mod tempo_key;
 mod worker;
 
 pub use chop::{even, onsets, slices};
 pub use decode::{decode_file, Song, EXTENSIONS};
 pub use stems::{check, export_wav, peaks, read_planar, rms_db, write_planar, Checks, Stems, WavFormat, STEM_NAMES};
+pub use tempo_key::{camelot, key, tempo, KeyEstimate, TempoEstimate, MAX_BPM, MIN_BPM};
 pub use worker::{list_backends, run_job, BackendInfo, Cancel, Done, JobError, Request, WorkerConfig};
 
 use std::path::Path;

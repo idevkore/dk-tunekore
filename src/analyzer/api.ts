@@ -90,6 +90,23 @@ export interface ToPads {
 export const toPads = (stem: string, how: string, count: number, firstPad: number | null, fromSeconds: number) =>
   invoke<ToPads>("analyzer_to_pads", { stem, how, count, firstPad, fromSeconds });
 
+export interface TempoKey {
+  bpm: number | null;
+  bpmConfidence: number | null;
+  key: string | null;
+  camelot: string | null;
+  keyConfidence: number | null;
+}
+
+/** Finds the open song's tempo and key. After separating, the tempo comes from the drums when they are clearer. */
+export const tempoKey = (stem: string | null = null) => invoke<TempoKey>("analyzer_tempo_key", { stem });
+
+/** Sets the Sampler's tempo, keeping the swing and step count it already has. */
+export async function setSamplerTempo(bpm: number): Promise<void> {
+  const now = await invoke<{ swing: number; steps: number }>("sampler_state");
+  await invoke("sampler_transport", { tempo: bpm, swing: now.swing, steps: now.steps });
+}
+
 const on =
   <T,>(name: string) =>
   (handler: (payload: T) => void): Promise<UnlistenFn> =>

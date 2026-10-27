@@ -2,7 +2,11 @@
 // sixteenth. Click or drag across cells to paint; arrow keys move between
 // cells and Enter or Space toggles one.
 import { useEffect, useRef, useState } from "react";
-import { PAD_KEYS, type PadView } from "./api";
+import { open } from "@tauri-apps/plugin-dialog";
+import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, type PadView } from "./api";
+
+/** Right-click cycles a step through these levels. */
+const LEVELS = [1, 0.7, 0.4];
 
 interface Props {
   pads: PadView[];
@@ -15,10 +19,40 @@ interface Props {
   onRelease: (pad: number) => void;
   onStep: (pad: number, step: number, on: boolean) => void;
   onMute: (pad: number) => void;
+  /** The pad a drag is over, to highlight the add row when it's the target. */
+  dropTarget: number | null;
+  /** Files chosen with "Add a sound", for the empty pads in order. */
+  onAddFiles: (paths: string[]) => void;
+  onVelocity: (pad: number, step: number, v: number) => void;
+  pattern: number;
+  patternsUsed: boolean[];
+  onPattern: (index: number) => void;
+  onCopyPattern: (from: number, to: number) => void;
+  onLength: (steps: number) => void;
 }
 
-export default function Steps({ pads, steps, current, selected, onSelect, onPress, onRelease, onStep, onMute }: Props) {
+export default function Steps(props: Props) {
+  const { pads, steps, current, selected, onSelect, onPress, onRelease, onStep, onMute, dropTarget, onAddFiles, onVelocity } = props;
   const rows = pads.filter((p) => p.name);
+  const free = pads.find((p) => !p.name);
+
+  async function choose() {
+    const picked = await open({ multiple: true, title: "Add sounds", filters: [{ name: "Audio", extensions: AUDIO_EXTENSIONS }] }).catch(() => null);
+    const files = Array.isArray(picked) ? picked : typeof picked === "string" ? [picked] : [];
+    if (files.length) onAddFiles(files);
+  }
+
+  // A row that turns into the next pad: click to choose files, or drop a sample on it.
+  const addRow = free && (
+    <div className={`add-row${dropTarget === free.index ? " over" : ""}`} data-pad={free.index}>
+      <button className="add-btn" onClick={() => void choose()}>
+        <span aria-hidden="true">＋</span> Add a sound
+      </button>
+      <span className="dim small">
+        or drag one here from the Library. It goes on pad {free.index + 1} ({PAD_KEYS[free.index].toUpperCase()}).
+      </span>
+    </div>
+  );
   // Painting: the value the first cell got, applied to every cell dragged over.
   const paint = useRef<boolean | null>(null);
   const [focus, setFocus] = useState<[number, number]>([0, 0]);
@@ -30,11 +64,50 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
     return () => window.removeEventListener("pointerup", stop);
   }, []);
 
+  const bank = (
+    <div className="bank" role="group" aria-label="Patterns">
+      <span className="bank-label">Pattern</span>
+      {PATTERN_NAMES.map((n, i) => (
+        <button
+          key={n}
+          className={`bank-btn${i === props.pattern ? " on" : ""}${props.patternsUsed[i] ? " used" : ""}`}
+          aria-pressed={i === props.pattern}
+          title={`Pattern ${n}${props.patternsUsed[i] ? "" : " (empty)"}. Switching while playing lands on the next step.`}
+          onPointerDown={(e) => e.preventDefault()}
+          onClick={() => props.onPattern(i)}
+        >
+          {n}
+        </button>
+      ))}
+      <select
+        className="bank-copy"
+        value=""
+        aria-label={`Copy pattern ${PATTERN_NAMES[props.pattern]} to another pattern`}
+        title="Copy this pattern to another one, then edit the copy"
+        onChange={(e) => props.onCopyPattern(props.pattern, Number(e.target.value))}
+      >
+        <option value="" disabled>
+          Copy {PATTERN_NAMES[props.pattern]} to…
+        </option>
+        {PATTERN_NAMES.map((n, i) => i !== props.pattern && <option key={n} value={i}>Pattern {n}</option>)}
+      </select>
+      <label className="len">
+        <span>Steps</span>
+        <select value={steps} onChange={(e) => props.onLength(Number(e.target.value))} aria-label="Pattern length in steps">
+          {STEP_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
+        </select>
+      </label>
+      <span className="dim small bank-hint">Right-click a step to make it softer</span>
+    </div>
+  );
+
   if (rows.length === 0) {
     return (
       <section className="steps empty-steps" aria-label="Steps">
+        {bank}
         <strong>Steps</strong>
-        <span>Put samples on pads, then click here to make a pattern. Press Space to play it.</span>
+        <span>Each sound gets a row of steps here. Click steps to make a pattern, then press Space to play it.</span>
+        {addRow}
       </section>
     );
   }
@@ -50,6 +123,7 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
 
   return (
     <section className="steps" aria-label="Steps">
+      {bank}
       <div
         className="grid"
         role="grid"
@@ -95,13 +169,21 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
             </button>
             {Array.from({ length: steps }, (_, s) => {
               const on = p.steps[s] ?? false;
+              const vel = p.velocity[s] ?? 1;
               return (
                 <button
                   key={s}
                   role="gridcell"
                   data-cell={`${r}-${s}`}
                   tabIndex={r === fr && s === fs ? 0 : -1}
-                  aria-label={`Pad ${p.index + 1}, step ${s + 1}`}
+                  aria-label={`Pad ${p.index + 1}, step ${s + 1}${on && vel < 1 ? `, ${Math.round(vel * 100)}%` : ""}`}
+                  style={on ? ({ "--vel": vel } as React.CSSProperties) : undefined}
+                  onContextMenu={(e) => {
+                    e.preventDefault();
+                    if (!on) return onStep(p.index, s, true);
+                    const i = LEVELS.findIndex((l) => Math.abs(l - vel) < 0.05);
+                    onVelocity(p.index, s, LEVELS[(i + 1) % LEVELS.length]);
+                  }}
                   aria-pressed={on}
                   className={`cell${on ? " on" : ""}${s % 4 === 0 ? " beat" : ""}${Math.floor(s / 4) % 2 === 1 ? " alt" : ""}${current === s ? " now" : ""}`}
                   onPointerDown={(e) => {
@@ -121,7 +203,10 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
                       ArrowDown: [r + 1, s],
                       ArrowUp: [r - 1, s],
                     };
-                    if (moves[e.key]) {
+                    if (e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown") && on) {
+                      e.preventDefault();
+                      onVelocity(p.index, s, Math.min(1, Math.max(0.1, vel + (e.key === "ArrowUp" ? 0.1 : -0.1))));
+                    } else if (moves[e.key]) {
                       e.preventDefault();
                       moveFocus(...moves[e.key]);
                     } else if (e.key === "Enter" || e.key === " ") {
@@ -136,6 +221,7 @@ export default function Steps({ pads, steps, current, selected, onSelect, onPres
           </div>
         ))}
       </div>
+      {addRow}
     </section>
   );
 }

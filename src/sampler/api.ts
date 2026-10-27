@@ -23,6 +23,8 @@ export interface PadSettings {
   gate: boolean;
   reverse: boolean;
   mute: boolean;
+  /** 0 = none; pads in the same group 1–8 cut each other off. */
+  choke: number;
 }
 
 export interface PadView {
@@ -37,6 +39,8 @@ export interface PadView {
   settings: PadSettings;
   /** One per step of the pattern. */
   steps: boolean[];
+  /** How hard each step plays, 0..1, one per step. */
+  velocity: number[];
 }
 
 export interface SamplerView {
@@ -48,6 +52,13 @@ export interface SamplerView {
   projectName: string;
   projectPath: string | null;
   dirty: boolean;
+  canUndo: boolean;
+  canRedo: boolean;
+  /** The pattern playing and being edited, 0 = A. */
+  pattern: number;
+  patternsUsed: boolean[];
+  metronome: boolean;
+  recording: boolean;
 }
 
 export interface Tick {
@@ -87,6 +98,16 @@ export const setTransport = (tempo: number, swing: number, steps: number) =>
 export const play = (playing: boolean) => invoke<void>("sampler_play", { playing });
 export const trigger = (pad: number) => invoke<void>("sampler_trigger", { pad });
 export const release = (pad: number) => invoke<void>("sampler_release", { pad });
+export const PATTERN_NAMES = ["A", "B", "C", "D"];
+export const setVelocity = (pad: number, step: number, velocity: number) => invoke<SamplerView>("sampler_velocity", { pad, step, velocity });
+export const selectPattern = (index: number) => invoke<SamplerView>("sampler_pattern", { index });
+export const copyPattern = (from: number, to: number) => invoke<SamplerView>("sampler_copy_pattern", { from, to });
+export const setMetronome = (on: boolean) => invoke<SamplerView>("sampler_metronome", { on });
+export const setRecording = (on: boolean) => invoke<SamplerView>("sampler_record", { on });
+export const chop = (pad: number, count: number) => invoke<{ pads: number[]; folder: string }>("sampler_chop", { pad, count });
+export const undo = () => invoke<SamplerView>("sampler_undo");
+export const redo = () => invoke<SamplerView>("sampler_redo");
+export const bounce = (loops: number) => invoke<{ pad: number; path: string }>("sampler_bounce", { loops });
 export const exportPattern = (path: string, loops: number) => invoke<Exported>("sampler_export", { path, loops });
 
 export const scanLibrary = (dir: string) => invoke<LibraryScan>("library_scan", { dir });
@@ -106,6 +127,10 @@ export const onTick = (handler: (t: Tick) => void): Promise<UnlistenFn> =>
 /** The Analyzer wrote samples into `folder` and put them on pads. */
 export const onChopped = (handler: (folder: string) => void): Promise<UnlistenFn> =>
   listen<string>("sampler:chopped", (e) => handler(e.payload));
+
+/** The window is closing or the app quitting with unsaved changes: ask, then call `quitApp`. */
+export const onConfirmQuit = (handler: () => void): Promise<UnlistenFn> => listen("app:confirm-quit", () => handler());
+export const quitApp = () => invoke<void>("app_quit");
 
 export const currentOutput = () => invoke<string | null | undefined>("current_output");
 export const setOutput = (deviceId: string | null) => invoke<void>("set_output", { deviceId });

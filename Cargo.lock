@@ -4132,7 +4132,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tunekore"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -4146,9 +4146,10 @@ dependencies = [
 
 [[package]]
 name = "tunekore-analyzer"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "hound",
+ "rustfft",
  "serde",
  "serde_json",
  "symphonia",
@@ -4157,7 +4158,7 @@ dependencies = [
 
 [[package]]
 name = "tunekore-engine"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cpal",
  "rtrb",

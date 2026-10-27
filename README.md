@@ -19,12 +19,18 @@ Status: Phase 2, the Sampler (the MVP).
 
 - **Sampler** (main window): pick a sample folder in the Library, click or
   arrow through samples to hear them, and drag them onto 16 pads (or select
-  a pad and press Enter). Each pad has start and end, level, pan, pitch,
-  gate, reverse and mute. Program a 16-step pattern with tempo and swing,
-  save it as a `.tunek` project, and export it as a WAV.
+  a pad and press Enter, or use the Add a sound row under the steps). Each
+  pad has start and end (drag them on the waveform), level, pan, pitch,
+  gate, reverse, mute and a choke group. Program up to four patterns (A–D)
+  of 8, 16 or 32 steps with tempo, swing and per-step velocity (right-click
+  a step), or arm Record and play the pads while the pattern runs. A
+  metronome clicks on the beat. Undo and redo cover every edit. Save it as
+  a `.tunek` project, export the pattern as a WAV, or bounce it onto a pad
+  to resample it, or chop any pad's sample at its hits onto the empty pads.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
-  or chopped at its hits from the playhead. Separation runs on this Mac in a
+  or chopped at its hits from the playhead. It finds the song's tempo and key
+  (with its Camelot code) and can set the Sampler to that tempo. Separation runs on this Mac in a
   separate worker process, with Demucs. Its weights are research-only, so a
   model we may ship replaces it before release (see `docs/PLAN.md` section 6).
 
@@ -32,7 +38,7 @@ Keys: <kbd>Space</kbd> plays and stops, <kbd>1</kbd>–<kbd>4</kbd>,
 <kbd>Q</kbd>–<kbd>R</kbd>, <kbd>A</kbd>–<kbd>F</kbd> and <kbd>Z</kbd>–<kbd>V</kbd>
 play the pads, <kbd>/</kbd> searches the Library, <kbd>⌘S</kbd>,
 <kbd>⌘O</kbd>, <kbd>⌘N</kbd> and <kbd>⌘E</kbd> save, open, start a new
-project and export.
+project and export; <kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd> undo and redo.
 
 ## Build and run
 

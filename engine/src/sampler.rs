@@ -7,7 +7,7 @@
 //! triggers from the UI) is an atomic in [`SamplerShared`]. The sequencer
 //! counts frames on the audio thread, so steps land on the sample.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
 use crate::Track;
 
@@ -30,6 +30,25 @@ const NO_STEP: u32 = u32::MAX;
 const GATE: u32 = 1;
 const REVERSE: u32 = 2;
 const MUTE: u32 = 4;
+/// The choke group lives in bits 8..12 of the flags word.
+const CHOKE_SHIFT: u32 = 8;
+const CHOKE_MASK: u32 = 0xF;
+/// Choke groups a pad can join, 1..=8. 0 is none.
+const CHOKE_GROUPS: u8 = 8;
+
+/// A step's velocity is stored as 0..=255; this is full velocity.
+const VEL_MAX: u8 = 255;
+
+/// The metronome's click: a decaying sine on each beat.
+const CLICK_SECONDS: f64 = 0.030;
+const CLICK_FADE_IN_SECONDS: f64 = 0.001;
+const CLICK_DECAY_SECONDS: f64 = 0.005;
+const CLICK_DOWNBEAT_HZ: f32 = 1_600.0;
+const CLICK_BEAT_HZ: f32 = 1_000.0;
+/// Peak of about -12 dBFS once the fade-in and decay are counted.
+const CLICK_GAIN: f32 = 0.3;
+/// Steps (sixteenths) per beat.
+const STEPS_PER_BEAT: usize = 4;
 
 /// How one pad plays its sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -48,11 +67,14 @@ pub struct PadParams {
     pub reverse: bool,
     /// The sequencer skips a muted pad. Playing it by hand still sounds.
     pub mute: bool,
+    /// Choke group, 0 (none) or 1..=8. Starting a voice on a pad releases the
+    /// voices of the other pads in its group (closed hi-hat cutting open).
+    pub choke: u8,
 }
 
 impl Default for PadParams {
     fn default() -> Self {
-        Self { gain: 1.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false }
+        Self { gain: 1.0, pan: 0.0, pitch: 0.0, start: 0.0, end: 1.0, gate: false, reverse: false, mute: false, choke: 0 }
     }
 }
 
@@ -107,6 +129,7 @@ impl PadCtl {
             gate: flags & GATE != 0,
             reverse: flags & REVERSE != 0,
             mute: flags & MUTE != 0,
+            choke: ((flags >> CHOKE_SHIFT) & CHOKE_MASK) as u8,
         }
     }
 }
@@ -122,6 +145,12 @@ pub struct SamplerShared {
     playing: AtomicBool,
     /// The step that played last, or NO_STEP when stopped. Written by the audio thread.
     step: AtomicU32,
+    /// Velocity of each pad's steps, 0..=255 for 0..1. Starts at full.
+    velocities: [[AtomicU8; MAX_STEPS]; PADS],
+    metronome: AtomicBool,
+    recording: AtomicBool,
+    /// Bumped by the audio thread for each hit it writes into a pattern.
+    recorded: AtomicU32,
 }
 
 impl Default for SamplerShared {
@@ -133,6 +162,10 @@ impl Default for SamplerShared {
             steps: AtomicU32::new(16),
             playing: AtomicBool::new(false),
             step: AtomicU32::new(NO_STEP),
+            velocities: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU8::new(VEL_MAX))),
+            metronome: AtomicBool::new(false),
+            recording: AtomicBool::new(false),
+            recorded: AtomicU32::new(0),
         }
     }
 }
@@ -148,7 +181,8 @@ impl SamplerShared {
         c.pitch.store(p.pitch.clamp(-24.0, 24.0).to_bits(), Ordering::Relaxed);
         c.start.store(start.to_bits(), Ordering::Relaxed);
         c.end.store(end.to_bits(), Ordering::Relaxed);
-        let flags = (p.gate as u32 * GATE) | (p.reverse as u32 * REVERSE) | (p.mute as u32 * MUTE);
+        let flags = (p.gate as u32 * GATE) | (p.reverse as u32 * REVERSE) | (p.mute as u32 * MUTE)
+            | (u32::from(p.choke.min(CHOKE_GROUPS)) << CHOKE_SHIFT);
         c.flags.store(flags, Ordering::Relaxed);
     }
 
@@ -165,6 +199,45 @@ impl SamplerShared {
 
     pub fn pattern(&self, pad: usize) -> u64 {
         if pad < PADS { self.pads[pad].pattern.load(Ordering::Relaxed) } else { 0 }
+    }
+
+    /// How hard a pad plays on a step, 0..1 (clamped). Ignores a bad index.
+    pub fn set_velocity(&self, pad: usize, step: usize, v: f32) {
+        if let Some(a) = self.velocities.get(pad).and_then(|p| p.get(step)) {
+            let v = if v.is_nan() { 1.0 } else { v.clamp(0.0, 1.0) };
+            a.store((v * VEL_MAX as f32).round() as u8, Ordering::Relaxed);
+        }
+    }
+
+    /// A step's velocity, 0..1. Every step starts at 1, and a bad index reads 1.
+    pub fn velocity(&self, pad: usize, step: usize) -> f32 {
+        self.velocities
+            .get(pad)
+            .and_then(|p| p.get(step))
+            .map_or(1.0, |a| a.load(Ordering::Relaxed) as f32 / VEL_MAX as f32)
+    }
+
+    /// Turns the metronome on or off. While the pattern plays it clicks on every beat.
+    pub fn set_metronome(&self, on: bool) {
+        self.metronome.store(on, Ordering::Relaxed);
+    }
+
+    pub fn metronome(&self) -> bool {
+        self.metronome.load(Ordering::Relaxed)
+    }
+
+    /// While recording and playing, hits on pads are written into the pattern.
+    pub fn set_recording(&self, on: bool) {
+        self.recording.store(on, Ordering::Relaxed);
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::Relaxed)
+    }
+
+    /// How many hits have been written into the pattern. Re-read the patterns when it changes.
+    pub fn recorded(&self) -> u32 {
+        self.recorded.load(Ordering::Acquire)
     }
 
     /// Plays a slot now, as if its pad were pressed. Pair with [`release`](Self::release).
@@ -323,7 +396,22 @@ pub struct Sampler {
     clock: u64,
     was_playing: bool,
     next_step: usize,
+    /// Frames left in the step that fired last. At a block boundary this says
+    /// where the sequencer is, so a recorded hit can be quantized.
     countdown: f64,
+    /// A hit recorded onto `skip_step` was already played by hand: the
+    /// sequencer leaves these pads (bit per pad) out of that step, once.
+    skip_step: usize,
+    skip_pads: u32,
+    /// The metronome click: frames left (0 = silent), phase in cycles, and so on.
+    click_left: u32,
+    click_phase: f32,
+    click_inc: f32,
+    click_env: f32,
+    click_fade: f32,
+    click_len: u32,
+    click_decay: f32,
+    click_fade_step: f32,
 }
 
 /// The control side's ends of the sampler's two queues.
@@ -378,6 +466,16 @@ impl Sampler {
             was_playing: false,
             next_step: 0,
             countdown: 0.0,
+            skip_step: 0,
+            skip_pads: 0,
+            click_left: 0,
+            click_phase: 0.0,
+            click_inc: 0.0,
+            click_env: 0.0,
+            click_fade: 0.0,
+            click_len: (rate * CLICK_SECONDS) as u32,
+            click_decay: (-1.0 / (rate * CLICK_DECAY_SECONDS)).exp() as f32,
+            click_fade_step: (1.0 / (rate * CLICK_FADE_IN_SECONDS)).min(1.0) as f32,
         }
     }
 
@@ -393,6 +491,23 @@ impl Sampler {
     /// Real-time safe: no allocation, locks, logging or I/O.
     pub fn render(&mut self, shared: &SamplerShared, out: &mut [f32], channels: usize) {
         self.take_samples();
+
+        let playing = shared.playing.load(Ordering::Acquire);
+        if playing && !self.was_playing {
+            self.next_step = 0;
+            self.countdown = 0.0;
+        } else if !playing && self.was_playing {
+            shared.step.store(NO_STEP, Ordering::Relaxed);
+            self.click_left = 0;
+            self.skip_pads = 0;
+        }
+        self.was_playing = playing;
+        let steps = shared.steps().max(1);
+        if self.next_step >= steps {
+            self.next_step = 0;
+        }
+        let recording = playing && shared.recording.load(Ordering::Relaxed);
+
         for slot in 0..SLOTS {
             let c = &shared.pads[slot];
             let cuts = c.cuts.load(Ordering::Acquire);
@@ -403,26 +518,16 @@ impl Sampler {
             let hits = c.hits.load(Ordering::Acquire);
             if hits != self.hits[slot] {
                 self.hits[slot] = hits;
+                if recording && slot < PADS {
+                    self.record_hit(shared, slot, steps);
+                }
                 let hold = if c.held.load(Ordering::Acquire) { Hold::Held } else { Hold::Frames(self.rate * 0.05) };
-                self.start(shared, slot, hold);
+                self.start(shared, slot, hold, 1.0);
             }
         }
 
-        let playing = shared.playing.load(Ordering::Acquire);
-        if playing && !self.was_playing {
-            self.next_step = 0;
-            self.countdown = 0.0;
-        } else if !playing && self.was_playing {
-            shared.step.store(NO_STEP, Ordering::Relaxed);
-        }
-        self.was_playing = playing;
-
         let channels = channels.max(1);
         let frames = out.len() / channels;
-        let steps = shared.steps().max(1);
-        if self.next_step >= steps {
-            self.next_step = 0;
-        }
         for frame in 0..frames {
             if playing {
                 if self.countdown <= 0.0 {
@@ -431,12 +536,13 @@ impl Sampler {
                 self.countdown -= 1.0;
             }
             let (left, right) = self.mix_frame(shared);
+            let click = self.click_frame();
             let o = &mut out[frame * channels..(frame + 1) * channels];
             if channels == 1 {
-                o[0] += 0.5 * (left + right);
+                o[0] += 0.5 * (left + right) + click;
             } else {
-                o[0] += left;
-                o[1] += right;
+                o[0] += left + click;
+                o[1] += right + click;
             }
         }
     }
@@ -470,20 +576,80 @@ impl Sampler {
     fn fire_step(&mut self, shared: &SamplerShared, steps: usize) {
         let step = self.next_step;
         let length = shared.step_frames(step, self.rate);
+        // Pads whose hit was recorded onto this step a moment ago already sounded.
+        let skip = if step == self.skip_step { self.skip_pads } else { 0 };
+        self.skip_pads = 0;
         for pad in 0..PADS {
             let c = &shared.pads[pad];
             let on = c.pattern.load(Ordering::Relaxed) & (1u64 << step) != 0;
-            if on && c.flags.load(Ordering::Relaxed) & MUTE == 0 {
-                self.start(shared, pad, Hold::Frames(length));
+            if on && c.flags.load(Ordering::Relaxed) & MUTE == 0 && skip & (1 << pad) == 0 {
+                let vel = shared.velocities[pad][step].load(Ordering::Relaxed) as f32 / VEL_MAX as f32;
+                self.start(shared, pad, Hold::Frames(length), vel);
             }
+        }
+        if step.is_multiple_of(STEPS_PER_BEAT) && shared.metronome.load(Ordering::Relaxed) {
+            self.start_click(step == 0);
         }
         shared.step.store(step as u32, Ordering::Relaxed);
         self.countdown += length;
         self.next_step = (step + 1) % steps;
     }
 
+    /// Writes a hand-played hit on `pad` into the nearest step. Where the
+    /// sequencer is comes from `countdown`, the frames left in the step that
+    /// fired last: in its first half the hit goes on that step, in its second
+    /// half on the next one, which the sequencer then skips for this pad once.
+    fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize) {
+        let current = (self.next_step + steps - 1) % steps;
+        let length = shared.step_frames(current, self.rate);
+        let step = if self.countdown > length * 0.5 {
+            current
+        } else {
+            self.skip_step = self.next_step;
+            self.skip_pads |= 1 << pad;
+            self.next_step
+        };
+        shared.pads[pad].pattern.fetch_or(1u64 << step, Ordering::Relaxed);
+        shared.recorded.fetch_add(1, Ordering::Release);
+    }
+
+    fn start_click(&mut self, downbeat: bool) {
+        let hz = if downbeat { CLICK_DOWNBEAT_HZ } else { CLICK_BEAT_HZ };
+        self.click_inc = hz / self.rate as f32;
+        self.click_phase = 0.0;
+        self.click_env = 1.0;
+        self.click_fade = 0.0;
+        self.click_left = self.click_len;
+    }
+
+    /// One frame of the metronome click, or 0 when none is sounding.
+    fn click_frame(&mut self) -> f32 {
+        if self.click_left == 0 {
+            return 0.0;
+        }
+        self.click_left -= 1;
+        self.click_phase += self.click_inc;
+        if self.click_phase >= 1.0 {
+            self.click_phase -= 1.0;
+        }
+        self.click_env *= self.click_decay;
+        self.click_fade = (self.click_fade + self.click_fade_step).min(1.0);
+        CLICK_GAIN * self.click_env * self.click_fade * (self.click_phase * std::f32::consts::TAU).sin()
+    }
+
+    /// Releases the voices of every other pad in choke group `group`.
+    fn choke(&mut self, shared: &SamplerShared, slot: usize, group: u8) {
+        for v in self.voices.iter_mut().filter(|v| v.active && !v.releasing && v.slot != slot && v.slot < PADS) {
+            let flags = shared.pads[v.slot].flags.load(Ordering::Relaxed);
+            if ((flags >> CHOKE_SHIFT) & CHOKE_MASK) as u8 == group {
+                v.releasing = true;
+            }
+        }
+    }
+
     /// Starts a voice on `slot`, cutting what the slot was already playing.
-    fn start(&mut self, shared: &SamplerShared, slot: usize, hold: Hold) {
+    /// `vel` (0..1) scales its gain.
+    fn start(&mut self, shared: &SamplerShared, slot: usize, hold: Hold, vel: f32) {
         self.release_slot(slot);
         let Some(sample) = self.samples[slot].as_ref() else { return };
         let len = sample.first().map_or(0, Vec::len);
@@ -499,6 +665,9 @@ impl Sampler {
         let speed = 2f64.powf(p.pitch as f64 / 12.0);
         // Only gate-mode pads stop early; everything else plays to its end point.
         let hold = if p.gate && slot != PREVIEW { hold } else { Hold::Free };
+        if slot < PADS && p.choke > 0 {
+            self.choke(shared, slot, p.choke);
+        }
         let i = match self.voices.iter().position(|v| !v.active) {
             Some(i) => i,
             None => (0..VOICES).min_by_key(|&i| self.voices[i].age).unwrap_or(0),
@@ -513,8 +682,8 @@ impl Sampler {
             hi,
             // A very short sample fades over its last quarter instead.
             fade: self.edge.min((hi - lo) / speed / 4.0).max(1.0),
-            left: p.gain * (1.0 - p.pan).min(1.0),
-            right: p.gain * (1.0 + p.pan).min(1.0),
+            left: vel * p.gain * (1.0 - p.pan).min(1.0),
+            right: vel * p.gain * (1.0 + p.pan).min(1.0),
             env: 0.0,
             releasing: false,
             hold,
@@ -589,6 +758,9 @@ pub fn render_pattern(samples: &[Option<Track>], shared: &SamplerShared, rate: u
     for pad in 0..PADS {
         local.set_pad(pad, &shared.pad(pad));
         local.set_pattern(pad, shared.pattern(pad));
+        for step in 0..MAX_STEPS {
+            local.set_velocity(pad, step, shared.velocity(pad, step));
+        }
     }
     local.set_tempo(shared.tempo());
     local.set_swing(shared.swing());
@@ -789,5 +961,250 @@ mod tests {
         shared.set_playing(false);
         run(&mut s, &shared, 10);
         assert_eq!(shared.current_step(), None);
+    }
+
+    #[test]
+    fn velocity_scales_a_step() {
+        let shared = SamplerShared::default();
+        assert_eq!(shared.velocity(0, 0), 1.0);
+        assert_eq!(shared.velocity(PADS, 0), 1.0, "a bad index reads full");
+        shared.set_velocity(0, 1, 0.5);
+        shared.set_velocity(0, 2, 7.0);
+        shared.set_velocity(0, 3, -1.0);
+        shared.set_velocity(PADS, 0, 0.1); // ignored
+        assert!((shared.velocity(0, 1) - 0.5).abs() < 0.003);
+        assert_eq!(shared.velocity(0, 2), 1.0, "clamped");
+        assert_eq!(shared.velocity(0, 3), 0.0, "clamped");
+
+        shared.set_velocity(0, 3, 1.0);
+        shared.set_steps(4);
+        shared.set_tempo(120.0);
+        shared.set_pattern(0, 0b11); // steps 0 and 1, 6,000 frames each
+        let out = render_pattern(&[Some(dc(20_000, 0.4))], &shared, RATE, 1);
+        assert!((out[0][3_000] - 0.4).abs() < 1e-3, "step 0 at full: {}", out[0][3_000]);
+        assert!((out[0][9_000] - 0.2).abs() < 2e-3, "step 1 at half: {}", out[0][9_000]);
+
+        // A hit from the UI plays at full.
+        let live = SamplerShared::default();
+        live.set_velocity(0, 0, 0.1);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(20_000, 0.4)));
+        live.trigger(0);
+        assert!((run(&mut s, &live, 1_000)[1_998] - 0.4).abs() < 1e-3);
+    }
+
+    #[test]
+    fn choke_releases_the_other_pads_in_the_group() {
+        let shared = SamplerShared::default();
+        let (mut s, mut link) = sampler(RATE);
+        for (pad, level, choke) in [(0, 0.01, 1), (1, 0.02, 1), (2, 0.04, 2), (3, 0.08, 0), (4, 0.16, 0)] {
+            shared.set_pad(pad, &PadParams { choke, ..Default::default() });
+            link.send(pad, Some(dc(48_000, level))).unwrap();
+        }
+        assert_eq!(shared.pad(1).choke, 1);
+        for pad in [0, 2, 3] {
+            shared.trigger(pad);
+        }
+        let out = run(&mut s, &shared, 1_000);
+        assert!((out[1998] - 0.13).abs() < 1e-4, "{}", out[1998]);
+
+        shared.trigger(1); // chokes pad 0 only
+        let out = run(&mut s, &shared, 1_000);
+        assert!((out[1998] - 0.14).abs() < 1e-4, "pad 0 gone, 2 and 3 still sound: {}", out[1998]);
+        let drop = out.chunks(2).map(|f| f[0]).fold(f32::MAX, f32::min);
+        assert!(drop > 0.12, "released with a fade, not a hole: {drop}");
+
+        shared.trigger(4); // group 0 chokes nothing
+        let out = run(&mut s, &shared, 1_000);
+        assert!((out[1998] - 0.30).abs() < 1e-4, "{}", out[1998]);
+    }
+
+    #[test]
+    fn choke_from_the_sequencer() {
+        let shared = SamplerShared::default();
+        shared.set_steps(2);
+        shared.set_tempo(120.0);
+        shared.set_pattern(0, 0b01);
+        shared.set_pattern(1, 0b10);
+        let samples = [Some(dc(20_000, 0.1)), Some(dc(20_000, 0.2))];
+        let at = |out: &[Vec<f32>], i: usize| out[0][i];
+
+        let out = render_pattern(&samples, &shared, RATE, 1);
+        assert!((at(&out, 9_000) - 0.3).abs() < 1e-4, "both ring without a group");
+
+        let grouped = PadParams { choke: 3, ..Default::default() };
+        shared.set_pad(0, &grouped);
+        shared.set_pad(1, &grouped);
+        let out = render_pattern(&samples, &shared, RATE, 1);
+        assert!((at(&out, 3_000) - 0.1).abs() < 1e-4);
+        assert!((at(&out, 9_000) - 0.2).abs() < 1e-4, "pad 0 choked: {}", at(&out, 9_000));
+    }
+
+    /// Frames where a click begins: a nonzero sample after a stretch of silence.
+    fn click_starts(left: &[f32]) -> Vec<usize> {
+        let mut starts = Vec::new();
+        let mut last = None::<usize>;
+        for (i, &x) in left.iter().enumerate() {
+            if x != 0.0 {
+                if last.is_none_or(|l| i - l > 200) {
+                    starts.push(i);
+                }
+                last = Some(i);
+            }
+        }
+        starts
+    }
+
+    fn crossings(x: &[f32]) -> usize {
+        x.windows(2).filter(|w| (w[0] < 0.0) != (w[1] < 0.0)).count()
+    }
+
+    #[test]
+    fn the_metronome_clicks_on_every_beat() {
+        let shared = SamplerShared::default();
+        shared.set_tempo(120.0); // a sixteenth is 6,000 frames, a beat 24,000
+        shared.set_steps(16);
+        shared.set_metronome(true);
+        assert!(shared.metronome());
+        shared.set_playing(true);
+        let mut s = Sampler::offline(RATE);
+        let mut left = Vec::new();
+        for _ in 0..4 {
+            left.extend(run(&mut s, &shared, 24_000).chunks(2).map(|f| f[0]));
+        }
+        assert_eq!(click_starts(&left), vec![0, 24_000, 48_000, 72_000], "on the step's frame, no other");
+        assert_ne!(left[0], 0.0, "sounding on the very first frame");
+
+        let peak = left.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+        assert!((0.2..=0.26).contains(&peak), "about -12 dBFS: {peak}");
+        let jump = left[..1_500].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f32::max);
+        assert!(jump < 0.06, "no click from the attack: {jump}");
+        assert!(left[1_450..24_000].iter().all(|&x| x == 0.0), "about 30 ms long");
+
+        let down = crossings(&left[..1_440]);
+        let beat = crossings(&left[24_000..25_440]);
+        assert!(down > beat * 3 / 2, "higher on step 0: {down} vs {beat} crossings");
+    }
+
+    #[test]
+    fn the_metronome_marks_the_top_of_every_pass() {
+        let shared = SamplerShared::default();
+        shared.set_tempo(120.0);
+        shared.set_steps(8); // two beats a pass
+        shared.set_metronome(true);
+        shared.set_playing(true);
+        let mut s = Sampler::offline(RATE);
+        let left: Vec<f32> = run(&mut s, &shared, 8 * 6_000 * 2).chunks(2).map(|f| f[0]).collect();
+        assert_eq!(click_starts(&left), vec![0, 24_000, 48_000, 72_000]);
+        assert!(crossings(&left[48_000..49_440]) > crossings(&left[24_000..25_440]) * 3 / 2);
+    }
+
+    #[test]
+    fn the_metronome_is_silent_when_off_or_stopped() {
+        let mut s = Sampler::offline(RATE);
+        let shared = SamplerShared::default();
+        assert!(!shared.metronome(), "off by default");
+        shared.set_playing(true);
+        assert!(run(&mut s, &shared, 30_000).iter().all(|&x| x == 0.0), "off");
+
+        let shared = SamplerShared::default();
+        let mut s = Sampler::offline(RATE);
+        shared.set_metronome(true);
+        assert!(run(&mut s, &shared, 30_000).iter().all(|&x| x == 0.0), "stopped");
+
+        // An export stays clean even when the live metronome is on.
+        shared.set_steps(4);
+        let out = render_pattern(&[], &shared, RATE, 1);
+        assert!(out[0].iter().all(|&x| x == 0.0), "render_pattern leaves it off");
+    }
+
+    /// A sampler playing at 120 BPM, 16 steps (6,000 frames each), pad 0 loaded.
+    fn recording_rig() -> (Sampler, SamplerShared) {
+        let shared = SamplerShared::default();
+        shared.set_tempo(120.0);
+        shared.set_steps(16);
+        shared.set_playing(true);
+        shared.set_recording(true);
+        assert!(shared.is_recording());
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(40_000, 0.1)));
+        (s, shared)
+    }
+
+    #[test]
+    fn a_hit_just_after_a_step_lands_on_that_step() {
+        let (mut s, shared) = recording_rig();
+        run(&mut s, &shared, 12_500); // steps 0, 1, 2 have fired; 500 frames into step 2
+        assert_eq!(shared.current_step(), Some(2));
+        shared.trigger(0);
+        let out = run(&mut s, &shared, 100);
+        assert!(out[0] != 0.0 || out[198] > 0.0, "the hit still sounds at once");
+        assert_eq!(shared.pattern(0), 1 << 2);
+        assert_eq!(shared.recorded(), 1);
+        assert_eq!(shared.velocity(0, 2), 1.0);
+        assert_eq!(shared.played(0), 1);
+    }
+
+    #[test]
+    fn a_hit_just_before_a_step_lands_on_the_next_and_does_not_double() {
+        let (mut s, shared) = recording_rig();
+        run(&mut s, &shared, 12_000 + 4_500); // 4,500 frames into step 2
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.pattern(0), 1 << 3, "the next step");
+        assert_eq!(shared.recorded(), 1);
+        assert_eq!(shared.played(0), 1);
+
+        run(&mut s, &shared, 2_000); // step 3 fires at 18,000
+        assert_eq!(shared.current_step(), Some(3));
+        assert_eq!(shared.played(0), 1, "the sequencer does not play it again this pass");
+
+        run(&mut s, &shared, 16 * 6_000 - 100); // on to 114,500: step 3 of the next pass fires at 114,000
+        assert_eq!(shared.current_step(), Some(3));
+        assert_eq!(shared.played(0), 2, "on the next loop it plays");
+    }
+
+    #[test]
+    fn recording_only_when_recording_and_playing() {
+        let (mut s, shared) = recording_rig();
+        shared.set_recording(false);
+        run(&mut s, &shared, 12_500);
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.pattern(0), 0);
+        assert_eq!(shared.recorded(), 0);
+        assert_eq!(shared.played(0), 1, "still sounds");
+
+        // Recording while stopped changes nothing either.
+        let shared = SamplerShared::default();
+        shared.set_recording(true);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(dc(1_000, 0.1)));
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.pattern(0), 0);
+        assert_eq!(shared.recorded(), 0);
+        assert_eq!(shared.played(0), 1);
+    }
+
+    #[test]
+    fn the_preview_slot_is_not_recorded() {
+        let (mut s, shared) = recording_rig();
+        s.set_sample(PREVIEW, Some(dc(1_000, 0.1)));
+        run(&mut s, &shared, 12_500);
+        shared.trigger(PREVIEW);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.recorded(), 0);
+        assert!((0..PADS).all(|p| shared.pattern(p) == 0));
+    }
+
+    #[test]
+    fn a_hit_in_the_last_step_wraps_to_step_zero() {
+        let (mut s, shared) = recording_rig();
+        shared.set_steps(4);
+        run(&mut s, &shared, 3 * 6_000 + 4_500); // late in step 3
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.pattern(0), 1, "wrapped to step 0");
     }
 }
