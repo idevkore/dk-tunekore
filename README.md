@@ -17,16 +17,31 @@ macOS, and compiles and links them on Windows and Linux, for every push to
 
 Status: Phase 2, the Sampler (the MVP).
 
-- **Sampler** (main window): pick a sample folder in the Library, click or
-  arrow through samples to hear them, and drag them onto 16 pads (or select
-  a pad and press Enter, or use the Add a sound row under the steps). Each
-  pad has start and end (drag them on the waveform), level, pan, pitch,
-  gate, reverse, mute and a choke group. Program up to four patterns (A–D)
-  of 8, 16 or 32 steps with tempo, swing and per-step velocity (right-click
-  a step), or arm Record and play the pads while the pattern runs. A
-  metronome clicks on the beat. Undo and redo cover every edit. Save it as
-  a `.tunek` project, export the pattern as a WAV, or bounce it onto a pad
-  to resample it, or chop any pad's sample at its hits onto the empty pads.
+- **Sampler** (main window):
+  - **Library:** pick a sample folder, click or arrow through samples to hear
+    them, and drag them onto 16 pads (or select a pad and press Enter, or use
+    the Add a sound row under the steps).
+  - **Pads:** start and end (drag them on the waveform), level, pan, pitch,
+    gate, reverse, mute and a choke group; on the Shape tab, an amp envelope
+    (attack, decay, sustain, release) and a low, high or band-pass filter.
+    Chop any pad's sample at its hits onto the empty pads.
+  - **Steps:** four patterns (A–D) of 8, 16 or 32 steps with tempo and swing.
+    Right-click a step for its velocity, chance and repeats (ratchets). Arm
+    Record and play pads (keys or a MIDI controller) while it runs; a
+    metronome clicks on the beat.
+  - **Song:** chain patterns into a song and play it through, looped or once.
+  - **Sampling:** select a pad and press Sample from input to record from a
+    microphone or audio interface (pick it in Audio settings). The take is
+    trimmed and saved in `Music/tuneKore/Samples/Recordings`; macOS asks for
+    microphone access the first time.
+  - **MIDI:** plug in a controller and notes C1 to D♯2 (36 to 51) play pads 1
+    to 16 at the velocity you play; it connects by itself.
+  - **Output:** a master level, and a limiter that keeps the output under
+    -0.3 dBFS.
+  - **Projects:** undo and redo cover every edit; save as `.tunek`, collect
+    the samples into a folder beside the project, and autosave recovers
+    unsaved work after a crash. Export the pattern or the whole song as a WAV
+    or as stems (one WAV per pad), or bounce it onto a pad to resample it.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
   or chopped at its hits from the playhead. It finds the song's tempo and key

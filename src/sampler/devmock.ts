@@ -15,14 +15,18 @@ const LIB = [
 export function installMocks() {
   const pad = (index: number): PadView => ({
     index, name: null, path: null, missing: false, seconds: 0, channels: 0, rate: 0, peaks: [],
-    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0 },
+    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0, attack: 0, decay: 0, sustain: 1, release: 0.004, filter: 0, cutoff: 20000, resonance: 0 },
     steps: Array(16).fill(false),
     velocity: Array(16).fill(1),
+    chance: Array(16).fill(1),
+    ratchet: Array(16).fill(1),
   });
-  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false };
+  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false, chain: [], songMode: false, songLoop: true };
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
+  let sampling: { pad: number; started: number } | null = null;
+  let sampler: ReturnType<typeof setInterval> | undefined;
   const calls: unknown[] = [];
   (window as unknown as { __mockCalls: unknown[] }).__mockCalls = calls;
   const publish = () => {
@@ -34,6 +38,8 @@ export function installMocks() {
     v.pads.forEach((p) => {
       p.steps = Array.from({ length: v.steps }, (_, i) => p.steps[i] ?? false);
       p.velocity = Array.from({ length: v.steps }, (_, i) => p.velocity[i] ?? 1);
+      p.chance = Array.from({ length: v.steps }, (_, i) => p.chance[i] ?? 1);
+      p.ratchet = Array.from({ length: v.steps }, (_, i) => p.ratchet[i] ?? 1);
     });
 
   setInterval(() => {
@@ -104,6 +110,31 @@ export function installMocks() {
           return publish();
         case "list_outputs":
           return [{ id: "coreaudio:built-in", name: "MacBook Pro Speakers", channels: 2, sampleRates: [44100, 48000], preferredRate: 48000, isDefault: true }];
+        case "midi_inputs":
+          return [{ name: "Mock Pad Controller", connected: true }];
+        case "input_devices":
+          return [{ id: "coreaudio:mock-mic", name: "MacBook Pro Microphone", channels: 1, preferredRate: 48000, isDefault: true }];
+        case "sampling_start": {
+          sampling = { pad: a.pad as number, started: Date.now() };
+          sampler = setInterval(() => {
+            const seconds = (Date.now() - sampling!.started) / 1000;
+            void emit("input:level", { peak: 0.5 + 0.4 * Math.sin(seconds * 6), seconds, full: false });
+          }, 33);
+          return null;
+        }
+        case "sampling_cancel":
+          clearInterval(sampler);
+          sampling = null;
+          return null;
+        case "sampling_stop": {
+          clearInterval(sampler);
+          const p = v.pads[sampling!.pad];
+          const seconds = Math.max(0.2, (Date.now() - sampling!.started) / 1000);
+          sampling = null;
+          Object.assign(p, pad(p.index), { name: "Recording 1", path: "/Users/test/Music/tuneKore/Samples/Recordings/Recording 1.wav", seconds, channels: 1, rate: 48000, peaks: peaks(p.index + 2), steps: p.steps });
+          publish();
+          return { pad: p.index, path: p.path, seconds };
+        }
         case "engine_version":
           return "0.1.0";
         case "plugin:dialog|open":
@@ -119,6 +150,13 @@ export function installMocks() {
           publish();
           return { pad: free.index, path: free.path };
         }
+        case "sampler_step_extras":
+          v.pads[a.pad as number].chance[a.step as number] = a.chance as number;
+          v.pads[a.pad as number].ratchet[a.step as number] = a.ratchet as number;
+          return publish();
+        case "sampler_song":
+          Object.assign(v, { chain: a.chain, songMode: a.songMode, songLoop: a.songLoop });
+          return publish();
         case "sampler_velocity":
           v.pads[a.pad as number].velocity[a.step as number] = a.velocity as number;
           return publish();
@@ -136,6 +174,12 @@ export function installMocks() {
           return publish();
         case "sampler_chop":
           return { pads: [1, 2, 3, 4], folder: "/Users/test/Music/tuneKore/Samples/Chops/Kick chop 1" };
+        case "sampler_export_stems":
+          return [{ path: `${a.dir}/Beat 1 - 01 Kick.wav`, seconds: 8, format: "pcm24" }];
+        case "project_collect":
+          return publish();
+        case "autosave_check":
+          return null;
         case "sampler_undo":
         case "sampler_redo":
           return publish();

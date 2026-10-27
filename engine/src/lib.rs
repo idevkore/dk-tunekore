@@ -8,13 +8,20 @@
 //! any thread. The audio callback runs on the device's thread: no allocation,
 //! locks, logging or I/O there.
 
+mod limiter;
+mod input;
 mod player;
 mod resample;
 mod sampler;
 mod tone;
 
+pub use limiter::{Limiter, CEILING};
+pub use input::{list_inputs, InputDevice, InputMeter, Recorder, Take, MAX_SECONDS};
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
-pub use sampler::{render_pattern, PadParams, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
+pub use sampler::{
+    render_pattern, render_song, PadParams, Sampler, SamplerShared, BANKS, CHAIN_MAX, FILTER_BAND_PASS, FILTER_HIGH_PASS, FILTER_LOW_PASS,
+    FILTER_OFF, MAX_STEPS, PADS, PREVIEW, SLOTS,
+};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 
@@ -43,15 +50,42 @@ pub struct OutputDevice {
     pub is_default: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Shared {
     tone: ToneControl,
     player: PlayerShared,
     sampler: SamplerShared,
     peak: AtomicU32, // f32 bits, max since the last take
+    /// Master level, linear, f32 bits.
+    master: AtomicU32,
+    /// Lowest limiter gain since the last take, f32 bits (1.0 = not limiting).
+    limiting: AtomicU32,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            tone: ToneControl::default(),
+            player: PlayerShared::default(),
+            sampler: SamplerShared::default(),
+            peak: AtomicU32::new(0),
+            master: AtomicU32::new(1.0f32.to_bits()),
+            limiting: AtomicU32::new(1.0f32.to_bits()),
+        }
+    }
 }
 
 impl Shared {
+    fn lower_limiting(&self, g: f32) {
+        let mut seen = self.limiting.load(Ordering::Relaxed);
+        while g < f32::from_bits(seen) {
+            match self.limiting.compare_exchange_weak(seen, g.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(s) => seen = s,
+            }
+        }
+    }
+
     fn raise_peak(&self, v: f32) {
         let mut seen = self.peak.load(Ordering::Relaxed);
         while v > f32::from_bits(seen) {
@@ -276,6 +310,7 @@ impl Engine {
         let mut tone = Tone::new(rate as f64);
         let (mut voice, link) = player::voice(rate);
         let (mut pads, sampler_link) = sampler::sampler(rate);
+        let mut limiter = Limiter::new(rate, channels);
         let mut scratch = vec![0.0f32; BLOCK_FRAMES * channels];
         shared.peak.store(0, Ordering::Relaxed);
         let stream = dev
@@ -289,6 +324,8 @@ impl Engine {
                         tone.render(&shared.tone, buf, channels);
                         voice.render(&shared.player, buf, channels);
                         pads.render(&shared.sampler, buf, channels);
+                        let master = f32::from_bits(shared.master.load(Ordering::Relaxed));
+                        shared.lower_limiting(limiter.process(buf, master));
                         for (o, &s) in block.iter_mut().zip(buf.iter()) {
                             peak = peak.max(s.abs());
                             *o = T::from_sample(s);
@@ -328,6 +365,15 @@ impl Engine {
         SamplerHandle(self.shared.clone())
     }
 
+    /// Sets the master level (linear, 0..2). Everything goes through the limiter after it.
+    pub fn set_master(&self, gain: f32) {
+        self.shared.master.store(gain.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn master(&self) -> f32 {
+        f32::from_bits(self.shared.master.load(Ordering::Relaxed))
+    }
+
     /// A handle that reads the output peak without the engine's lock.
     pub fn meter(&self) -> Meter {
         Meter(self.shared.clone())
@@ -364,6 +410,11 @@ impl Meter {
     /// Peak output level since the last call, 0..1.
     pub fn take_peak(&self) -> f32 {
         f32::from_bits(self.0.peak.swap(0, Ordering::Relaxed))
+    }
+
+    /// The lowest master-limiter gain since the last call: 1.0 when it isn't limiting.
+    pub fn take_limiting(&self) -> f32 {
+        f32::from_bits(self.0.limiting.swap(1.0f32.to_bits(), Ordering::Relaxed))
     }
 }
 

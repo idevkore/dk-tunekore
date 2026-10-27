@@ -18,6 +18,12 @@ export const startTone = (deviceId: string | null, frequency: number) =>
   invoke<void>("start_tone", { deviceId, frequency });
 export const stopTone = () => invoke<void>("stop_tone");
 
+export const setMaster = (db: number) => invoke<void>("set_master", { db });
+export const getMaster = () => invoke<number>("master");
+/** The master limiter's gain reduction in dB (negative) while it works. */
+export const onLimiter = (handler: (db: number) => void): Promise<UnlistenFn> =>
+  listen<number>("limiter", (e) => handler(e.payload));
+
 /** Peak output level, 0..1, about 30 times a second while sound is playing. */
 export const onMeter = (handler: (peak: number) => void): Promise<UnlistenFn> =>
   listen<number>("meter", (e) => handler(e.payload));

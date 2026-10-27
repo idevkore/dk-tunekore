@@ -4,9 +4,8 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, type PadView } from "./api";
-
-/** Right-click cycles a step through these levels. */
-const LEVELS = [1, 0.7, 0.4];
+import StepEditor from "./StepEditor";
+import SongStrip from "./SongStrip";
 
 interface Props {
   pads: PadView[];
@@ -29,6 +28,13 @@ interface Props {
   onPattern: (index: number) => void;
   onCopyPattern: (from: number, to: number) => void;
   onLength: (steps: number) => void;
+  onExtras: (pad: number, step: number, chance: number, ratchet: number) => void;
+  chain: number[];
+  songMode: boolean;
+  songLoop: boolean;
+  chainPosition: number | null;
+  tempo: number;
+  onSong: (chain: number[], songMode: boolean, songLoop: boolean) => void;
 }
 
 export default function Steps(props: Props) {
@@ -56,6 +62,7 @@ export default function Steps(props: Props) {
   // Painting: the value the first cell got, applied to every cell dragged over.
   const paint = useRef<boolean | null>(null);
   const [focus, setFocus] = useState<[number, number]>([0, 0]);
+  const [editing, setEditing] = useState<{ pad: number; step: number; x: number; y: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -97,14 +104,46 @@ export default function Steps(props: Props) {
           {STEP_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
-      <span className="dim small bank-hint">Right-click a step to make it softer</span>
+      <span className="dim small bank-hint">Right-click a step for velocity, chance and repeats</span>
     </div>
+  );
+
+  const song = (
+    <SongStrip
+      chain={props.chain}
+      songMode={props.songMode}
+      songLoop={props.songLoop}
+      position={props.chainPosition}
+      patternsUsed={props.patternsUsed}
+      passSeconds={(steps * 15) / props.tempo}
+      onChange={props.onSong}
+    />
+  );
+  const edited = editing && pads[editing.pad];
+  const editor = edited && editing && (
+    <StepEditor
+      key={`${editing.pad}-${editing.step}`}
+      x={editing.x}
+      y={editing.y}
+      label={`Pad ${editing.pad + 1}, step ${editing.step + 1}`}
+      velocity={edited.velocity[editing.step] ?? 1}
+      chance={edited.chance[editing.step] ?? 1}
+      ratchet={edited.ratchet[editing.step] ?? 1}
+      onVelocity={(v) => onVelocity(editing.pad, editing.step, v)}
+      onExtras={(c, r) => props.onExtras(editing.pad, editing.step, c, r)}
+      onClear={() => {
+        onStep(editing.pad, editing.step, false);
+        setEditing(null);
+      }}
+      onClose={() => setEditing(null)}
+    />
   );
 
   if (rows.length === 0) {
     return (
       <section className="steps empty-steps" aria-label="Steps">
         {bank}
+        {song}
         <strong>Steps</strong>
         <span>Each sound gets a row of steps here. Click steps to make a pattern, then press Space to play it.</span>
         {addRow}
@@ -124,6 +163,7 @@ export default function Steps(props: Props) {
   return (
     <section className="steps" aria-label="Steps">
       {bank}
+      {song}
       <div
         className="grid"
         role="grid"
@@ -170,22 +210,24 @@ export default function Steps(props: Props) {
             {Array.from({ length: steps }, (_, s) => {
               const on = p.steps[s] ?? false;
               const vel = p.velocity[s] ?? 1;
+              const chance = p.chance[s] ?? 1;
+              const ratchet = p.ratchet[s] ?? 1;
               return (
                 <button
                   key={s}
                   role="gridcell"
                   data-cell={`${r}-${s}`}
                   tabIndex={r === fr && s === fs ? 0 : -1}
-                  aria-label={`Pad ${p.index + 1}, step ${s + 1}${on && vel < 1 ? `, ${Math.round(vel * 100)}%` : ""}`}
+                  aria-label={`Pad ${p.index + 1}, step ${s + 1}${on && vel < 1 ? `, velocity ${Math.round(vel * 100)}%` : ""}${on && chance < 1 ? `, chance ${Math.round(chance * 100)}%` : ""}${on && ratchet > 1 ? `, ${ratchet} hits` : ""}`}
                   style={on ? ({ "--vel": vel } as React.CSSProperties) : undefined}
                   onContextMenu={(e) => {
                     e.preventDefault();
-                    if (!on) return onStep(p.index, s, true);
-                    const i = LEVELS.findIndex((l) => Math.abs(l - vel) < 0.05);
-                    onVelocity(p.index, s, LEVELS[(i + 1) % LEVELS.length]);
+                    if (!on) onStep(p.index, s, true);
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setEditing({ pad: p.index, step: s, x: r.left, y: r.bottom });
                   }}
                   aria-pressed={on}
-                  className={`cell${on ? " on" : ""}${s % 4 === 0 ? " beat" : ""}${Math.floor(s / 4) % 2 === 1 ? " alt" : ""}${current === s ? " now" : ""}`}
+                  className={`cell${on ? " on" : ""}${on && chance < 1 ? " maybe" : ""}${s % 4 === 0 ? " beat" : ""}${Math.floor(s / 4) % 2 === 1 ? " alt" : ""}${current === s ? " now" : ""}`}
                   onPointerDown={(e) => {
                     if (e.button !== 0) return;
                     e.preventDefault(); // painting shouldn't take focus from Space
@@ -215,13 +257,16 @@ export default function Steps(props: Props) {
                       onStep(p.index, s, !on);
                     }
                   }}
-                />
+                >
+                  {on && ratchet > 1 && <span className="ratchet" aria-hidden="true">{"•".repeat(ratchet)}</span>}
+                </button>
               );
             })}
           </div>
         ))}
       </div>
       {addRow}
+      {editor}
     </section>
   );
 }

@@ -6,7 +6,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
 import logo from "../brand/tunekore-logo-color.svg";
 import mark from "../brand/tunekore-mark.svg";
-import { onMeter } from "./engine";
+import { onLimiter, onMeter } from "./engine";
 import { openAnalyzer } from "./analyzer/api";
 import * as api from "./sampler/api";
 import { PAD_KEYS, subscribe, type LibraryItem, type PadSettings, type SamplerView, type Tick } from "./sampler/api";
@@ -15,6 +15,7 @@ import Pads from "./sampler/Pads";
 import Inspector from "./sampler/Inspector";
 import Steps from "./sampler/Steps";
 import AudioDialog from "./sampler/AudioDialog";
+import MidiDot from "./sampler/MidiDot";
 import ExportDialog from "./sampler/ExportDialog";
 
 type Drag =
@@ -40,9 +41,10 @@ const isAudio = (p: string) => api.AUDIO_EXTENSIONS.includes(p.split(".").pop()?
 
 export default function App() {
   const [view, setView] = useState<SamplerView | null>(null);
-  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [] });
+  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [], chainPosition: null });
   const [selected, setSelected] = useState(0);
   const [level, setLevel] = useState(0);
+  const [limiting, setLimiting] = useState(false);
   const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [dropPad, setDropPad] = useState<number | null>(null);
@@ -67,9 +69,34 @@ export default function App() {
       subscribe(api.onState(take)),
       subscribe(api.onTick(setTick)),
       subscribe(onMeter((peak) => setLevel((prev) => Math.max(peak, prev * 0.8)))),
+      subscribe(onLimiter(() => setLimiting(true))),
     ];
     return () => offs.forEach((off) => off());
   }, [take, fail]);
+
+  // After a crash: offer the unsaved work the last session left behind.
+  useEffect(() => {
+    api
+      .autosaveCheck()
+      .then(async (r) => {
+        if (!r) return;
+        const when = new Date(r.savedAt * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+        const recover = await ask(`tuneKore didn't close normally. Recover your unsaved work on “${r.projectName}” from ${when}?`, {
+          title: "Recover unsaved work",
+          kind: "info",
+          okLabel: "Recover",
+          cancelLabel: "Discard",
+        });
+        if (recover) {
+          const v = await api.autosaveRecover();
+          take(v);
+          say(`Recovered ${v.projectName}. Save it to keep it.`);
+        } else {
+          await api.autosaveDiscard();
+        }
+      })
+      .catch(fail);
+  }, [take, fail, say]);
 
   // Rescan the Library when the Analyzer writes samples into it.
   useEffect(
@@ -82,6 +109,13 @@ export default function App() {
       ),
     [],
   );
+
+  // The limiter light goes out a moment after the last limiter event.
+  useEffect(() => {
+    if (!limiting) return;
+    const t = setTimeout(() => setLimiting(false), 400);
+    return () => clearTimeout(t);
+  }, [limiting]);
 
   useEffect(() => {
     if (level === 0) return;
@@ -365,10 +399,21 @@ export default function App() {
       <header className="bar">
         <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
         <img src={mark} alt="tuneKore" className="bar-mark narrow-only" />
-        <div className="project" title={view.projectPath ?? "Not saved yet"}>
-          <span className="project-name">{view.projectName}</span>
-          {view.dirty && <span className="dirty" aria-label="unsaved changes">•</span>}
-        </div>
+        <ProjectMenu
+          name={view.projectName}
+          path={view.projectPath}
+          dirty={view.dirty}
+          onSaveAs={() => void doSave(true)}
+          onCollect={() =>
+            void api
+              .collectSamples()
+              .then((v) => {
+                take(v);
+                say(`Copied the samples into “${v.projectName} Samples” beside the project, and saved.`);
+              })
+              .catch(fail)
+          }
+        />
         <div className="group-btns">
           <button className="btn small" onClick={() => void doNew()} title={`New project (${mod}N)`}>New</button>
           <button className="btn small" onClick={() => void doOpen()} title={`Open a project (${mod}O)`}>Open</button>
@@ -440,7 +485,8 @@ export default function App() {
         <button className="btn small icon" onClick={() => setAudioOpen(true)} aria-label="Audio settings" title="Audio settings">
           <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true"><path d="M2 6h3l4-3v10L5 10H2zM11.5 5.5a3.5 3.5 0 0 1 0 5M13 3.5a6 6 0 0 1 0 9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
         </button>
-        <div className="meter" role="meter" aria-label="Output level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={meterPosition(level)}>
+        <MidiDot />
+        <div className={`meter${limiting ? " limiting" : ""}`} title={limiting ? "The limiter is holding the output under -0.3 dBFS" : "Output level"} role="meter" aria-label="Output level" aria-valuemin={0} aria-valuemax={1} aria-valuenow={meterPosition(level)}>
           <div className="meter-fill" style={{ transform: `scaleX(${meterPosition(level)})` }} />
         </div>
       </header>
@@ -500,6 +546,13 @@ export default function App() {
             onVelocity={(p, s, vel) => void api.setVelocity(p, s, vel).then(take).catch(fail)}
             pattern={view.pattern}
             onLength={(n) => void setTransport(view.tempo, view.swing, n)}
+            onExtras={(p, s, c, r) => void api.setStepExtras(p, s, c, r).then(take).catch(fail)}
+            chain={view.chain}
+            songMode={view.songMode}
+            songLoop={view.songLoop}
+            chainPosition={tick.chainPosition ?? null}
+            tempo={view.tempo}
+            onSong={(c, m, l) => void api.setSong(c, m, l).then(take).catch(fail)}
             patternsUsed={view.patternsUsed}
             onPattern={(i) => void api.selectPattern(i).then(take).catch(fail)}
             onCopyPattern={(from, to) =>
@@ -548,9 +601,10 @@ export default function App() {
           tempo={view.tempo}
           onClose={() => setExportOpen(false)}
           onDone={(p) => say(`Exported ${p}.`)}
-          onBounce={(loops) =>
+          hasSong={view.chain.length > 0}
+          onBounce={(loops, song) =>
             api
-              .bounce(loops)
+              .bounce(loops, song)
               .then((b) => {
                 setSelected(b.pad);
                 say(`Bounced the pattern onto pad ${b.pad + 1}.`);
@@ -560,6 +614,46 @@ export default function App() {
           onError={fail}
           disabled={!hasPattern}
         />
+      )}
+    </div>
+  );
+}
+
+/** The project's name in the top bar, opening a small menu of project actions. */
+function ProjectMenu(props: { name: string; path: string | null; dirty: boolean; onSaveAs: () => void; onCollect: () => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => ref.current?.contains(e.target as Node) || setOpen(false);
+    const esc = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    window.addEventListener("pointerdown", away);
+    window.addEventListener("keydown", esc);
+    ref.current?.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
+    return () => {
+      window.removeEventListener("pointerdown", away);
+      window.removeEventListener("keydown", esc);
+    };
+  }, [open]);
+  const pick = (f: () => void) => () => {
+    setOpen(false);
+    f();
+  };
+  return (
+    <div className="project" ref={ref}>
+      <button className="project-btn" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen(!open)} title={props.path ?? "Not saved yet"}>
+        <span className="project-name">{props.name}</span>
+        {props.dirty && <span className="dirty" aria-label="unsaved changes">•</span>}
+        <svg viewBox="0 0 10 10" width="8" height="8" aria-hidden="true"><path d="M2 3.5 5 6.5 8 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" /></svg>
+      </button>
+      {open && (
+        <div className="menu" role="menu" aria-label="Project">
+          <button role="menuitem" onClick={pick(props.onSaveAs)}>Save as… <kbd>⇧⌘S</kbd></button>
+          <button role="menuitem" onClick={pick(props.onCollect)} disabled={!props.path} title={props.path ? undefined : "Save the project first"}>
+            Collect samples into the project folder
+          </button>
+          {props.path && <span className="menu-note mono">{props.path}</span>}
+        </div>
       )}
     </div>
   );

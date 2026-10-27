@@ -2,6 +2,7 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
+import SampleInput from "./SampleInput";
 import { AUDIO_EXTENSIONS, PAD_KEYS, type PadSettings, type PadView } from "./api";
 
 interface Props {
@@ -20,11 +21,15 @@ interface Props {
 const fmtDb = (db: number) => (db <= -60 ? "off" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`);
 const fmtPan = (p: number) => (Math.abs(p) < 0.005 ? "C" : `${Math.round(Math.abs(p) * 100)}${p < 0 ? "L" : "R"}`);
 const fmtPitch = (st: number) => `${st > 0 ? "+" : ""}${st} st`;
+const fmtHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 0 : 1)} kHz` : `${Math.round(hz)} Hz`);
+/** Whether the Shape tab differs from the defaults, to mark the tab. */
+const shaped = (s: PadSettings) => s.attack > 0 || s.decay > 0 || s.filter !== 0 || Math.abs(s.release - 0.004) > 0.0005;
 const fmtTime = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(2)} s`);
 
 export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition, onChop, freePads }: Props) {
   // Local copy so sliders move smoothly; each change is sent as it happens.
   const [s, setS] = useState(pad.settings);
+  const [tab, setTab] = useState<"sample" | "shape">("sample");
   useEffect(() => setS(pad.settings), [pad.settings, pad.index]);
 
   function change(patch: Partial<PadSettings>) {
@@ -79,6 +84,55 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
             </span>
           </div>
           <Trim settings={s} peaks={pad.peaks} onChange={change} onDone={onAudition} />
+          <div className="tabs" role="tablist" aria-label="Pad settings">
+            {(["sample", "shape"] as const).map((t) => (
+              <button
+                key={t}
+                role="tab"
+                id={`tab-${t}`}
+                aria-selected={tab === t}
+                aria-controls={`panel-${t}`}
+                tabIndex={tab === t ? 0 : -1}
+                className={tab === t ? "on" : ""}
+                onClick={() => setTab(t)}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+                    const next = tab === "sample" ? "shape" : "sample";
+                    setTab(next);
+                    document.getElementById(`tab-${next}`)?.focus();
+                  }
+                }}
+              >
+                {t === "sample" ? "Sample" : "Shape"}
+                {t === "shape" && shaped(s) && <span className="tab-dot" aria-label="(changed)" />}
+              </button>
+            ))}
+          </div>
+          {tab === "shape" && (
+            <div role="tabpanel" id="panel-shape" aria-labelledby="tab-shape" className="panel">
+              <Curve label="Attack" value={s.attack} max={2} shown={fmtTime(s.attack)} onChange={(v) => change({ attack: v })} reset={0} />
+              <Curve label="Decay" value={s.decay} max={5} shown={s.decay === 0 ? "off" : fmtTime(s.decay)} onChange={(v) => change({ decay: v })} reset={0} />
+              <Slider label="Sustain" value={s.sustain} min={0} max={1} step={0.01} shown={`${Math.round(s.sustain * 100)}%`} onChange={(v) => change({ sustain: v })} reset={1} />
+              <Curve label="Release" value={s.release} min={0.001} max={5} shown={fmtTime(s.release)} onChange={(v) => change({ release: v })} reset={0.004} />
+              <div className="slider">
+                <span className="lbl">Filter</span>
+                <div className="seg mini" role="radiogroup" aria-label="Filter type">
+                  {["Off", "Low", "High", "Band"].map((n, i) => (
+                    <label key={n} className={s.filter === i ? "on" : ""} title={["No filter", "Low-pass: keeps the lows", "High-pass: keeps the highs", "Band-pass: keeps a band around the cutoff"][i]}>
+                      <input type="radio" name="filter" checked={s.filter === i} onChange={() => change({ filter: i })} />
+                      {n}
+                    </label>
+                  ))}
+                </div>
+                <span />
+              </div>
+              <Log label="Cutoff" value={s.cutoff} min={20} max={20000} shown={fmtHz(s.cutoff)} onChange={(v) => change({ cutoff: v })} disabled={s.filter === 0} reset={20000} />
+              <Slider label="Reso" value={s.resonance} min={0} max={1} step={0.01} shown={`${Math.round(s.resonance * 100)}%`} onChange={(v) => change({ resonance: v })} reset={0} />
+              <p className="dim small hint">Decay falls to the sustain level while the sound plays; release is how long it fades when let go (gate pads). Double-click a label to reset it.</p>
+            </div>
+          )}
+          {tab === "sample" && (
+          <div role="tabpanel" id="panel-sample" aria-labelledby="tab-sample" className="panel">
           <Slider label="Start" value={s.start} min={0} max={1} step={0.001} shown={fmtTime(s.start * pad.seconds)} onChange={(v) => change({ start: v })} />
           <Slider label="End" value={s.end} min={0} max={1} step={0.001} shown={fmtTime(s.end * pad.seconds)} onChange={(v) => change({ end: v })} />
           <Slider label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
@@ -99,8 +153,12 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
             <Toggle on={s.reverse} label="Reverse" hint="Play backwards" onClick={() => change({ reverse: !s.reverse })} />
             <Toggle on={s.mute} label="Mute" hint="Leave out of the pattern (the pad still plays by hand)" onClick={() => change({ mute: !s.mute })} />
           </div>
+          </div>
+          )}
         </>
       )}
+
+      <SampleInput pad={pad.index} loaded={loaded} />
 
       {pad.name && (
         <div className="insp-foot">
@@ -193,6 +251,24 @@ function Slider({ label, value, min, max, step, shown, onChange, reset }: Slider
       <output htmlFor={id} className="mono">
         {shown}
       </output>
+    </div>
+  );
+}
+
+/** A time slider with a squared scale, so short times get most of the travel. */
+function Curve({ label, value, min = 0, max, shown, onChange, reset }: { label: string; value: number; min?: number; max: number; shown: string; onChange: (v: number) => void; reset?: number }) {
+  const pos = Math.sqrt(Math.max(0, (value - min) / (max - min)));
+  return (
+    <Slider label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min + p * p * (max - min))} reset={reset === undefined ? undefined : Math.sqrt(Math.max(0, (reset - min) / (max - min)))} />
+  );
+}
+
+/** A frequency slider on a log scale. */
+function Log({ label, value, min, max, shown, onChange, disabled, reset }: { label: string; value: number; min: number; max: number; shown: string; onChange: (v: number) => void; disabled?: boolean; reset?: number }) {
+  const pos = Math.log(value / min) / Math.log(max / min);
+  return (
+    <div className={disabled ? "dimmed" : ""}>
+      <Slider label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min * Math.pow(max / min, p))} reset={reset === undefined ? undefined : Math.log(reset / min) / Math.log(max / min)} />
     </div>
   );
 }

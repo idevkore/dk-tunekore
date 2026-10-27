@@ -1,4 +1,6 @@
 mod analyzer;
+mod midi;
+mod recorder;
 mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
@@ -55,6 +57,8 @@ fn must_ask(app: &tauri::AppHandle) -> bool {
 #[tauri::command]
 fn app_quit(app: tauri::AppHandle) {
     QUIT_CONFIRMED.store(true, Ordering::Relaxed);
+    // The user chose to drop the unsaved work, so don't offer it back next time.
+    sampler::clear_autosave(&app);
     app.exit(0);
 }
 
@@ -98,6 +102,19 @@ fn stop_tone(state: Shared<'_>) {
     audio(&state).lock().unwrap().engine.set_tone(false, 440.0, 0.0);
 }
 
+/// The master level in dB (-60 = off, up to +6). Everything is limited after it.
+#[tauri::command]
+fn set_master(db: f32, state: Shared<'_>) {
+    let gain = if db <= -60.0 { 0.0 } else { 10f32.powf(db.min(6.0) / 20.0) };
+    audio(&state).lock().unwrap().engine.set_master(gain);
+}
+
+#[tauri::command]
+fn master(state: Shared<'_>) -> f32 {
+    let g = audio(&state).lock().unwrap().engine.master();
+    if g <= 0.0 { -60.0 } else { 20.0 * g.log10() }
+}
+
 /// The output device in use (`None` = the system default), or `None` when closed.
 #[tauri::command]
 fn current_output(state: Shared<'_>) -> Option<Option<String>> {
@@ -136,6 +153,11 @@ fn spawn_meter(app: tauri::AppHandle, meter: Meter) {
                 let _ = app.emit("meter", peak);
             }
             was_active = peak > 0.0;
+            // Gain reduction in dB while the master limiter works, so the UI can light up.
+            let g = meter.take_limiting();
+            if g < 0.99 {
+                let _ = app.emit("limiter", 20.0 * g.max(1e-6).log10());
+            }
         }
     });
 }
@@ -146,6 +168,7 @@ pub fn run() {
     let meter = engine.meter();
     let player = engine.player();
     let pads = engine.sampler();
+    let midi_state = midi::state();
     // One engine for the life of the app.
     let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
 
@@ -154,6 +177,8 @@ pub fn run() {
         .manage(audio)
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
+        .manage(midi_state.clone())
+        .manage(recorder::RecorderState::default())
         .manage(sampler::SamplerState::new(pads.clone()))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
@@ -169,7 +194,9 @@ pub fn run() {
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
+            midi::spawn(app.handle().clone(), pads.clone(), midi_state);
             sampler::spawn_tick(app.handle().clone(), pads);
+            sampler::spawn_autosave(app.handle().clone());
             // Open the default output now, so the pads play on the first click.
             std::thread::spawn(move || {
                 if let Err(e) = audio.lock().unwrap().ensure_open() {
@@ -186,6 +213,8 @@ pub fn run() {
             start_tone,
             stop_tone,
             current_output,
+            set_master,
+            master,
             set_output,
             analyzer::open_analyzer,
             analyzer::analyzer_backends,
@@ -211,10 +240,14 @@ pub fn run() {
             sampler::sampler_release,
             sampler::sampler_export,
             sampler::sampler_bounce,
+            sampler::sampler_export_stems,
+            sampler::project_collect,
             sampler::sampler_chop,
             sampler::sampler_undo,
             sampler::sampler_pattern,
             sampler::sampler_velocity,
+            sampler::sampler_step_extras,
+            sampler::sampler_song,
             sampler::sampler_metronome,
             sampler::sampler_record,
             sampler::sampler_copy_pattern,
@@ -226,6 +259,14 @@ pub fn run() {
             sampler::project_new,
             sampler::project_open,
             sampler::project_save,
+            sampler::autosave_check,
+            sampler::autosave_recover,
+            sampler::autosave_discard,
+            midi::midi_inputs,
+            recorder::input_devices,
+            recorder::sampling_start,
+            recorder::sampling_stop,
+            recorder::sampling_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")
