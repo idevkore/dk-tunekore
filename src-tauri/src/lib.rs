@@ -1,4 +1,5 @@
 mod analyzer;
+mod sampler;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
 use std::sync::Mutex;
@@ -75,20 +76,36 @@ async fn start_tone(device_id: Option<String>, frequency: f32, state: Shared<'_>
     .map_err(|e| e.to_string())?
 }
 
-/// Stops the tone. Closes the output too, unless the Analyzer is playing on it.
+/// Stops the tone. The output stays open for the Sampler and the Analyzer.
 #[tauri::command]
-async fn stop_tone(state: Shared<'_>) -> Result<(), String> {
+fn stop_tone(state: Shared<'_>) {
+    audio(&state).lock().unwrap().engine.set_tone(false, 440.0, 0.0);
+}
+
+/// The output device in use (`None` = the system default), or `None` when closed.
+#[tauri::command]
+fn current_output(state: Shared<'_>) -> Option<Option<String>> {
+    audio(&state).lock().unwrap().open_device.clone()
+}
+
+/// Moves the output to another device (`None` = the system default).
+#[tauri::command]
+async fn set_output(device_id: Option<String>, state: Shared<'_>) -> Result<(), String> {
     let audio = audio(&state);
     spawn_blocking(move || {
         let mut a = audio.lock().unwrap();
-        if a.engine.player().is_playing() {
-            a.engine.set_tone(false, 440.0, 0.0);
-        } else if a.open_device.is_some() {
+        if a.open_device.as_ref() == Some(&device_id) {
+            return Ok(());
+        }
+        if a.open_device.is_some() {
             a.fade_out_and_close();
         }
+        a.engine.open_output(device_id.as_deref())?;
+        a.open_device = Some(device_id);
+        Ok(())
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Sends the output peak to the UI about 30 times a second while there is
@@ -112,6 +129,7 @@ pub fn run() {
     let engine = Engine::new();
     let meter = engine.meter();
     let player = engine.player();
+    let pads = engine.sampler();
     // One engine for the life of the app.
     let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
 
@@ -120,9 +138,17 @@ pub fn run() {
         .manage(audio)
         .manage(player.clone())
         .manage(analyzer::Analyzer::default())
+        .manage(sampler::SamplerState::new(pads.clone()))
         .setup(move |app| {
             spawn_meter(app.handle().clone(), meter);
             analyzer::spawn_position(app.handle().clone(), player);
+            sampler::spawn_tick(app.handle().clone(), pads);
+            // Open the default output now, so the pads play on the first click.
+            std::thread::spawn(move || {
+                if let Err(e) = audio.lock().unwrap().ensure_open() {
+                    eprintln!("no audio output yet: {e}");
+                }
+            });
             let _ = app.get_webview_window("main");
             Ok(())
         })
@@ -131,6 +157,8 @@ pub fn run() {
             list_outputs,
             start_tone,
             stop_tone,
+            current_output,
+            set_output,
             analyzer::open_analyzer,
             analyzer::analyzer_backends,
             analyzer::analyzer_open,
@@ -140,6 +168,26 @@ pub fn run() {
             analyzer::analyzer_seek,
             analyzer::analyzer_track,
             analyzer::analyzer_export,
+            analyzer::analyzer_to_pads,
+            sampler::sampler_state,
+            sampler::sampler_load,
+            sampler::sampler_clear,
+            sampler::sampler_move,
+            sampler::sampler_settings,
+            sampler::sampler_step,
+            sampler::sampler_clear_steps,
+            sampler::sampler_transport,
+            sampler::sampler_play,
+            sampler::sampler_trigger,
+            sampler::sampler_release,
+            sampler::sampler_export,
+            sampler::library_scan,
+            sampler::library_default,
+            sampler::library_preview,
+            sampler::library_stop,
+            sampler::project_new,
+            sampler::project_open,
+            sampler::project_save,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")

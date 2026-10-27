@@ -126,3 +126,6 @@ button:disabled { cursor: default; opacity: 0.5; }
 
 .dragging .body { opacity: 0.5; }
 .dropzone { position: absolute; inset: 60px 16px 16px; border: 2px dashed var(--violet); border-radius: 16px; display: grid; place-items: center; font-size: 18px; font-weight: 600; pointer-events: none; background: rgba(128, 81, 255, 0.08); }
+
+.to-pads { height: 30px; padding: 0 8px; border-radius: 9px; border: 1px solid #34343f; background: var(--card-2); color: #e4e4ea; font-size: 12px; flex-shrink: 0; cursor: pointer; }
+.to-pads:hover { border-color: var(--violet); }

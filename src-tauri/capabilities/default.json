@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Capability for the main and Analyzer windows",
   "windows": ["main", "analyzer"],
-  "permissions": ["core:default", "dialog:allow-open"]
+  "permissions": ["core:default", "dialog:allow-open", "dialog:allow-save", "dialog:allow-ask", "core:window:allow-set-title"]
 }

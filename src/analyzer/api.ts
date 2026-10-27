@@ -81,6 +81,15 @@ export const setTrack = (index: number, gain: number, mute: boolean, solo: boole
   invoke<void>("analyzer_track", { index, gain, mute, solo });
 export const exportStems = (dir: string, names: string[]) => invoke<Exported[]>("analyzer_export", { dir, names });
 
+export interface ToPads {
+  pads: number[];
+  folder: string;
+}
+
+/** Puts a stem on the Sampler's pads: `how` is "whole" or "chop". */
+export const toPads = (stem: string, how: string, count: number, firstPad: number | null, fromSeconds: number) =>
+  invoke<ToPads>("analyzer_to_pads", { stem, how, count, firstPad, fromSeconds });
+
 const on =
   <T,>(name: string) =>
   (handler: (payload: T) => void): Promise<UnlistenFn> =>

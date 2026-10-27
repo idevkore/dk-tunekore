@@ -233,6 +233,23 @@ export default function Analyzer() {
     }
   }
 
+  async function toPads(stem: string, label: string, how: string) {
+    setError("");
+    const [kind, count, first] = how.split(":");
+    try {
+      const r = await api.toPads(stem, kind, Number(count ?? 1), kind === "chop" ? Number(first) : null, pos.position);
+      const pads = r.pads.map((p) => p + 1);
+      const where = pads.length === 1 ? `pad ${pads[0]}` : `pads ${pads[0]}–${pads[pads.length - 1]}`;
+      setNote(
+        kind === "chop"
+          ? `Chopped ${label.toLowerCase()} into ${pads.length} slices on ${where} in the main window. The WAVs are in ${r.folder}.`
+          : `Put ${label.toLowerCase()} on ${where} in the main window. The WAV is in ${r.folder}.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const update = (i: number, change: Partial<Mix>) => setMix((m) => m.map((x, j) => (j === i ? { ...x, ...change } : x)));
   const anySolo = mix.some((m) => m.solo);
   const playhead = pos.duration > 0 ? Math.min(1, pos.position / pos.duration) : 0;
@@ -433,6 +450,21 @@ export default function Analyzer() {
                             aria-label={`${s.label} level`}
                           />
                         </label>
+                        <select
+                          className="to-pads"
+                          value=""
+                          aria-label={`Send ${s.label} to the Sampler's pads`}
+                          title="Put this stem on the Sampler's pads, whole or chopped at its hits from the playhead"
+                          onChange={(e) => void toPads(s.name, s.label, e.target.value)}
+                        >
+                          <option value="" disabled>
+                            To pads
+                          </option>
+                          <option value="whole">Whole stem → next free pad</option>
+                          <option value="chop:8:0">Chop 8 from playhead → pads 1–8</option>
+                          <option value="chop:8:8">Chop 8 from playhead → pads 9–16</option>
+                          <option value="chop:16:0">Chop 16 from playhead → pads 1–16</option>
+                        </select>
                         <button className="btn small" onClick={() => void exportTo([s.name])} aria-label={`Export ${s.label} as WAV`}>
                           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
                             <path d="M8 2.5v8M4.5 7 8 10.5 11.5 7M3 13.5h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -449,7 +481,7 @@ export default function Analyzer() {
                 <div className="later">
                   <span className="label">Next with one stem · coming later</span>
                   <div className="chips">
-                    {["Find key and tempo", "Turn into MIDI", "Chop into a sampler", "Send through a plugin chain"].map((t) => (
+                    {["Find key and tempo", "Turn into MIDI", "Send through a plugin chain"].map((t) => (
                       <button key={t} disabled>
                         {t}
                       </button>

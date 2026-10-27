@@ -1,17 +1,20 @@
-//! tuneKore's audio engine: output devices, a test tone (Phase 0) and the
-//! Analyzer's stem player (Phase 1).
+//! tuneKore's audio engine: output devices, a test tone (Phase 0), the
+//! Analyzer's stem player (Phase 1) and the Sampler's pads and sequencer
+//! (Phase 2).
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`, `load_clip`)
 //! come from one thread at a time; callers serialize them. `set_tone`,
-//! `take_peak` and the [`Player`] handle only touch atomics and are safe from
+//! `take_peak` and the [`Player`] and [`SamplerHandle`] handles only touch atomics and are safe from
 //! any thread. The audio callback runs on the device's thread: no allocation,
 //! locks, logging or I/O there.
 
 mod player;
 mod resample;
+mod sampler;
 mod tone;
 
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
+pub use sampler::{render_pattern, PadParams, Sampler, SamplerShared, MAX_STEPS, PADS, PREVIEW, SLOTS};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 
@@ -44,6 +47,7 @@ pub struct OutputDevice {
 struct Shared {
     tone: ToneControl,
     player: PlayerShared,
+    sampler: SamplerShared,
     peak: AtomicU32, // f32 bits, max since the last take
 }
 
@@ -75,6 +79,10 @@ pub struct Engine {
     /// The open stream's sample rate.
     rate: u32,
     source: Option<Arc<Source>>,
+    /// The open stream's end of the sampler's queues.
+    sampler_link: Option<sampler::SamplerLink>,
+    /// Each slot's sample at its own rate, kept to send again when the device changes.
+    samples: Vec<Option<(u32, Track)>>,
 }
 
 impl Default for Engine {
@@ -85,7 +93,16 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Self { host: cpal::default_host(), stream: None, shared: Arc::default(), link: None, rate: 0, source: None }
+        Self {
+            host: cpal::default_host(),
+            stream: None,
+            shared: Arc::default(),
+            link: None,
+            rate: 0,
+            source: None,
+            sampler_link: None,
+            samples: vec![None; SLOTS],
+        }
     }
 
     pub fn list_outputs(&self) -> Result<Vec<OutputDevice>, String> {
@@ -148,7 +165,46 @@ impl Engine {
         if let Some(source) = self.source.clone() {
             self.send_clip(&source)?;
         }
+        for slot in 0..SLOTS {
+            if self.samples[slot].is_some() {
+                self.send_sample(slot)?;
+            }
+        }
         Ok(())
+    }
+
+    /// Puts a sample (`(sample rate, channels)`, one or two channels) on a
+    /// Sampler slot, or empties it. Resamples it to the device's rate here,
+    /// on the caller's thread. Without an open output it is kept and sent
+    /// when one opens.
+    pub fn load_sample(&mut self, slot: usize, sample: Option<(u32, Track)>) -> Result<(), String> {
+        if slot >= SLOTS {
+            return Err(format!("no sampler slot {slot}"));
+        }
+        if let Some((_, t)) = &sample {
+            if t.is_empty() || t.len() > 2 || t[0].len() < 2 {
+                return Err("a sample needs one or two channels of audio".into());
+            }
+        }
+        self.samples[slot] = sample;
+        if self.stream.is_some() {
+            self.send_sample(slot)?;
+        }
+        Ok(())
+    }
+
+    /// A slot's sample at its own rate, as loaded.
+    pub fn sample(&self, slot: usize) -> Option<(u32, Track)> {
+        self.samples.get(slot).cloned().flatten()
+    }
+
+    fn send_sample(&mut self, slot: usize) -> Result<(), String> {
+        let data = match &self.samples[slot] {
+            None => None,
+            Some((rate, t)) if *rate == self.rate => Some(t.clone()),
+            Some((rate, t)) => Some(Arc::new(resample(t, *rate, self.rate)?)),
+        };
+        self.sampler_link.as_mut().ok_or("no output is open")?.send(slot, data)
     }
 
     /// Loads tracks into the player, replacing what it had. Resamples them to
@@ -219,6 +275,7 @@ impl Engine {
         let rate = config.sample_rate;
         let mut tone = Tone::new(rate as f64);
         let (mut voice, link) = player::voice(rate);
+        let (mut pads, sampler_link) = sampler::sampler(rate);
         let mut scratch = vec![0.0f32; BLOCK_FRAMES * channels];
         shared.peak.store(0, Ordering::Relaxed);
         let stream = dev
@@ -231,6 +288,7 @@ impl Engine {
                         let buf = &mut scratch[..block.len()];
                         tone.render(&shared.tone, buf, channels);
                         voice.render(&shared.player, buf, channels);
+                        pads.render(&shared.sampler, buf, channels);
                         for (o, &s) in block.iter_mut().zip(buf.iter()) {
                             peak = peak.max(s.abs());
                             *o = T::from_sample(s);
@@ -244,6 +302,7 @@ impl Engine {
             )
             .map_err(|e| e.to_string())?;
         self.link = Some(link);
+        self.sampler_link = Some(sampler_link);
         self.rate = rate;
         Ok(stream)
     }
@@ -251,6 +310,7 @@ impl Engine {
     pub fn close_output(&mut self) {
         self.stream = None; // dropping the stream stops it and frees its clip
         self.link = None;
+        self.sampler_link = None;
         self.shared.player.set_playing(false);
     }
 
@@ -261,6 +321,11 @@ impl Engine {
     /// Turns the test tone on or off. Safe while the stream runs, from any thread.
     pub fn set_tone(&self, on: bool, freq_hz: f32, gain: f32) {
         self.shared.tone.set(on, freq_hz, gain);
+    }
+
+    /// A handle to the Sampler's pads, pattern and transport, from any thread.
+    pub fn sampler(&self) -> SamplerHandle {
+        SamplerHandle(self.shared.clone())
     }
 
     /// A handle that reads the output peak without the engine's lock.
@@ -277,6 +342,17 @@ impl std::ops::Deref for Player {
     type Target = PlayerShared;
     fn deref(&self) -> &PlayerShared {
         &self.0.player
+    }
+}
+
+/// The Sampler's pads, pattern and transport, from any thread.
+#[derive(Clone)]
+pub struct SamplerHandle(Arc<Shared>);
+
+impl std::ops::Deref for SamplerHandle {
+    type Target = SamplerShared;
+    fn deref(&self) -> &SamplerShared {
+        &self.0.sampler
     }
 }
 

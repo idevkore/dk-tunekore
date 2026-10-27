@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tunekore_analyzer::{
-    check, decode_file, export_wav, list_backends, peaks, rms_db, separate, BackendInfo, Cancel, Checks, JobError,
+    check, decode_file, even, export_wav, list_backends, onsets, peaks, rms_db, separate, slices, BackendInfo, Cancel, Checks, JobError,
     Song, Stems, WavFormat, WorkerConfig, STEM_NAMES,
 };
 use tunekore_engine::{Player, Source};
@@ -318,6 +318,100 @@ pub async fn analyzer_export(dir: String, names: Vec<String>, state: State<'_, A
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToPads {
+    /// The pads that got a sample, 0-based.
+    pads: Vec<usize>,
+    /// Where the WAV files were written.
+    folder: String,
+}
+
+/// Puts a stem on the Sampler's pads. `how` is `"whole"` (the full stem on
+/// one pad: `first_pad`, or the first free pad when `None`) or `"chop"`
+/// (`count` slices from `from_seconds`, cut at its transients, on the pads
+/// from `first_pad`). The audio is written as WAV under Music/tuneKore/Samples,
+/// so a saved project can find it again.
+#[tauri::command]
+pub async fn analyzer_to_pads(
+    stem: String,
+    how: String,
+    count: usize,
+    first_pad: Option<usize>,
+    from_seconds: f64,
+    app: AppHandle,
+    state: State<'_, Analyzer>,
+) -> Result<ToPads, String> {
+    let (loaded, stems) = {
+        let inner = state.0.lock().unwrap();
+        (inner.song.clone().ok_or("open a song first")?, inner.stems.clone().ok_or("separate the song first")?)
+    };
+    let folder = app
+        .path()
+        .audio_dir()
+        .map_err(|e| e.to_string())?
+        .join("tuneKore")
+        .join("Samples")
+        .join(safe_name(&loaded.name));
+    let a = app.clone();
+    let result = spawn_blocking(move || -> Result<ToPads, String> {
+        let audio = stems.get(&stem).ok_or_else(|| format!("no stem called {stem}"))?;
+        let rate = stems.sample_rate;
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let base = format!("{} - {}", safe_name(&loaded.name), title(&stem));
+        let mut pads = Vec::new();
+        match how.as_str() {
+            "whole" => {
+                let pad = first_pad.or_else(|| crate::sampler::first_free_pad(&a)).ok_or("every pad is in use; clear one first")?;
+                let path = folder.join(format!("{base}.wav"));
+                export_wav(audio, rate, &path)?;
+                crate::sampler::load_pad(&a, pad, &path, Default::default())?;
+                pads.push(pad);
+            }
+            "chop" => {
+                let first = first_pad.unwrap_or(0).min(tunekore_engine::PADS - 1);
+                let count = count.clamp(1, tunekore_engine::PADS - first);
+                let frames = audio.first().map_or(0, Vec::len);
+                let from = ((from_seconds.max(0.0) * rate as f64) as usize).min(frames);
+                // About half a second of audio per slice: 4 bars at 120 BPM for 16 slices.
+                let to = (from + count * rate as usize / 2).min(frames);
+                if to <= from + rate as usize / 20 {
+                    return Err("move the playhead back: there is too little audio left to chop".into());
+                }
+                let mut starts = onsets(audio, rate, from, to, count);
+                if starts.len() < 2 {
+                    starts = even(from, to, count);
+                }
+                let stamp = from_seconds.max(0.0);
+                for (i, (s, e)) in slices(&starts, to, 2 * rate as usize).into_iter().enumerate() {
+                    let pad = first + i;
+                    let path = folder.join(format!("{base} @{}m{:04.1}s {:02}.wav", (stamp / 60.0) as u32, stamp % 60.0, i + 1));
+                    let slice: Vec<Vec<f32>> = audio.iter().map(|c| c[s..e].to_vec()).collect();
+                    export_wav(&slice, rate, &path)?;
+                    crate::sampler::load_pad(&a, pad, &path, Default::default())?;
+                    pads.push(pad);
+                }
+            }
+            other => return Err(format!("unknown way to send to pads: {other}")),
+        }
+        Ok(ToPads { pads, folder: folder.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    crate::sampler::publish_now(&app);
+    if let Ok(r) = &result {
+        let _ = app.emit("sampler:chopped", &r.folder);
+    }
+    result
+}
+
+/// A file or folder name with the characters macOS and Windows reject replaced.
+fn safe_name(name: &str) -> String {
+    let s: String = name.chars().map(|c| if "/\\:*?\"<>|".contains(c) { '-' } else { c }).collect();
+    let s = s.trim().trim_start_matches('.').to_string();
+    if s.is_empty() { "Song".into() } else { s }
 }
 
 /// Sends the playhead to the UI about 30 times a second while playing.

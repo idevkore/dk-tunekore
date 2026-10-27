@@ -55,6 +55,8 @@ export function installMocks() {
         case "analyzer_seek":
           position = (args as { seconds: number }).seconds;
           return null;
+        case "analyzer_to_pads":
+          return { pads: (args as { how: string }).how === "whole" ? [0] : [0, 1, 2, 3, 4, 5, 6, 7], folder: "/Users/test/Music/tuneKore/Samples/Quantum Love" };
         case "analyzer_export":
           return ["vocals", "drums", "bass", "other"]
             .filter((n) => (args as { names: string[] }).names.length === 0 || (args as { names: string[] }).names.includes(n))
