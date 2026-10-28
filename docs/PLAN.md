@@ -63,7 +63,7 @@ with a C interface. That decision would cost a JUCE license, not a rewrite.
 
 The first plan chose C++, because hosting VST3 and AU editors from Rust looked
 like the least proven path. On 2026-10-24 a test host in Rust settled it
-(idevkore/kore-issues#24, branch `nate/chore/rust-hosting-spike`,
+(idevkore/dk-tunekore#11, branch `nate/chore/rust-hosting-spike`,
 `spike/FINDINGS.md`):
 
 - Serum 2 and Serum 1 loaded as VST3 and as AU. Their editors opened in native
@@ -223,7 +223,7 @@ something to release.
 | --- | --- | --- | --- |
 | 0. Skeleton | Repo, Tauri shell with the brand, engine library building inside it, CI | The app opens on the Mac, lists audio devices and plays a test tone; CI builds macOS (and compiles on Windows and Linux) | 1 sprint |
 | 1. Analyzer: stems | Analyzer window: open a song (WAV, AIFF, FLAC, MP3, M4A), split it into Vocals, Drums, Bass and Other, then play, solo, mute and export the stems | A 4-minute song separates on this Mac in under 2 minutes in fast mode. Stems line up with the original to the sample and sum back to it within the model's error. | 2 sprints |
-| 2. Sampler (MVP) | The main window becomes the Sampler: a Library of samples (any folder, `~/Splice` included) with search and preview; 16 pads with gain, pan, pitch, start/end, reverse, choke groups and one-shot or gate; patterns A–D of up to 32 steps with tempo, swing and per-step velocity; live record with a metronome; undo; Analyzer stems sent to pads whole or chopped on transients, and any pad chopped the same way; bounce the pattern back onto a pad; save and open a `.tunek` project; export the pattern to WAV (second pass: idevkore/kore-issues#29). Third pass (idevkore/kore-issues#30): per-pad amp envelope and filter, step chance and ratchets, song mode with song export, MIDI controller input, sampling from an audio input, a master limiter, autosave and recovery, stems export, and collecting samples into the project | You can open the app, build a beat from samples and chopped stems, hear it in time, save and reopen it, and export it, without touching code | 2 sprints |
+| 2. Sampler (MVP) | The main window becomes the Sampler: a Library of samples (any folder, `~/Splice` included) with search and preview; 16 pads with gain, pan, pitch, start/end, reverse, choke groups and one-shot or gate; patterns A–D of up to 32 steps with tempo, swing and per-step velocity; live record with a metronome; undo; Analyzer stems sent to pads whole or chopped on transients, and any pad chopped the same way; bounce the pattern back onto a pad; save and open a `.tunek` project; export the pattern to WAV (second pass: idevkore/dk-tunekore#14). Third pass (idevkore/dk-tunekore#15): per-pad amp envelope and filter, step chance and ratchets, song mode with song export, MIDI controller input, sampling from an audio input, a master limiter, autosave and recovery, stems export, and collecting samples into the project | You can open the app, build a beat from samples and chopped stems, hear it in time, save and reopen it, and export it, without touching code | 2 sprints |
 | 3. Plugins | Scanner, VST3 and CLAP instruments and effects, editor windows, MIDI keyboard input, state saved with the project. Starts from soundCraft's host crates. A plugin instrument can sit on a pad. | Every plugin in the test list (section 5) loads, plays, opens its editor and comes back after save and reopen | 2 to 3 sprints |
 | 4. Timeline | Tracks, audio and MIDI clips, recording, MIDI editor, automation lanes, undo | A short song can be recorded with Serum and Arturia, saved and reopened | 4 sprints |
 | 5. Clip Grid | Clip slots, scenes, launch quantization, recording into slots, moving clips to the Timeline. Sampler patterns become clips. | Scenes launch on the bar, in sync with the Timeline's clock | 2 sprints |
@@ -234,7 +234,7 @@ something to release.
 | 10. Linux | ALSA, JACK and PipeWire, VST3 and CLAP, WebKitGTK, Flatpak or AppImage | Serum 2 (native beta) plays | 2 sprints |
 
 Phase 1 came first, as asked. On 2026-10-26 the Sampler moved ahead of
-plugin hosting (idevkore/kore-issues#28): it needs only our own engine, it
+plugin hosting (idevkore/dk-tunekore#13): it needs only our own engine, it
 turns the Analyzer's stems into something to play, and it makes tuneKore an
 app you can open and use. Plugins follow, and then a plugin instrument can
 play from a pad.
@@ -702,7 +702,7 @@ from Phase 0, even while only the Mac is tested. Each OS needs:
 
 Phases 0 and 1 are done. As of 2026-10-26:
 
-1. **Phase 2, the Sampler** (idevkore/kore-issues#28), branch
+1. **Phase 2, the Sampler** (idevkore/dk-tunekore#13), branch
    `nate/feature/sampler-mvp`.
 2. **Choose the stem model to ship** (section 6): test Spleeter against
    Demucs, or price a vendor SDK. Demucs's weights can't ship.

@@ -5,6 +5,12 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.5: tracker links
+
+- `docs/PLAN.md` and `CLAUDE.md` point at the tuneKore issues on
+  `idevkore/dk-tunekore` instead of their old `kore-issues` numbers
+  (#24 → #11, #28 → #13, #29 → #14, #30 → #15).
+
 ## 0.1.4: big screens
 
 idevkore/dk-tunekore#25
