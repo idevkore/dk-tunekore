@@ -5,6 +5,25 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.8: pattern switches on the bar
+
+idevkore/dk-tunekore#17
+
+- Switching patterns A–D while playing now waits for the end of the pattern:
+  the pattern playing finishes and the new one starts exactly on the wrap.
+  The new pattern opens for editing at once; until it starts its button
+  blinks with a dashed outline, the playing one is underlined, and a note
+  says when it starts.
+- Song mode switched on or off while playing lands the same way: the song
+  starts, or its pass plays to the end, at the wrap. The Song button blinks
+  while it waits.
+- A Switch option next to the patterns, At end or Now. Now lands every switch
+  on the next step, as before. The choice is saved in the `.tunek` project;
+  older projects open with At end.
+- Engine tests cover the timing: the wrap frame, swing and odd lengths,
+  changing a queued switch, switching now, song mode on and off, and a hit
+  recorded at the end of a pass.
+
 ## 0.1.5: tracker links
 
 - `docs/PLAN.md` and `CLAUDE.md` point at the tuneKore issues on
