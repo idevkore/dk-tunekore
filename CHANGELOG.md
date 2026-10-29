@@ -5,6 +5,19 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.6: filter envelope and velocity
+
+idevkore/dk-tunekore#19, idevkore/dk-tunekore#18
+
+- A filter envelope on each pad: attack, decay, sustain, release and an
+  amount of up to 8 octaves either way, which sweeps the cutoff on every hit
+  and falls back when a gate pad is let go. Defaults to off.
+- Velocity reaches the sound, not just the level: Velocity Cutoff makes soft
+  hits darker (or brighter), and Velocity Time makes their attack and decay
+  shorter (or longer), each set per pad.
+- The Shape tab is grouped into Amp, Filter, Filter envelope and Velocity.
+  The new settings save with the project; older projects open with them off.
+
 ## 0.1.5: tracker links
 
 - `docs/PLAN.md` and `CLAUDE.md` point at the tuneKore issues on
