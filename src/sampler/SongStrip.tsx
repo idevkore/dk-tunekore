@@ -9,6 +9,8 @@ interface Props {
   songLoop: boolean;
   /** The chain entry playing now, in song mode. */
   position: number | null;
+  /** Song mode was switched on or off while playing, and lands at the end of the pattern. */
+  queued: boolean;
   patternsUsed: boolean[];
   /** Seconds one pattern lasts, for the song's length. */
   passSeconds: number;
@@ -22,17 +24,23 @@ function clock(s: number) {
   return `${m}:${String(Math.round(s - m * 60)).padStart(2, "0")}`;
 }
 
-export default function SongStrip({ chain, songMode, songLoop, position, patternsUsed, passSeconds, onChange }: Props) {
+export default function SongStrip({ chain, songMode, songLoop, position, queued, patternsUsed, passSeconds, onChange }: Props) {
   const set = (c: number[], mode = songMode, loop = songLoop) => onChange(c, mode, loop);
   return (
     <div className={`song${songMode ? " on" : ""}`} role="group" aria-label="Song">
       <button
-        className={`song-toggle${songMode ? " on" : ""}`}
+        className={`song-toggle${songMode ? " on" : ""}${queued ? " queued" : ""}`}
         aria-pressed={songMode}
         onPointerDown={(e) => e.preventDefault()}
         onClick={() => set(chain, !songMode)}
         disabled={chain.length === 0 && !songMode}
-        title={chain.length === 0 ? "Add patterns to the song first" : "Play the song: the patterns below in order, instead of looping one"}
+        title={
+          chain.length === 0
+            ? "Add patterns to the song first"
+            : queued
+              ? `The song ${songMode ? "starts" : "stops"} at the end of the pattern`
+              : "Play the song: the patterns below in order, instead of looping one"
+        }
       >
         Song
       </button>

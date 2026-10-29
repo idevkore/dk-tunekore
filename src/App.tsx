@@ -41,7 +41,7 @@ const isAudio = (p: string) => api.AUDIO_EXTENSIONS.includes(p.split(".").pop()?
 
 export default function App() {
   const [view, setView] = useState<SamplerView | null>(null);
-  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [], chainPosition: null });
+  const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [], chainPosition: null, playingPattern: null, songPlaying: false });
   const [selected, setSelected] = useState(0);
   const [level, setLevel] = useState(0);
   const [limiting, setLimiting] = useState(false);
@@ -551,6 +551,10 @@ export default function App() {
             songMode={view.songMode}
             songLoop={view.songLoop}
             chainPosition={tick.chainPosition ?? null}
+            playingPattern={tick.playing ? (tick.playingPattern ?? null) : null}
+            songPlaying={tick.playing && !!tick.songPlaying}
+            patternSwitch={view.patternSwitch ?? "end"}
+            onPatternSwitch={(m) => void api.setPatternSwitch(m).then(take).catch(fail)}
             tempo={view.tempo}
             onSong={(c, m, l) => void api.setSong(c, m, l).then(take).catch(fail)}
             patternsUsed={view.patternsUsed}

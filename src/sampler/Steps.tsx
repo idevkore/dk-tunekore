@@ -3,7 +3,7 @@
 // cells and Enter or Space toggles one.
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, type PadView } from "./api";
+import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, type PadView, type PatternSwitch } from "./api";
 import StepEditor from "./StepEditor";
 import SongStrip from "./SongStrip";
 
@@ -33,6 +33,12 @@ interface Props {
   songMode: boolean;
   songLoop: boolean;
   chainPosition: number | null;
+  /** The pattern playing now, or null when stopped. */
+  playingPattern: number | null;
+  /** A song pass is playing (it plays to its end after song mode goes off). */
+  songPlaying: boolean;
+  patternSwitch: PatternSwitch;
+  onPatternSwitch: (mode: PatternSwitch) => void;
   tempo: number;
   onSong: (chain: number[], songMode: boolean, songLoop: boolean) => void;
 }
@@ -71,21 +77,52 @@ export default function Steps(props: Props) {
     return () => window.removeEventListener("pointerup", stop);
   }, []);
 
+  // A switch made while playing waits for the end of the pattern (unless the
+  // switch is set to now): the chosen pattern shows for editing at once and is
+  // marked queued until it starts.
+  const live = props.playingPattern;
+  const atEnd = props.patternSwitch === "end";
+  const leavingSong = atEnd && !props.songMode && props.songPlaying;
+  const queued = atEnd && live !== null && !props.songMode && (leavingSong || live !== props.pattern);
+  const songQueued = atEnd && live !== null && props.songMode && !props.songPlaying && props.chain.length > 0;
+  const name = PATTERN_NAMES[props.pattern];
+  const waiting = queued
+    ? leavingSong
+      ? `The song stops at the end of this pass, then ${name} plays.`
+      : `${name} starts at the end of ${PATTERN_NAMES[live ?? 0]}.`
+    : songQueued
+      ? "The song starts at the end of the pattern."
+      : "";
+  const switchHint = atEnd ? "Switching while playing waits for the end of the pattern." : "Switching while playing lands on the next step.";
+
   const bank = (
     <div className="bank" role="group" aria-label="Patterns">
       <span className="bank-label">Pattern</span>
-      {PATTERN_NAMES.map((n, i) => (
-        <button
-          key={n}
-          className={`bank-btn${i === props.pattern ? " on" : ""}${props.patternsUsed[i] ? " used" : ""}`}
-          aria-pressed={i === props.pattern}
-          title={`Pattern ${n}${props.patternsUsed[i] ? "" : " (empty)"}. Switching while playing lands on the next step.`}
-          onPointerDown={(e) => e.preventDefault()}
-          onClick={() => props.onPattern(i)}
-        >
-          {n}
-        </button>
-      ))}
+      {PATTERN_NAMES.map((n, i) => {
+        const isQueued = queued && i === props.pattern;
+        const isLive = live === i && (queued || props.songMode);
+        return (
+          <button
+            key={n}
+            className={`bank-btn${i === props.pattern ? " on" : ""}${props.patternsUsed[i] ? " used" : ""}${isQueued ? " queued" : ""}${isLive ? " live" : ""}`}
+            aria-pressed={i === props.pattern}
+            aria-label={`Pattern ${n}${isQueued ? ", queued" : ""}${isLive ? ", playing" : ""}`}
+            title={`Pattern ${n}${props.patternsUsed[i] ? "" : " (empty)"}${isQueued ? ", starts at the end of the pattern" : isLive ? ", playing" : ""}. ${switchHint}`}
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={() => props.onPattern(i)}
+          >
+            {n}
+          </button>
+        );
+      })}
+      <div className="seg mini switch" role="radiogroup" aria-label="When a switch lands" title={switchHint}>
+        {(["end", "now"] as const).map((m) => (
+          <label key={m} className={props.patternSwitch === m ? "on" : ""} title={m === "end" ? "Switch at the end of the pattern" : "Switch on the next step"}>
+            <input type="radio" name="pattern-switch" checked={props.patternSwitch === m} onChange={() => props.onPatternSwitch(m)} />
+            {m === "end" ? "At end" : "Now"}
+          </label>
+        ))}
+      </div>
       <select
         className="bank-copy"
         value=""
@@ -104,6 +141,9 @@ export default function Steps(props: Props) {
           {STEP_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
+      <span className="small queued-note" role="status">
+        {waiting}
+      </span>
       <span className="dim small bank-hint">Right-click a step for velocity, chance and repeats</span>
     </div>
   );
@@ -114,6 +154,7 @@ export default function Steps(props: Props) {
       songMode={props.songMode}
       songLoop={props.songLoop}
       position={props.chainPosition}
+      queued={songQueued || leavingSong}
       patternsUsed={props.patternsUsed}
       passSeconds={(steps * 15) / props.tempo}
       onChange={props.onSong}
