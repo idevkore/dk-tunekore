@@ -1,6 +1,6 @@
 [package]
 name = "tunekore"
-version = "0.1.5"
+version = "0.1.7"
 description = "tuneKore: a lightweight DAW by devKore"
 authors = ["devKore"]
 edition.workspace = true
@@ -20,7 +20,7 @@ tunekore-engine = { path = "../engine" }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 tauri-plugin-dialog = "2.8.3"
-tunekore-analyzer = { version = "0.1.5", path = "../analyzer" }
+tunekore-analyzer = { version = "0.1.7", path = "../analyzer" }
 serde_json = "1.0.154"
 midir = "0.11.1"
 tauri-plugin-window-state = "2.5.0"

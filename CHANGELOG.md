@@ -5,6 +5,17 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.7: touch discovery
+
+idevkore/dk-tunekore#30
+
+- `docs/TOUCH.md`: what touch on the Mac means for tuneKore, written the day
+  after Apple announced the touchscreen MacBook Pro. It covers what Apple
+  shipped, how other DAWs handle touch, an audit of our UI, two routes to
+  multi-touch, plugin touch pages, latency, design rules and a plan.
+
+Docs only; no app change.
+
 ## 0.1.5: tracker links
 
 - `docs/PLAN.md` and `CLAUDE.md` point at the tuneKore issues on
