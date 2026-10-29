@@ -90,12 +90,14 @@ export interface Tick {
   step: number | null;
   /** Play count per pad; a change means the pad just played. */
   played: number[];
-  /** Which chain entry the song is on, in song mode. */
+  /**
+   * Which chain entry is playing. A song starts at the end of the pattern, and
+   * after song mode is turned off its entry plays to the end, so this can lag
+   * the view's `songMode`.
+   */
   chainPosition: number | null;
   /** The pattern playing now; while a switch waits it differs from the view's `pattern`. */
-  playingPattern?: number | null;
-  /** A song pass is playing, even after song mode is turned off, until that pass ends. */
-  songPlaying?: boolean;
+  playingPattern: number | null;
 }
 
 export interface LibraryItem {

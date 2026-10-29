@@ -7,7 +7,7 @@ interface Props {
   chain: number[];
   songMode: boolean;
   songLoop: boolean;
-  /** The chain entry playing now, in song mode. */
+  /** The chain entry playing now. After song mode goes off it plays to its end. */
   position: number | null;
   /** Song mode was switched on or off while playing, and lands at the end of the pattern. */
   queued: boolean;
@@ -49,7 +49,7 @@ export default function SongStrip({ chain, songMode, songLoop, position, queued,
         {chain.map((b, i) => (
           <li key={i}>
             <button
-              className={`chip${songMode && position === i ? " now" : ""}`}
+              className={`chip${position === i ? " now" : ""}`}
               onPointerDown={(e) => e.preventDefault()}
               onClick={() => set(chain.filter((_, j) => j !== i))}
               title={`Part ${i + 1}: pattern ${PATTERN_NAMES[b]}. Click to take it out.`}

@@ -32,11 +32,10 @@ interface Props {
   chain: number[];
   songMode: boolean;
   songLoop: boolean;
+  /** The chain entry playing; it plays to its end after song mode goes off. */
   chainPosition: number | null;
   /** The pattern playing now, or null when stopped. */
   playingPattern: number | null;
-  /** A song pass is playing (it plays to its end after song mode goes off). */
-  songPlaying: boolean;
   patternSwitch: PatternSwitch;
   onPatternSwitch: (mode: PatternSwitch) => void;
   tempo: number;
@@ -79,12 +78,14 @@ export default function Steps(props: Props) {
 
   // A switch made while playing waits for the end of the pattern (unless the
   // switch is set to now): the chosen pattern shows for editing at once and is
-  // marked queued until it starts.
+  // marked queued until it starts. A song always starts at the end of the
+  // pattern, so its first part plays whole.
   const live = props.playingPattern;
   const atEnd = props.patternSwitch === "end";
-  const leavingSong = atEnd && !props.songMode && props.songPlaying;
+  const songPlaying = props.chainPosition !== null;
+  const leavingSong = atEnd && !props.songMode && songPlaying;
   const queued = atEnd && live !== null && !props.songMode && (leavingSong || live !== props.pattern);
-  const songQueued = atEnd && live !== null && props.songMode && !props.songPlaying && props.chain.length > 0;
+  const songQueued = live !== null && props.songMode && !songPlaying && props.chain.length > 0;
   const name = PATTERN_NAMES[props.pattern];
   const waiting = queued
     ? leavingSong
@@ -93,7 +94,9 @@ export default function Steps(props: Props) {
     : songQueued
       ? "The song starts at the end of the pattern."
       : "";
-  const switchHint = atEnd ? "Switching while playing waits for the end of the pattern." : "Switching while playing lands on the next step.";
+  const switchHint = atEnd
+    ? "Switching while playing waits for the end of the pattern."
+    : "Switching patterns while playing lands on the next step; a song still starts at the end of the pattern.";
 
   const bank = (
     <div className="bank" role="group" aria-label="Patterns">

@@ -15,14 +15,20 @@ idevkore/dk-tunekore#17
   blinks with a dashed outline, the playing one is underlined, and a note
   says when it starts.
 - Song mode switched on or off while playing lands the same way: the song
-  starts, or its pass plays to the end, at the wrap. The Song button blinks
-  while it waits.
-- A Switch option next to the patterns, At end or Now. Now lands every switch
-  on the next step, as before. The choice is saved in the `.tunek` project;
-  older projects open with At end.
+  starts, or its part plays to the end, at the wrap. The Song button blinks
+  while it waits, and the part playing stays lit until it ends.
+- A Switch option next to the patterns, At end or Now. Now lands pattern
+  switches, and song mode turned off, on the next step, as before; a song
+  still starts at the wrap, so its first part plays whole. The choice is
+  saved in the `.tunek` project; older projects open with At end.
+- Hits recorded while a switch waits go into the pattern you hear, not the
+  queued one.
+- Shortening the pattern while it plays keeps the playhead's place in the
+  bar, so a waiting switch or the next song part still lands on the bar.
 - Engine tests cover the timing: the wrap frame, swing and odd lengths,
-  changing a queued switch, switching now, song mode on and off, and a hit
-  recorded at the end of a pass.
+  changing a queued switch, switching now, song mode on and off, stopping
+  with a switch queued, a shorter pattern while a switch waits, and hits
+  recorded while a switch waits or at the end of a pass.
 
 ## 0.1.5: tracker links
 

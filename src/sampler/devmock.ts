@@ -27,7 +27,7 @@ export function installMocks() {
   let step = 0;
   // The pattern playing: like the engine, a switch waits for the wrap unless it's set to now.
   let live = 0;
-  const tick = () => ({ playing, step: playing ? step : null, played: [...played], chainPosition: null, playingPattern: playing ? live : null, songPlaying: false });
+  const tick = () => ({ playing, step: playing ? step : null, played: [...played], chainPosition: null, playingPattern: playing ? live : null });
   let sampling: { pad: number; started: number } | null = null;
   let sampler: ReturnType<typeof setInterval> | undefined;
   const calls: unknown[] = [];

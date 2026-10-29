@@ -701,19 +701,22 @@ fn sync_recorded(app: &AppHandle) {
     let s = state(app);
     let mut doc = s.doc.lock().unwrap();
     let before = doc.snapshot();
-    let cur = doc.current;
     let mut changed = false;
-    for pad in 0..PADS {
-        let live = s.handle.bank_pattern(cur, pad);
-        let added = live & !doc.pads[pad].patterns[cur];
-        if doc.pads[pad].patterns[cur] != live {
-            doc.pads[pad].patterns[cur] = live;
-            changed = true;
-        }
-        // Recorded hits carry how hard they were played.
-        for step in (0..MAX_STEPS).filter(|i| added & (1u64 << i) != 0) {
-            let v = (s.handle.bank_velocity(cur, pad, step) * 255.0).round() as u8;
-            doc.pads[pad].set_velocity(cur, step, v);
+    // Every pattern: while a switch waits, hits go into the one still playing,
+    // not the one being edited.
+    for bank in 0..BANK {
+        for pad in 0..PADS {
+            let live = s.handle.bank_pattern(bank, pad);
+            let added = live & !doc.pads[pad].patterns[bank];
+            if doc.pads[pad].patterns[bank] != live {
+                doc.pads[pad].patterns[bank] = live;
+                changed = true;
+            }
+            // Recorded hits carry how hard they were played.
+            for step in (0..MAX_STEPS).filter(|i| added & (1u64 << i) != 0) {
+                let v = (s.handle.bank_velocity(bank, pad, step) * 255.0).round() as u8;
+                doc.pads[pad].set_velocity(bank, step, v);
+            }
         }
     }
     if changed {
@@ -772,7 +775,7 @@ pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
 pub fn sampler_switch(mode: PatternSwitch, app: AppHandle) -> Result<View, String> {
     edit(&app, "switch", |s, doc| {
         doc.switch = mode;
-        s.apply_all(doc);
+        s.handle.set_switch_now(mode == PatternSwitch::Now);
         Ok(())
     })
 }
@@ -854,14 +857,13 @@ struct Tick {
     playing: bool,
     step: Option<usize>,
     played: Vec<u32>,
-    /// Which chain entry the song is on, in song mode.
+    /// Which chain entry is playing. A song starts at the end of the
+    /// pattern, and after song mode is turned off its entry plays to the end,
+    /// so this can lag the view's song mode.
     chain_position: Option<usize>,
     /// The pattern playing now. While a switch waits for the end of the
     /// pattern it differs from the view's `pattern`.
     playing_pattern: Option<usize>,
-    /// A song pass is playing; it stays true after song mode is turned off,
-    /// until that pass ends.
-    song_playing: bool,
 }
 
 /// Sends the step and each pad's play count to the UI about 30 times a
@@ -883,7 +885,6 @@ pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
                 played: (0..PADS).map(|p| handle.played(p)).collect(),
                 chain_position: handle.chain_position(),
                 playing_pattern: handle.playing_bank(),
-                song_playing: handle.song_playing(),
             };
             if last.as_ref() != Some(&now) {
                 let _ = app.emit("sampler:tick", &now);
