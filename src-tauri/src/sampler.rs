@@ -66,6 +66,16 @@ pub struct PadSettings {
     pub cutoff: f32,
     /// 0..1.
     pub resonance: f32,
+    /// Filter envelope: octaves (-8..8, 0 off), then seconds, seconds, level 0..1, seconds.
+    pub fenv_amount: f32,
+    pub fenv_attack: f32,
+    pub fenv_decay: f32,
+    pub fenv_sustain: f32,
+    pub fenv_release: f32,
+    /// Velocity to cutoff, octaves -8..8 (positive: soft hits darker).
+    pub vel_cutoff: f32,
+    /// Velocity to amp attack and decay time, -1..1 (positive: soft hits shorter).
+    pub vel_time: f32,
 }
 
 impl Default for PadSettings {
@@ -87,6 +97,13 @@ impl Default for PadSettings {
             filter: 0,
             cutoff: 20_000.0,
             resonance: 0.0,
+            fenv_amount: 0.0,
+            fenv_attack: 0.0,
+            fenv_decay: 0.3,
+            fenv_sustain: 0.0,
+            fenv_release: 0.1,
+            vel_cutoff: 0.0,
+            vel_time: 0.0,
         }
     }
 }
@@ -111,6 +128,13 @@ impl PadSettings {
             filter: self.filter,
             cutoff: self.cutoff,
             resonance: self.resonance,
+            fenv_amount: self.fenv_amount,
+            fenv_attack: self.fenv_attack,
+            fenv_decay: self.fenv_decay,
+            fenv_sustain: self.fenv_sustain,
+            fenv_release: self.fenv_release,
+            vel_cutoff: self.vel_cutoff,
+            vel_time: self.vel_time,
         }
     }
 }
@@ -1688,6 +1712,19 @@ z Loaded user settings {"a":1,"splice_folder":"/Volumes/fitMusic/Splice","b":2}"
         assert_eq!(p(0.0), 1.0);
         assert!((p(-6.0) - 0.501).abs() < 0.001);
         assert_eq!(p(-60.0), 0.0);
+    }
+
+    #[test]
+    fn pad_settings_keep_the_filter_envelope_and_read_older_projects() {
+        let s = PadSettings { filter: 1, fenv_amount: 3.5, fenv_decay: 0.8, vel_cutoff: 2.0, vel_time: -0.5, ..Default::default() };
+        let back: PadSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        let p = back.params();
+        assert_eq!((p.fenv_amount, p.fenv_decay, p.vel_cutoff, p.vel_time), (3.5, 0.8, 2.0, -0.5));
+        // A pad saved before 0.1.6 has none of these and loads with them off.
+        let old: PadSettings = serde_json::from_str(r#"{"gainDb":-3,"filter":1,"cutoff":800}"#).unwrap();
+        assert_eq!((old.fenv_amount, old.vel_cutoff, old.vel_time), (0.0, 0.0, 0.0));
+        assert_eq!(old.cutoff, 800.0);
     }
 
     #[test]
