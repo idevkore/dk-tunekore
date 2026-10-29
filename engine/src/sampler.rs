@@ -10,6 +10,11 @@
 //! The sequencer holds [`BANKS`] patterns. Each step of each pad has a
 //! velocity, a chance (probability) and a ratchet count. In song mode a chain
 //! of banks plays one after the other.
+//!
+//! Switching banks, or song mode on or off, lands at the end of the pattern
+//! (the next wrap) by default, so the pattern playing finishes first; with
+//! [`SamplerShared::set_switch_now`] it lands on the next step instead. The
+//! audio thread makes that call at each step, from atomics only.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -44,6 +49,8 @@ pub const FILTER_BAND_PASS: u8 = 3;
 const NO_STEP: u32 = u32::MAX;
 /// The song position when no song is playing.
 const NO_POS: u32 = u32::MAX;
+/// The bank playing when the sequencer is stopped.
+const NO_BANK: u32 = u32::MAX;
 
 const GATE: u32 = 1;
 const REVERSE: u32 = 2;
@@ -320,7 +327,8 @@ pub struct SamplerShared {
     recorded: AtomicU32,
     /// The pattern banks: steps, velocity, chance and ratchet of every pad.
     banks: [Bank; BANKS],
-    /// The bank that plays (outside song mode) and that recording writes to.
+    /// The bank being edited and that recording writes to. Outside song mode
+    /// it plays from the next switch (see `switch_now`).
     bank: AtomicU32,
     /// The song: bank numbers, `chain_len` of them in use.
     chain: [AtomicU8; CHAIN_MAX],
@@ -329,6 +337,10 @@ pub struct SamplerShared {
     song_loop: AtomicBool,
     /// The chain entry playing, or NO_POS. Written by the audio thread.
     chain_pos: AtomicU32,
+    /// Switches land on the next step instead of the next wrap.
+    switch_now: AtomicBool,
+    /// The bank the sequencer read for its last step, or NO_BANK. Written by the audio thread.
+    play_bank: AtomicU32,
 }
 
 impl Default for SamplerShared {
@@ -350,6 +362,8 @@ impl Default for SamplerShared {
             song_mode: AtomicBool::new(false),
             song_loop: AtomicBool::new(false),
             chain_pos: AtomicU32::new(NO_POS),
+            switch_now: AtomicBool::new(false),
+            play_bank: AtomicU32::new(NO_BANK),
         }
     }
 }
@@ -405,9 +419,12 @@ impl SamplerShared {
         self.bank_velocity(self.bank(), pad, step)
     }
 
-    /// Makes `bank` (0 = A) the one that plays and that recording writes to.
-    /// While playing, the switch lands on the next step; in song mode the
-    /// chain decides what plays, and this is only the bank being edited.
+    /// Makes `bank` (0 = A) the one being edited, that recording writes to and
+    /// that plays outside song mode. Edits apply at once; while playing, the
+    /// bank starts at the next wrap of the pattern, or on the next step with
+    /// [`set_switch_now`](Self::set_switch_now). Until then
+    /// [`playing_bank`](Self::playing_bank) is still the old one. In song mode
+    /// the chain decides what plays, and this is only the bank being edited.
     /// Ignores a bad index.
     pub fn set_bank(&self, bank: usize) {
         if bank < BANKS {
@@ -524,6 +541,37 @@ impl SamplerShared {
         match self.chain_pos.load(Ordering::Relaxed) {
             NO_POS => None,
             p => Some(p as usize),
+        }
+    }
+
+    /// Whether a song pass is playing: a chain entry started at the last wrap
+    /// (or, switching now, on a step since). Unlike
+    /// [`chain_position`](Self::chain_position) it stays true after song mode
+    /// is turned off, until the song's pass ends at the wrap.
+    pub fn song_playing(&self) -> bool {
+        self.chain_pos.load(Ordering::Relaxed) != NO_POS
+    }
+
+    /// With `now` on, switching banks or song mode lands on the next step,
+    /// where the sequencer carries on from the same step of the new bank.
+    /// Off (the default), it lands at the end of the pattern: the bank or song
+    /// pass playing finishes, and the next one starts exactly on the wrap.
+    /// Turning it on while a switch waits makes that switch on the next step.
+    pub fn set_switch_now(&self, now: bool) {
+        self.switch_now.store(now, Ordering::Relaxed);
+    }
+
+    pub fn switch_now(&self) -> bool {
+        self.switch_now.load(Ordering::Relaxed)
+    }
+
+    /// The bank the sequencer is playing, from its last step, or `None` when
+    /// stopped. While a switch waits for the wrap it differs from
+    /// [`bank`](Self::bank).
+    pub fn playing_bank(&self) -> Option<usize> {
+        match self.play_bank.load(Ordering::Relaxed) {
+            NO_BANK => None,
+            b => Some(b as usize),
         }
     }
 
@@ -840,9 +888,11 @@ pub struct Sampler {
     click_fade_step: f32,
     /// The dice for step chance.
     rng: XorShift,
-    /// The chain entry playing (NO_POS when no song plays) and its bank.
+    /// Where the sequencer is: the chain entry playing (NO_POS when no song
+    /// plays), its bank, and the bank that plays outside a song.
     chain_pos: u32,
     song_bank: usize,
+    plain_bank: usize,
     /// The rest of a ratcheted step, per pad: hits left, frames until the next
     /// one, frames between hits and their velocity. `ratchet_active` has a bit
     /// for each pad with hits left.
@@ -851,6 +901,21 @@ pub struct Sampler {
     ratchet_gap: [f64; PADS],
     ratchet_vel: [f32; PADS],
     ratchet_active: u32,
+}
+
+/// Which bank a step reads: the chain entry playing (NO_POS outside a song),
+/// its bank, and the bank that plays outside a song.
+#[derive(Clone, Copy)]
+struct Position {
+    chain_pos: u32,
+    song_bank: usize,
+    plain_bank: usize,
+}
+
+impl Position {
+    fn bank(&self) -> usize {
+        if self.chain_pos != NO_POS { self.song_bank } else { self.plain_bank }
+    }
 }
 
 /// What starts at the top of the pattern.
@@ -930,6 +995,7 @@ impl Sampler {
             rng: XorShift::new(RNG_SEED),
             chain_pos: NO_POS,
             song_bank: 0,
+            plain_bank: 0,
             ratchet_left: [0; PADS],
             ratchet_wait: [0.0; PADS],
             ratchet_gap: [0.0; PADS],
@@ -1052,6 +1118,7 @@ impl Sampler {
     fn stop_transport(&mut self, shared: &SamplerShared) {
         shared.step.store(NO_STEP, Ordering::Relaxed);
         shared.chain_pos.store(NO_POS, Ordering::Relaxed);
+        shared.play_bank.store(NO_BANK, Ordering::Relaxed);
         self.chain_pos = NO_POS;
         self.click_left = 0;
         self.skip_pads = 0;
@@ -1076,13 +1143,35 @@ impl Sampler {
         Pass::Song(pos as u32, bank)
     }
 
-    /// The bank the sequencer reads on its next step.
-    fn playing_bank(&self, shared: &SamplerShared) -> usize {
-        if self.chain_pos != NO_POS && shared.song_mode.load(Ordering::Relaxed) {
-            self.song_bank
-        } else {
-            shared.bank()
+    /// Where the sequencer will be once `step` fires, or `None` when a song
+    /// that doesn't loop ends there. This is where every switch lands: at the
+    /// wrap (step 0) the next pass starts, from the current bank or the next
+    /// chain entry. Switching now, every step also picks up the current bank,
+    /// and song mode turned on or off. Otherwise a pass plays to its end, even
+    /// a song's pass after song mode is turned off. Changes nothing.
+    fn position_at(&self, shared: &SamplerShared, step: usize) -> Option<Position> {
+        let now = shared.switch_now.load(Ordering::Relaxed);
+        let mut p = Position { chain_pos: self.chain_pos, song_bank: self.song_bank, plain_bank: self.plain_bank };
+        if step == 0 || now {
+            p.plain_bank = shared.bank();
         }
+        if step == 0 {
+            match self.next_pass(shared) {
+                Pass::Plain => p.chain_pos = NO_POS,
+                Pass::Song(pos, bank) => (p.chain_pos, p.song_bank) = (pos, bank),
+                Pass::End => return None,
+            }
+        } else if now {
+            if !shared.song_mode.load(Ordering::Relaxed) {
+                p.chain_pos = NO_POS;
+            } else if p.chain_pos == NO_POS {
+                // Song mode came on mid-pass: entry 0 starts on this step.
+                if let Pass::Song(pos, bank) = self.next_pass(shared) {
+                    (p.chain_pos, p.song_bank) = (pos, bank);
+                }
+            }
+        }
+        Some(p)
     }
 
     /// Plays one hit of a step. `frames` is how long a gate-mode pad holds it.
@@ -1094,18 +1183,12 @@ impl Sampler {
     /// that doesn't loop has played its last entry: the caller stops.
     fn fire_step(&mut self, shared: &SamplerShared, steps: usize) -> bool {
         let step = self.next_step;
-        if step == 0 {
-            match self.next_pass(shared) {
-                Pass::Plain => self.chain_pos = NO_POS,
-                Pass::Song(pos, bank) => {
-                    self.chain_pos = pos;
-                    self.song_bank = bank;
-                }
-                Pass::End => return false,
-            }
-            shared.chain_pos.store(self.chain_pos, Ordering::Relaxed);
-        }
-        let bank = &shared.banks[self.playing_bank(shared)];
+        let Some(p) = self.position_at(shared, step) else { return false };
+        (self.chain_pos, self.song_bank, self.plain_bank) = (p.chain_pos, p.song_bank, p.plain_bank);
+        let playing = p.bank();
+        shared.chain_pos.store(p.chain_pos, Ordering::Relaxed);
+        shared.play_bank.store(playing as u32, Ordering::Relaxed);
+        let bank = &shared.banks[playing];
         let length = shared.step_frames(step, self.rate);
         // Pads whose hit was recorded onto this step a moment ago already sounded.
         let skip = if step == self.skip_step { self.skip_pads } else { 0 };
@@ -1176,16 +1259,7 @@ impl Sampler {
         let step = if self.countdown > length * 0.5 {
             current
         } else {
-            let next_bank = if self.next_step == 0 {
-                match self.next_pass(shared) {
-                    Pass::Plain => Some(target),
-                    Pass::Song(_, bank) => Some(bank),
-                    Pass::End => None,
-                }
-            } else {
-                Some(self.playing_bank(shared))
-            };
-            if next_bank == Some(target) {
+            if self.position_at(shared, self.next_step).map(|p| p.bank()) == Some(target) {
                 self.skip_step = self.next_step;
                 self.skip_pads |= 1 << pad;
             }
@@ -2355,8 +2429,88 @@ mod tests {
     }
 
     #[test]
-    fn switching_bank_changes_what_plays_on_the_next_step() {
+    fn a_bank_switch_waits_for_the_wrap_and_lands_on_its_frame() {
         let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111); // A: the click, every step
+        shared.set_bank_pattern(1, 1, 0b1111); // B: the flat pad, every step
+        assert!(!shared.switch_now(), "switches wait for the wrap by default");
+        assert_eq!(shared.playing_bank(), None, "nothing plays yet");
+        shared.set_playing(true);
+        let mut left = play_blocks(&mut s, &shared, 10_000, 777); // inside step 1
+        assert_eq!(shared.playing_bank(), Some(0));
+        shared.set_bank(1);
+        assert_eq!(shared.bank(), 1, "the edit bank changes at once");
+        assert_eq!(shared.playing_bank(), Some(0), "A plays on, B is queued");
+
+        left.extend(play_blocks(&mut s, &shared, 14_000, 777)); // frames up to 23,999
+        assert_eq!(shared.playing_bank(), Some(0), "the last frame of A's pass");
+        assert_eq!(shared.current_step(), Some(3));
+        left.extend(play_blocks(&mut s, &shared, 1, 1));
+        assert_eq!(shared.playing_bank(), Some(1), "frame 24,000 starts B");
+        assert_eq!(shared.current_step(), Some(0));
+        left.extend(play_blocks(&mut s, &shared, 24_000 - 1, 777));
+
+        assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000, 24_000, 30_000, 36_000, 42_000]);
+        for at in [0, 6_000, 12_000, 18_000] {
+            assert_eq!(pad_at(&left, at), Some(0), "A's step at {at}, after the switch was made");
+        }
+        assert!(left[23_999] == 0.0 && left[24_000] > 0.01, "B sounds from the wrap's very first frame");
+        for at in [24_000, 30_000, 36_000, 42_000] {
+            assert_eq!(pad_at(&left, at), Some(1), "B's step at {at}");
+        }
+
+        shared.set_playing(false);
+        play_blocks(&mut s, &shared, 1, 1);
+        assert_eq!(shared.playing_bank(), None, "stopped");
+    }
+
+    #[test]
+    fn the_wrap_is_exact_with_swing_and_an_odd_length() {
+        let (mut s, shared) = song_rig();
+        shared.set_steps(7);
+        shared.set_swing(0.5);
+        shared.set_tempo(133.0);
+        shared.set_bank_pattern(0, 0, 0b111_1111);
+        shared.set_bank_pattern(1, 1, 0b000_0001);
+        shared.set_playing(true);
+        let pass = shared.pattern_frames(RATE, 1);
+        let mut left = play_blocks(&mut s, &shared, pass / 2, 333);
+        shared.set_bank(1);
+        left.extend(play_blocks(&mut s, &shared, pass, 333));
+        let on = onsets(&left);
+        assert_eq!(on.len(), 8, "A's seven steps, then B's one");
+        assert_eq!(pad_at(&left, on[6]), Some(0), "A's last step");
+        assert!((on[7] as i64 - pass as i64).abs() <= 1, "B starts on the wrap: {} vs {pass}", on[7]);
+        assert_eq!(pad_at(&left, on[7]), Some(1));
+    }
+
+    #[test]
+    fn a_queued_switch_can_be_changed_or_taken_back_before_the_wrap() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b0001);
+        shared.set_bank_pattern(1, 1, 0b0001);
+        shared.set_bank_pattern(2, 0, 0b0011);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 3_000, 500);
+        shared.set_bank(1);
+        shared.set_bank(2); // the last choice before the wrap wins
+        let left = play_blocks(&mut s, &shared, 21_000 + 12_000, 500);
+        assert_eq!(onsets(&left), vec![21_000, 27_000], "C's steps 0 and 1");
+        assert_eq!(shared.playing_bank(), Some(2));
+
+        play_blocks(&mut s, &shared, 15_000, 500); // 3,000 into C's second pass
+        shared.set_bank(1);
+        shared.set_bank(2); // back to the bank that plays: nothing waits
+        let left = play_blocks(&mut s, &shared, 21_000 + 1_000, 500);
+        assert_eq!(onsets(&left), vec![3_000, 21_000], "C's step 1, then its next pass");
+        assert_eq!(pad_at(&left, 21_000), Some(0), "C again, not B");
+    }
+
+    #[test]
+    fn switching_now_changes_what_plays_on_the_next_step() {
+        let (mut s, shared) = song_rig();
+        shared.set_switch_now(true);
+        assert!(shared.switch_now());
         shared.set_bank_pattern(0, 0, 0b1111); // bank A: every step
         shared.set_bank_pattern(1, 0, 0b0100); // bank B: step 2 only
         shared.set_playing(true);
@@ -2365,10 +2519,28 @@ mod tests {
         left.extend(play_blocks(&mut s, &shared, 21_000, 500));
         // Step 0 already played from A; step 1 reads B (nothing); step 2 plays from B.
         assert_eq!(onsets(&left), vec![0, 12_000]);
+        assert_eq!(shared.playing_bank(), Some(1));
 
         shared.set_bank(0);
         let left = play_blocks(&mut s, &shared, 24_000, 500);
         assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000], "and back to A");
+    }
+
+    #[test]
+    fn switching_now_while_a_switch_waits_lands_it_on_the_next_step() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111);
+        shared.set_bank_pattern(1, 1, 0b1111);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 3_000, 500); // inside step 0
+        shared.set_bank(1);
+        let left = play_blocks(&mut s, &shared, 6_000, 500); // step 1 at 6,000
+        assert_eq!(pad_at(&left, 3_000), Some(0), "queued: step 1 is still A");
+        shared.set_switch_now(true);
+        let left = play_blocks(&mut s, &shared, 6_000, 500); // step 2 at 12,000
+        assert_eq!(onsets(&left), vec![3_000]);
+        assert_eq!(pad_at(&left, 3_000), Some(1), "step 2 is B");
+        assert_eq!(shared.current_step(), Some(2));
     }
 
     #[test]
@@ -2533,38 +2705,76 @@ mod tests {
         assert!(!shared.is_playing());
     }
 
-    #[test]
-    fn song_mode_can_be_switched_while_playing() {
-        // On: the song starts at entry 0 on the next wrap.
-        let (mut s, shared) = song_rig();
+    /// A plays the click and B the flat pad, on every step; the song is B.
+    fn song_switch_rig(song: bool) -> (Sampler, SamplerShared) {
+        let (s, shared) = song_rig();
         shared.set_bank_pattern(0, 0, 0b1111);
         shared.set_bank_pattern(1, 1, 0b1111);
         shared.set_chain(&[1]);
+        shared.set_song_mode(song);
+        shared.set_song_loop(true);
         shared.set_playing(true);
+        (s, shared)
+    }
+
+    #[test]
+    fn song_mode_turned_on_or_off_waits_for_the_wrap() {
+        // On: the song starts at entry 0 on the next wrap.
+        let (mut s, shared) = song_switch_rig(false);
         play_blocks(&mut s, &shared, 10_000, 777);
         shared.set_song_mode(true);
+        assert!(!shared.song_playing(), "queued");
         let left = play_blocks(&mut s, &shared, 14_000, 777);
         assert_eq!(pad_at(&left, 2_000), Some(0), "bank A until the wrap (step 2)");
         assert_eq!(pad_at(&left, 8_000), Some(0), "and step 3");
+        assert!(!shared.song_playing());
         let left = play_blocks(&mut s, &shared, 6_000, 777);
-        assert_eq!(pad_at(&left, 0), Some(1), "then the chain's bank B");
+        assert_eq!(pad_at(&left, 0), Some(1), "then the chain's bank B, on the wrap");
         assert_eq!(shared.chain_position(), Some(0));
+        assert!(shared.song_playing());
 
-        // Off: the next step reads the current bank again.
-        let (mut s, shared) = song_rig();
-        shared.set_bank_pattern(0, 0, 0b1111);
-        shared.set_bank_pattern(1, 1, 0b1111);
-        shared.set_chain(&[1]);
-        shared.set_song_mode(true);
-        shared.set_song_loop(true);
-        shared.set_playing(true);
+        // Off: the song's pass plays to its end, then the current bank.
+        let (mut s, shared) = song_switch_rig(true);
         let left = play_blocks(&mut s, &shared, 7_000, 777); // steps 0 and 1
         assert_eq!(pad_at(&left, 0), Some(1));
         assert_eq!(pad_at(&left, 6_000), Some(1));
         shared.set_song_mode(false);
+        assert_eq!(shared.chain_position(), None, "song mode is off");
+        assert!(shared.song_playing(), "but its pass is still playing");
+        let left = play_blocks(&mut s, &shared, 17_000, 777); // to 24,000
+        assert_eq!(pad_at(&left, 5_000), Some(1), "step 2 is still the song's B");
+        assert_eq!(pad_at(&left, 11_000), Some(1), "and step 3");
+        assert_eq!(shared.playing_bank(), Some(1));
+        let left = play_blocks(&mut s, &shared, 6_000, 777);
+        assert_eq!(pad_at(&left, 0), Some(0), "the wrap plays bank A (the current one)");
+        assert!(!shared.song_playing());
+        assert_eq!(shared.playing_bank(), Some(0));
+    }
+
+    #[test]
+    fn song_mode_turned_on_or_off_lands_on_the_next_step_when_switching_now() {
+        // On: entry 0 starts on the next step, and entry 1 at the wrap.
+        let (mut s, shared) = song_switch_rig(false);
+        shared.set_switch_now(true);
+        shared.set_chain(&[1, 0]);
+        play_blocks(&mut s, &shared, 10_000, 777); // inside step 1
+        shared.set_song_mode(true);
+        let left = play_blocks(&mut s, &shared, 14_000, 777);
+        assert_eq!(pad_at(&left, 2_000), Some(1), "step 2 plays the song's B");
+        assert_eq!(shared.chain_position(), Some(0));
+        let left = play_blocks(&mut s, &shared, 6_000, 777);
+        assert_eq!(pad_at(&left, 0), Some(0), "entry 1 (A) at the wrap");
+        assert_eq!(shared.chain_position(), Some(1));
+
+        // Off: the next step reads the current bank again.
+        let (mut s, shared) = song_switch_rig(true);
+        shared.set_switch_now(true);
+        play_blocks(&mut s, &shared, 7_000, 777); // steps 0 and 1
+        shared.set_song_mode(false);
         let left = play_blocks(&mut s, &shared, 17_000, 777);
         assert_eq!(pad_at(&left, 5_000), Some(0), "step 2 plays bank A (the current one)");
         assert_eq!(shared.chain_position(), None);
+        assert!(!shared.song_playing());
     }
 
     #[test]
@@ -2817,6 +3027,26 @@ mod tests {
         assert_eq!(shared.played(0), 1, "the sequencer skips it this pass");
         run(&mut s, &shared, 16 * 6_000 - 100);
         assert_eq!(shared.played(0), 2, "and plays it on the next");
+    }
+
+    #[test]
+    fn a_hit_at_the_end_of_a_pass_goes_to_the_queued_banks_first_step_once() {
+        let (mut s, shared) = recording_rig();
+        shared.set_bank_pattern(0, 0, 0xFFFF); // A plays pad 0 on every step
+        run(&mut s, &shared, 30_000);
+        shared.set_bank(1); // B, empty, waits for the wrap at 96,000
+        run(&mut s, &shared, 90_000 + 4_500 - 30_000); // late in A's last step
+        assert_eq!(shared.played(0), 16, "all of A's pass");
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.bank_pattern(1, 0), 1, "written to B's step 0, which plays next");
+        assert_eq!(shared.bank_pattern(0, 0), 0xFFFF, "A is untouched");
+        assert_eq!(shared.played(0), 17, "the hand hit");
+        run(&mut s, &shared, 2_000); // the wrap at 96,000 starts B
+        assert_eq!(shared.playing_bank(), Some(1));
+        assert_eq!(shared.played(0), 17, "B's step 0 is skipped this pass");
+        run(&mut s, &shared, 96_000);
+        assert_eq!(shared.played(0), 18, "and plays on the next");
     }
 
     #[test]
