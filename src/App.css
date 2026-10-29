@@ -211,11 +211,19 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .rec, .click { width: 30px; height: 30px; border-radius: 8px; border: 0; background: #22222b; color: var(--dim); display: grid; place-items: center; }
 .rec.on { background: #ff4d6d; color: #fff; }
 .click.on { background: var(--violet); color: #fff; }
-.bank { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; }
+.bank { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
 .bank-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); margin-right: 4px; }
 .bank-btn { width: 30px; height: 26px; border-radius: 6px; border: 1px solid var(--line-2); background: var(--card-2); color: var(--dim); font-weight: 600; font-size: 12px; position: relative; }
 .bank-btn.used::after { content: ""; position: absolute; right: 4px; top: 4px; width: 4px; height: 4px; border-radius: 50%; background: var(--lime); }
 .bank-btn.on { background: var(--violet); border-color: var(--violet); color: #fff; }
+/* The pattern playing while another waits for the end of the pattern (or the song's bank), and the one waiting. */
+.bank-btn.live { box-shadow: inset 0 -3px 0 var(--lime); }
+.bank-btn.queued { background: var(--card-2); color: var(--violet-soft); border: 1px dashed var(--violet); animation: queued-blink 0.5s steps(1) infinite alternate; }
+.song-toggle.queued { border-style: dashed; animation: queued-blink 0.5s steps(1) infinite alternate; }
+@keyframes queued-blink { to { border-color: var(--line-2); } }
+@media (prefers-reduced-motion: reduce) { .bank-btn.queued, .song-toggle.queued { animation: none; } }
+.bank .switch { margin-left: 6px; align-self: center; }
+.queued-note { margin-left: 10px; color: var(--violet-soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .bank-copy { height: 26px; margin-left: 6px; background: var(--deep); border: 1px solid var(--line-2); border-radius: 6px; color: var(--soft); font-size: 12px; padding: 0 4px; }
 .bank-hint { margin-left: auto; }
 select.choke { height: 26px; background: var(--deep); border: 1px solid var(--line-2); border-radius: 6px; color: var(--soft); font-size: 12px; }

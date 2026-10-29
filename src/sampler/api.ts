@@ -79,7 +79,8 @@ export interface SamplerView {
   dirty: boolean;
   canUndo: boolean;
   canRedo: boolean;
-  /** The pattern playing and being edited, 0 = A. */
+  /** The pattern being edited, 0 = A. Outside song mode it also plays, from
+   * the next switch; `Tick.playingPattern` is the one playing now. */
   pattern: number;
   patternsUsed: boolean[];
   metronome: boolean;
@@ -88,15 +89,25 @@ export interface SamplerView {
   chain: number[];
   songMode: boolean;
   songLoop: boolean;
+  /** When a switch made while playing lands: at the end of the pattern, or on the next step. */
+  patternSwitch: PatternSwitch;
 }
+
+export type PatternSwitch = "end" | "now";
 
 export interface Tick {
   playing: boolean;
   step: number | null;
   /** Play count per pad; a change means the pad just played. */
   played: number[];
-  /** Which chain entry the song is on, in song mode. */
+  /**
+   * Which chain entry is playing. A song starts at the end of the pattern, and
+   * after song mode is turned off its entry plays to the end, so this can lag
+   * the view's `songMode`.
+   */
   chainPosition: number | null;
+  /** The pattern playing now; while a switch waits it differs from the view's `pattern`. */
+  playingPattern: number | null;
 }
 
 export interface LibraryItem {
@@ -132,6 +143,7 @@ export const release = (pad: number) => invoke<void>("sampler_release", { pad })
 export const PATTERN_NAMES = ["A", "B", "C", "D"];
 export const setVelocity = (pad: number, step: number, velocity: number) => invoke<SamplerView>("sampler_velocity", { pad, step, velocity });
 export const selectPattern = (index: number) => invoke<SamplerView>("sampler_pattern", { index });
+export const setPatternSwitch = (mode: PatternSwitch) => invoke<SamplerView>("sampler_switch", { mode });
 export const copyPattern = (from: number, to: number) => invoke<SamplerView>("sampler_copy_pattern", { from, to });
 export const setMetronome = (on: boolean) => invoke<SamplerView>("sampler_metronome", { on });
 export const setRecording = (on: boolean) => invoke<SamplerView>("sampler_record", { on });
