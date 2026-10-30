@@ -291,8 +291,11 @@ impl Doc {
     /// continues a run of the same kind.
     fn checkpoint(&mut self, key: &str, before: Snapshot) {
         let now = Instant::now();
-        // A recording take ("take:N") is one step however long it runs.
-        let merge = matches!(&self.history.last, Some((k, t)) if k == key && (key.starts_with("take:") || now.duration_since(*t) < MERGE_WINDOW));
+        // A recording take ("take:N") and a MIDI knob's gesture ("midi:N") are
+        // one step however long they run: a slow turn of a stepped control
+        // (swing) can leave more than the window between its edits.
+        let lasts = key.starts_with("take:") || key.starts_with("midi:");
+        let merge = matches!(&self.history.last, Some((k, t)) if k == key && (lasts || now.duration_since(*t) < MERGE_WINDOW));
         self.history.last = Some((key.to_string(), now));
         self.revision += 1;
         if merge {
@@ -576,7 +579,8 @@ pub fn publish_now(app: &AppHandle) -> View {
 // ---- What a MIDI knob can move (src-tauri/src/midi/targets.rs) ----
 
 /// The values a controller can move: every pad's settings, the tempo and the swing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Controls {
     pub pads: [PadSettings; PADS],
     pub tempo: f32,
@@ -1809,6 +1813,15 @@ mod tests {
         // The next gesture is a step of its own; out-of-range values are held to the range.
         assert!(change_controls(&s, &mut doc, "midi:2", |c| c.tempo = 900.0));
         assert_eq!((doc.history.undo.len(), doc.tempo), (2, 300.0));
+        // A slow turn: the same gesture's edits a second apart are still one step.
+        doc.history.last = Some(("midi:2".into(), Instant::now() - Duration::from_secs(1)));
+        assert!(change_controls(&s, &mut doc, "midi:2", |c| c.swing = 0.42));
+        assert_eq!(doc.history.undo.len(), 2, "a gesture lasts however long the knob turns");
+        // Other edits still merge only within the window.
+        doc.history.last = Some(("settings:2".into(), Instant::now() - Duration::from_secs(1)));
+        let before = doc.snapshot();
+        doc.checkpoint("settings:2", before);
+        assert_eq!(doc.history.undo.len(), 3);
     }
 
     #[test]
