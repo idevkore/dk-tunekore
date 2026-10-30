@@ -23,12 +23,15 @@ fn options(dir: &std::path::Path, cache: &std::path::Path) -> ScanOptions {
     }
 }
 
-/// A plugin folder with the good fixture and one of each misbehaving plugin; `None` without a C++
-/// compiler.
-fn mixed_folder(tag: &str) -> Option<std::path::PathBuf> {
+/// A plugin folder with the good fixture and one of each misbehaving plugin (the one that hangs
+/// only if `hang`); `None` without a C++ compiler.
+fn mixed_folder(tag: &str, hang: bool) -> Option<std::path::PathBuf> {
     let dir = scratch_dir(&format!("scan-mixed-{tag}"));
-    for (name, mode) in [("Throws", Misbehaviour::ThrowsInInitialize), ("Aborts", Misbehaviour::AbortsOnLoad), ("Hangs", Misbehaviour::HangsOnLoad), ("ThrowsEarly", Misbehaviour::ThrowsOnLoad)] {
+    for (name, mode) in [("Throws", Misbehaviour::ThrowsInInitialize), ("Aborts", Misbehaviour::AbortsOnLoad), ("ThrowsEarly", Misbehaviour::ThrowsOnLoad)] {
         bad_plugin(&dir, name, mode)?;
+    }
+    if hang {
+        bad_plugin(&dir, "Hangs", Misbehaviour::HangsOnLoad)?;
     }
     // The good one, as a copy so the folder holds only what this test put there.
     let target = dir.join("Fixture.vst3");
@@ -65,7 +68,7 @@ fn a_bundle_that_throws_while_loading_is_an_error_too() {
 
 #[test]
 fn the_scan_survives_a_crash_a_hang_and_exceptions_and_reports_each() {
-    let Some(dir) = mixed_folder("survives") else { return eprintln!("skipped: no C++ compiler") };
+    let Some(dir) = mixed_folder("survives", true) else { return eprintln!("skipped: no C++ compiler") };
     let cache_path = dir.join("cache.json");
     let t = Instant::now();
     let cache = scan::scan(&options(&dir, &cache_path)).expect("the scan runs");
@@ -103,27 +106,59 @@ fn the_scan_survives_a_crash_a_hang_and_exceptions_and_reports_each() {
 
 #[test]
 fn a_second_scan_reuses_the_cache_and_a_rescan_does_not() {
-    let Some(dir) = mixed_folder("reuse") else { return eprintln!("skipped: no C++ compiler") };
+    let Some(dir) = mixed_folder("reuse", false) else { return eprintln!("skipped: no C++ compiler") };
     let cache_path = dir.join("cache.json");
     let opts = options(&dir, &cache_path);
     let first = scan::scan(&opts).unwrap();
-    // Nothing changed, so nothing is probed: the hanging plugin's 3 s timeout is not paid again.
+    assert_eq!(first.failures().count(), 3);
+    // Nothing changed, so nothing is probed, failures included (they stay on the blocklist).
+    let second = scan::scan(&opts).unwrap();
+    assert_eq!(second.entries, first.entries, "every entry, load times included, came from the cache");
+    // Retrying the failures probes the three bad bundles again and nothing else.
+    let retried = scan::retry_failed(&opts).unwrap();
+    assert_eq!(retried.failures().count(), 3);
+    let good = |c: &ScanCache| c.plugins().cloned().collect::<Vec<_>>();
+    assert_eq!(good(&retried), good(&first), "the good plugins were not probed again");
+    // A rescan on demand probes everything.
+    let third = scan::rescan(&opts).unwrap();
+    assert_eq!(third.entries.len(), first.entries.len());
+}
+
+#[test]
+fn a_plugin_that_timed_out_is_tried_again_every_scan() {
+    let dir = scratch_dir("scan-timeout-retry");
+    let Some(_) = bad_plugin(&dir, "Hangs", Misbehaviour::HangsOnLoad) else { return eprintln!("skipped: no C++ compiler") };
+    let opts = options(&dir, &dir.join("cache.json"));
+    let first = scan::scan(&opts).unwrap();
+    assert_eq!(first.find("Hangs").unwrap().status, ScanStatus::TimedOut);
+    // It may only have been slow (a licence check on a busy Mac): the next scan tries again.
     let t = Instant::now();
     let second = scan::scan(&opts).unwrap();
-    assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
-    assert_eq!(second.entries, first.entries);
-    // Retrying the failures probes the four bad bundles again (the hang costs its timeout) and
-    // nothing else.
+    assert!(t.elapsed() >= Duration::from_secs(3), "probed again: {:?}", t.elapsed());
+    assert_eq!(second.find("Hangs").unwrap().status, ScanStatus::TimedOut);
+}
+
+#[test]
+fn the_scan_keeps_to_its_overall_limit_and_leaves_no_probe_behind() {
+    let Some(dir) = mixed_folder("deadline", true) else { return eprintln!("skipped: no C++ compiler") };
+    let cache_path = dir.join("cache.json");
+    // Each plugin may take 30 s, but the whole scan only 3.
+    let opts = ScanOptions { timeout: Duration::from_secs(30), total_timeout: Duration::from_secs(3), ..options(&dir, &cache_path) };
     let t = Instant::now();
-    let retried = scan::retry_failed(&opts).unwrap();
-    assert!(t.elapsed() >= Duration::from_secs(3), "the hang was retried: {:?}", t.elapsed());
-    assert_eq!(retried.failures().count(), 4);
-    assert_eq!(retried.plugins().count(), 3);
-    // A rescan on demand probes everything again.
-    let t = Instant::now();
-    let third = scan::rescan(&opts).unwrap();
-    assert!(t.elapsed() >= Duration::from_secs(3), "the hang was probed again: {:?}", t.elapsed());
-    assert_eq!(third.entries.len(), first.entries.len());
+    let cache = scan::scan(&opts).expect("the scanner stops itself and reports");
+    assert!(t.elapsed() < Duration::from_secs(15), "took {:?}", t.elapsed());
+    let hang = cache.find("Hangs").unwrap();
+    assert_eq!(hang.status, ScanStatus::TimedOut);
+    assert!(hang.error.as_deref().unwrap_or("").contains("overall time limit"), "{hang:?}");
+    assert_eq!(cache.plugins().count(), 3, "what finished in time is kept");
+    assert_eq!(ScanCache::read(&cache_path), Some(cache));
+    assert!(!scan::runner::running_probes_path(&cache_path).exists(), "the running-probes list is cleaned up");
+    // The hung probe was killed, not orphaned.
+    std::thread::sleep(Duration::from_millis(200));
+    let left = std::process::Command::new("pgrep").arg("-f").arg(dir.join("Hangs.vst3")).output();
+    if let Ok(out) = left {
+        assert!(out.stdout.is_empty(), "a probe is still running: {}", String::from_utf8_lossy(&out.stdout));
+    }
 }
 
 #[test]

@@ -6,6 +6,8 @@
 //!         --path DIR             also search DIR (repeatable)
 //!         --no-default-paths     skip the standard VST3 folders
 //!         --timeout SECONDS      how long one plugin may take to load (default 60)
+//!         --deadline SECONDS     how long the whole scan may take (default 1800); then the
+//!                                probes still running are stopped and the cache is written
 //!         --jobs N               plugins probed at once (default 4)
 //!         --force                probe every plugin again, even if it has not changed
 //!         --retry-failed         probe the plugins that failed last time again
@@ -35,10 +37,11 @@ fn main() -> ExitCode {
                 "--no-default-paths" => opts.default_paths = false,
                 "--timeout" => opts.timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--timeout needs a whole number of seconds")?),
                 "--jobs" => opts.jobs = value("a number")?.parse().map_err(|_| "--jobs needs a number")?,
+                "--deadline" => opts.total_timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--deadline needs a whole number of seconds")?),
                 "--force" => opts.force = true,
                 "--retry-failed" => opts.retry_failed = true,
                 "--quiet" => quiet = true,
-                "--help" | "-h" => return Err("usage: tunekore-scan [--cache FILE] [--path DIR]... [--no-default-paths] [--timeout SECONDS] [--jobs N] [--force] [--retry-failed] [--quiet]".into()),
+                "--help" | "-h" => return Err("usage: tunekore-scan [--cache FILE] [--path DIR]... [--no-default-paths] [--timeout SECONDS] [--deadline SECONDS] [--jobs N] [--force] [--retry-failed] [--quiet]".into()),
                 other => return Err(format!("unknown option {other}")),
             }
             Ok(())

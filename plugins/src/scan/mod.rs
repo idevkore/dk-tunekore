@@ -70,7 +70,15 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
         None => find_scanner().ok_or_else(|| ScanError::ScannerNotFound(std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.display().to_string())).unwrap_or_default()))?,
     };
     let mut cmd = Command::new(&scanner);
-    cmd.arg("--cache").arg(&opts.cache_path).arg("--timeout").arg(opts.timeout.as_secs().max(1).to_string()).arg("--jobs").arg(opts.jobs.to_string()).arg("--quiet");
+    cmd.arg("--cache")
+        .arg(&opts.cache_path)
+        .arg("--timeout")
+        .arg(opts.timeout.as_secs().max(1).to_string())
+        .arg("--deadline")
+        .arg(opts.total_timeout.as_secs().max(1).to_string())
+        .arg("--jobs")
+        .arg(opts.jobs.to_string())
+        .arg("--quiet");
     if !opts.default_paths {
         cmd.arg("--no-default-paths");
     }
@@ -84,8 +92,16 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
         cmd.arg("--path").arg(p);
     }
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|e| ScanError::Start(scanner.clone(), e))?;
     let started = Instant::now();
+    // The scanner keeps to `total_timeout` itself (it stops its probes and writes what it found);
+    // this is the backstop in case the scanner itself is stuck.
+    let backstop = opts.total_timeout + Duration::from_secs(15);
     loop {
         match child.try_wait() {
             Ok(Some(st)) if st.success() => break,
@@ -96,9 +112,11 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
                 }
                 return Err(ScanError::Failed(format!("{st}: {}", err.lines().last().unwrap_or("").trim())));
             }
-            Ok(None) if started.elapsed() >= opts.total_timeout => {
+            Ok(None) if started.elapsed() >= backstop => {
                 let _ = child.kill();
                 let _ = child.wait();
+                // Its probes run in process groups of their own; it lists them for this.
+                runner::kill_listed_probes(&opts.cache_path);
                 return Err(ScanError::TimedOut(opts.total_timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
