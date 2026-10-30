@@ -109,6 +109,19 @@ pub fn set_display_zoom(zoom: f64, app: AppHandle) {
     set(&app, zoom);
 }
 
+/// The display zoom commands.
+pub fn commands() -> crate::Commands {
+    crate::commands![display_zoom, set_display_zoom]
+}
+
+/// Puts back the zoom the app was left at.
+pub fn setup(app: &AppHandle) {
+    let zoom = load(app);
+    if (zoom - 1.0).abs() > 0.001 {
+        set(app, zoom);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

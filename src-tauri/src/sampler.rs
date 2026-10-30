@@ -1217,9 +1217,13 @@ fn replace_doc(app: &AppHandle, file: SamplerFile, pads: Vec<Pad>) -> Result<(),
     let mut doc = s.doc.lock().unwrap();
     s.handle.set_playing(false);
     let mut au = audio(app).lock().unwrap();
+    // Every pad, even past a failure, so the document and the engine agree on the rest.
+    let mut failed = None;
     for (i, pad) in pads.iter().enumerate() {
         s.handle.cut(i);
-        au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
+        if let Err(e) = au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone()))) {
+            failed.get_or_insert(format!("pad {}: {e}", i + 1));
+        }
     }
     drop(au);
     let revision = doc.revision + 1;
@@ -1238,13 +1242,13 @@ fn replace_doc(app: &AppHandle, file: SamplerFile, pads: Vec<Pad>) -> Result<(),
     };
     s.apply_all(&doc);
     s.note_revision(&doc);
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// The Sampler's section of the project file.
 struct SamplerSection;
 
-impl project::Section for SamplerSection {
+impl project::Section<AppHandle> for SamplerSection {
     fn key(&self) -> &'static str {
         "sampler"
     }
@@ -1255,7 +1259,7 @@ impl project::Section for SamplerSection {
         serde_json::to_value(to_file(&doc, file)).map_err(|e| e.to_string())
     }
 
-    fn read(&self, app: &AppHandle, value: Option<&Value>, file: &Path) -> Result<project::Apply, String> {
+    fn read(&self, app: &AppHandle, value: Option<&Value>, file: &Path) -> Result<project::Apply<AppHandle>, String> {
         let mut data: SamplerFile = match value {
             Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's Sampler part is damaged ({e})"))?,
             None => SamplerFile::default(),
@@ -1292,14 +1296,17 @@ pub fn project_new(app: AppHandle) -> Result<View, String> {
 #[tauri::command]
 pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> {
     let a = app.clone();
-    spawn_blocking(move || {
+    let opened = spawn_blocking(move || {
         let file = PathBuf::from(&path);
         project::open(&a, &file, Some(file.clone()), false)
     })
     .await
-    .map_err(|e| e.to_string())??;
+    .map_err(|e| e.to_string())?;
+    // Even a project that opened in part is what the windows show now.
+    let view = publish_now(&app);
+    opened?;
     project::clear_autosave(&app);
-    Ok(publish_now(&app))
+    Ok(view)
 }
 
 /// Saves to `path` (as `.tunek`), or to the project's own file when `path` is `None`.
@@ -1313,8 +1320,9 @@ pub fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String
 #[tauri::command]
 pub async fn autosave_recover(app: AppHandle) -> Result<View, String> {
     let a = app.clone();
-    spawn_blocking(move || project::recover(&a)).await.map_err(|e| e.to_string())??;
-    Ok(publish_now(&app))
+    let recovered = spawn_blocking(move || project::recover(&a)).await.map_err(|e| e.to_string())?;
+    let view = publish_now(&app);
+    recovered.map(|()| view)
 }
 
 // ---- Export ----
@@ -1610,9 +1618,9 @@ fn file_stem(path: &Path) -> String {
 
 /// The Sampler's part of the app: its section of the project file, and the
 /// thread that sends the step and pad flashes to the UI.
-pub fn setup(app: &AppHandle, handle: SamplerHandle) {
+pub fn setup(app: &AppHandle) {
     project::register(app, SamplerSection);
-    spawn_tick(app.clone(), handle);
+    spawn_tick(app.clone(), app.state::<SamplerHandle>().inner().clone());
 }
 
 /// The Sampler's commands, the Library's and the project commands that answer with the Sampler's view.
@@ -1743,6 +1751,31 @@ mod tests {
         assert_eq!(pattern_bits(&file.pads[0].patterns[0]), 0b1_0001);
         assert_eq!(file.pads[0].velocity[0][0], 128);
         assert_eq!(file.pads[0].settings.gain_db, -3.0);
+    }
+
+    #[test]
+    fn a_version_1_pad_keeps_its_chance_ratchets_filter_envelope_and_velocity() {
+        let v1 = r#"{"format":"tunekore-project","version":1,"tempo":120,"swing":0,"steps":16,
+            "pads":[{"sample":"/nowhere/kick.wav",
+              "settings":{"filter":1,"cutoff":900,"fenvAmount":2.5,"fenvDecay":0.4,"velCutoff":1.5,"velTime":0.25},
+              "patterns":["x.x.","","x"],
+              "velocity":[[255,100],[],[50]],
+              "chance":[[255,128]],
+              "ratchet":[[1,3],[2]]}]}"#;
+        let obj = crate::project::tests_parse(v1);
+        let file: SamplerFile = serde_json::from_value(obj["sampler"].clone()).unwrap();
+        let engine = tunekore_engine::Engine::new();
+        let state = SamplerState::new(engine.sampler());
+        let pads = read_pads(&state, file.pads, Path::new("/music"));
+        let p = &pads[0];
+        assert_eq!(p.missing.as_deref(), Some(Path::new("/nowhere/kick.wav")), "a sample not on disk is kept as missing");
+        assert_eq!((p.patterns[0], p.patterns[1], p.patterns[2]), (0b101, 0, 1));
+        assert_eq!((p.velocity(0, 1), p.velocity(2, 0), p.velocity(1, 0)), (100, 50, 255));
+        assert_eq!((p.chance(0, 1), p.chance(0, 0), p.chance(1, 1)), (128, 255, 255));
+        assert_eq!((p.ratchet(0, 1), p.ratchet(1, 0), p.ratchet(0, 0)), (3, 2, 1));
+        let s = p.settings;
+        assert_eq!((s.filter, s.cutoff, s.fenv_amount, s.fenv_decay, s.vel_cutoff, s.vel_time), (1, 900.0, 2.5, 0.4, 1.5, 0.25));
+        assert_eq!(pads.len(), PADS, "the rest are empty pads");
     }
 
     #[test]

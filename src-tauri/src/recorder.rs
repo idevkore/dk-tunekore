@@ -158,6 +158,11 @@ pub async fn sampling_cancel(state: State<'_, RecorderState>) -> Result<(), Stri
     Ok(())
 }
 
+/// The sampling (audio input) commands.
+pub fn commands() -> crate::Commands {
+    crate::commands![input_devices, sampling_start, sampling_stop, sampling_cancel]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

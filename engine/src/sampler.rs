@@ -1195,8 +1195,9 @@ pub fn device(shared: Arc<SamplerShared>, sample_rate: u32) -> (SamplerDevice, S
 
 /// A sampler for a stream at `sample_rate`, and the control side's link to it.
 pub fn sampler(sample_rate: u32) -> (Sampler, SamplerLink) {
-    let (send, incoming) = rtrb::RingBuffer::new(32);
-    let (garbage, returned) = rtrb::RingBuffer::new(64);
+    // Room for several whole kits in flight: a project opened right after another.
+    let (send, incoming) = rtrb::RingBuffer::new(SLOTS * 4);
+    let (garbage, returned) = rtrb::RingBuffer::new(SLOTS * 8);
     let mut s = Sampler::offline(sample_rate);
     s.incoming = Some(incoming);
     s.garbage = Some(garbage);
@@ -3858,7 +3859,7 @@ mod tests {
         let (_, allocs) = realtime(|| s.render(&shared, &mut out, 2));
         assert_eq!(allocs, 0, "nothing freed on the audio thread");
         assert!(s.held_back.is_some(), "the first one's box waits");
-        assert_eq!(link.send.slots(), 31, "the second sample waits in its queue");
+        assert_eq!(link.send.slots(), SLOTS * 4 - 1, "the second sample waits in its queue");
         link.collect();
         run(&mut s, &shared, 64);
         assert!(s.held_back.is_none() && s.samples[1].is_some(), "both arrive once there is room");

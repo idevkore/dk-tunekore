@@ -1,10 +1,10 @@
 //! The Tauri shell: windows, menus and files around the engine.
 //!
 //! Each feature module brings its own Tauri commands as a [`Commands`] list,
-//! made with [`commands!`] in its own file, and its own part of the project
-//! file as a [`project::Section`] it registers from its setup. Adding a
-//! module here takes a `mod` line, its `commands()` in [`run`]'s list, and a
-//! call to its `setup`, rather than edits all through one handler list.
+//! made with [`commands!`] in its own file, its own `setup`, and its own part
+//! of the project file as a [`project::Section`] it registers from that
+//! setup. Adding a module here takes three lines, each in an alphabetical
+//! list of one line per module: its `mod`, its `commands()` and its `setup`.
 
 /// A module's Tauri commands, for [`run`]'s router: `commands![a, b]` lists
 /// commands defined in the module where it is written, and
@@ -73,6 +73,10 @@ pub(crate) struct Audio {
 }
 
 impl Audio {
+    pub(crate) fn new(engine: Engine) -> Self {
+        Self { engine, open_device: None }
+    }
+
     fn fade_out_and_close(&mut self) {
         self.engine.set_tone(false, 440.0, 0.0);
         self.engine.player().set_playing(false);
@@ -215,8 +219,18 @@ fn spawn_meter(app: tauri::AppHandle, meter: Meter) {
             if g < 0.99 {
                 let _ = app.emit("limiter", 20.0 * g.max(1e-6).log10());
             }
+            // The output stream's errors, counted on the audio thread, logged here.
+            let errors = meter.take_stream_errors();
+            if errors > 0 {
+                eprintln!("audio output: {errors} stream error(s), such as a buffer underrun");
+            }
         }
     });
+}
+
+/// The shell's own commands: the engine, the output device, the tone, quitting.
+fn shell_commands() -> Commands {
+    commands![engine_version, app_quit, list_outputs, start_tone, stop_tone, current_output, set_master, master, set_output]
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -225,48 +239,35 @@ pub fn run() {
     let meter = engine.meter();
     let player = engine.player();
     let pads = engine.sampler();
-    let transport = engine.transport();
-    let midi_state = midi::state();
     // One engine for the life of the app.
-    let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
+    let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(engine))));
 
-    // Every module's commands. A new module adds its list here.
+    // Every module's commands, one line each, in alphabetical order.
     let commands = vec![
-        commands![engine_version, app_quit, list_outputs, start_tone, stop_tone, current_output, set_master, master, set_output],
-        commands!(analyzer => [
-            open_analyzer,
-            analyzer_backends,
-            analyzer_open,
-            analyzer_separate,
-            analyzer_cancel,
-            analyzer_play,
-            analyzer_seek,
-            analyzer_track,
-            analyzer_export,
-            analyzer_to_pads,
-            analyzer_tempo_key,
-        ]),
-        commands!(display => [display_zoom, set_display_zoom]),
-        commands!(midi => [midi_inputs]),
-        commands!(recorder => [input_devices, sampling_start, sampling_stop, sampling_cancel]),
+        analyzer::commands(),
+        display::commands(),
+        midi::commands(),
         project::commands(),
+        recorder::commands(),
         sampler::commands(),
+        shell_commands(),
     ];
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Windows reopen at the size, place and display they were left at.
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(display::Zoom::default())
         .menu(display::menu)
         .on_menu_event(|app, event| display::on_menu(app, event.id().as_ref()))
-        .manage(audio)
-        .manage(player.clone())
         .manage(analyzer::Analyzer::default())
-        .manage(midi_state.clone())
+        .manage(audio)
+        .manage(display::Zoom::default())
+        .manage(midi::state())
+        .manage(pads.clone())
+        .manage(player)
+        .manage(project::Project::<tauri::AppHandle>::new())
         .manage(recorder::RecorderState::default())
-        .manage(project::Project::new(transport))
-        .manage(sampler::SamplerState::new(pads.clone()))
+        .manage(sampler::SamplerState::new(pads))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -279,16 +280,15 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            let zoom = display::load(app.handle());
-            if (zoom - 1.0).abs() > 0.001 {
-                display::set(app.handle(), zoom);
-            }
             spawn_meter(app.handle().clone(), meter);
-            analyzer::spawn_position(app.handle().clone(), player);
-            midi::spawn(app.handle().clone(), pads.clone(), midi_state);
-            // Each module's setup: threads, and its part of the project file.
-            sampler::setup(app.handle(), pads);
+            // Each module's setup, one line each, in alphabetical order.
+            analyzer::setup(app.handle());
+            display::setup(app.handle());
+            midi::setup(app.handle());
             project::setup(app.handle());
+            sampler::setup(app.handle());
+            // Last: every module has registered its part of the project.
+            project::ready(app.handle());
             // Open the default output now, so the pads play on the first click.
             std::thread::spawn(move || {
                 if let Err(e) = audio.lock().unwrap().ensure_open() {

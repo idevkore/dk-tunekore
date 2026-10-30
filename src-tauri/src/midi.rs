@@ -152,6 +152,19 @@ pub fn midi_inputs(state: State<'_, Arc<MidiState>>) -> Vec<MidiInputInfo> {
     state.inputs.lock().unwrap().clone()
 }
 
+/// The MIDI input commands.
+pub fn commands() -> crate::Commands {
+    crate::commands![midi_inputs]
+}
+
+/// Watches for MIDI controllers and plays the pads from them.
+pub fn setup(app: &AppHandle) {
+    use tauri::Manager;
+    let pads = app.state::<SamplerHandle>().inner().clone();
+    let state = app.state::<Arc<MidiState>>().inner().clone();
+    spawn(app.clone(), pads, state);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
