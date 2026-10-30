@@ -75,6 +75,24 @@ fn db_to_gain(db: f32) -> f32 {
     if db <= MIN_GAIN_DB { 0.0 } else { 10f32.powf(db.min(MAX_GAIN_DB) / 20.0) }
 }
 
+/// `p` with its `.` and `..` parts worked out, without touching the disk, so
+/// a path names one file one way (and "inside the project's folder" means it).
+fn clean(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 fn file_stem(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Audio".into())
 }
@@ -760,6 +778,7 @@ impl TimelineState {
         let mut failed = Vec::new();
         let rate = self.live_rate();
         for (f, name) in files {
+            let f = &clean(f);
             match self.decode(f) {
                 Ok(s) => {
                     // Ready for the player before the document is held.
@@ -823,7 +842,7 @@ impl TimelineState {
         // Files first, before the document is held: a copy of a clip names a file already decoded.
         let mut seconds: HashMap<PathBuf, Option<f64>> = HashMap::new();
         for c in &edit.clips {
-            let p = PathBuf::from(&c.path);
+            let p = clean(Path::new(&c.path));
             if !seconds.contains_key(&p) {
                 let s = self.decode(&p).ok().map(|s| s.seconds());
                 seconds.insert(p, s);
@@ -847,7 +866,7 @@ impl TimelineState {
                         return Err(format!("there is no clip {id}"));
                     }
                 }
-                let p = PathBuf::from(&c.path);
+                let p = clean(Path::new(&c.path));
                 // A file that can't be read can still be moved or trimmed, as long as a clip already plays it.
                 if seconds.get(&p).copied().flatten().is_none() && !doc.clips.values().flatten().any(|x| x.path == p) {
                     return Err(format!("{} can't be read", file_stem(&p)));
@@ -867,7 +886,7 @@ impl TimelineState {
                     Some(id) => id,
                     None => doc.take_id(),
                 };
-                let path = PathBuf::from(&c.path);
+                let path = clean(Path::new(&c.path));
                 let clip = Clip {
                     id,
                     start: c.start,
@@ -1124,10 +1143,11 @@ impl TimelineState {
     /// Copies every file a clip plays from outside `folder`'s parent (the
     /// project's folder) into `folder`, and points the clips at the copies.
     fn collect_into(&self, folder: &Path) -> Result<(), String> {
-        let base = folder.parent().unwrap_or(Path::new(""));
+        let base = clean(folder.parent().unwrap_or(Path::new("")));
+        let folder = &clean(folder);
         let files: Vec<PathBuf> = {
             let doc = lock(&self.doc);
-            let mut v: Vec<PathBuf> = doc.clips.values().flatten().map(|c| c.path.clone()).filter(|p| !p.starts_with(base) && p.is_file()).collect();
+            let mut v: Vec<PathBuf> = doc.clips.values().flatten().map(|c| c.path.clone()).filter(|p| !p.starts_with(&base) && p.is_file()).collect();
             v.sort();
             v.dedup();
             v
@@ -1241,7 +1261,7 @@ struct ClipFile {
 }
 
 fn relative(path: &Path, base: &Path) -> String {
-    match path.strip_prefix(base) {
+    match path.strip_prefix(clean(base)) {
         Ok(rel) if !base.as_os_str().is_empty() => rel.to_string_lossy().replace('\\', "/"),
         _ => path.display().to_string(),
     }
@@ -1310,7 +1330,7 @@ impl TimelineState {
                     return Err(format!("the project's Timeline has two clips numbered {}", c.id));
                 }
                 let p = Path::new(&c.file);
-                let path = if p.is_absolute() { p.to_path_buf() } else { base.join(p) };
+                let path = clean(&if p.is_absolute() { p.to_path_buf() } else { base.join(p) });
                 let seconds = match self.decode(&path) {
                     Ok(s) => {
                         if let Some(r) = rate {
@@ -2027,6 +2047,28 @@ mod tests {
         assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
         rig.state.undo().unwrap();
         assert!(rig.state.current().tracks.iter().flat_map(|t| &t.clips).all(|c| !c.path.contains("far.wav") || c.path == copy.to_str().unwrap()), "undo keeps the copy");
+    }
+
+    #[test]
+    fn a_path_with_dots_is_one_file_and_collects_from_outside() {
+        let rig = rig();
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.wav");
+        export_wav(&[vec![0.1; 4_800]], 48_000, &far).unwrap();
+        // The same file inside the project, and one outside it, both named through "..".
+        let inside = rig.dir.path().join("x").join("..").join("kick.wav");
+        let away = rig.dir.path().join("..").join(outside.path().file_name().unwrap()).join("..").join(outside.path().file_name().unwrap()).join("far.wav");
+        let v = rig.state.add_files(&[inside, away, rig.file("kick.wav")], Some(TrackId(1)), 0.0).unwrap();
+        assert_eq!(v.sources.len(), 2, "kick.wav once, however it was named: {:?}", v.sources);
+        let folder = rig.dir.path().join("song Samples");
+        rig.state.collect_into(&folder).unwrap();
+        assert!(folder.join("far.wav").is_file(), "the file outside was collected");
+        assert!(!folder.join("kick.wav").exists(), "the one inside wasn't");
+        let file = rig.dir.path().join("song.tunek");
+        let saved = rig.state.save_file(&file);
+        let files: Vec<&str> = saved["clips"].as_object().unwrap().values().flat_map(|l| l.as_array().unwrap().iter().map(|c| c["file"].as_str().unwrap())).collect();
+        assert!(files.iter().all(|f| !f.contains("..")), "{files:?}");
+        assert!(files.contains(&"song Samples/far.wav") && files.contains(&"kick.wav"), "{files:?}");
     }
 
     #[test]
