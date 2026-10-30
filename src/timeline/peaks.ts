@@ -21,12 +21,14 @@ export function levelFor(framesPerPixel: number): number {
   return level;
 }
 
-/** The peaks of `path` at `level`, or the nearest level already loaded; fetches the one asked for. */
-export function getPeaks(path: string, level: number): Peaks | null {
-  let e = cache.get(path);
+/** The peaks of `path` (as read for the `version` the Rust side gives it) at `level`, or the
+ *  nearest level already loaded; fetches the one asked for. */
+export function getPeaks(path: string, version: number, level: number): Peaks | null {
+  const key = `${version}:${path}`;
+  let e = cache.get(key);
   if (!e) {
     e = [];
-    cache.set(path, e);
+    cache.set(key, e);
   }
   const want = e[level];
   if (want instanceof Int8Array) return { data: want, bucket: PEAK_LEVELS[level] };

@@ -46,6 +46,8 @@ export interface SourceView {
   frames: number;
   rate: number;
   missing: boolean;
+  /** Changes when the file is read again after it changed on disk. */
+  version: number;
 }
 
 export interface TimelineView {

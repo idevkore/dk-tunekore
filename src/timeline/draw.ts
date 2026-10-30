@@ -97,7 +97,7 @@ function drawWave(ctx: CanvasRenderingContext2D, c: ClipView, src: SourceView, x
   const spb = secondsPerBeat(s.tempo);
   const secondsPerPx = spb / s.zoom;
   const framesPerPx = secondsPerPx * src.rate;
-  const peaks = getPeaks(c.path, levelFor(framesPerPx));
+  const peaks = getPeaks(c.path, src.version, levelFor(framesPerPx));
   if (!peaks) return;
   const { data, bucket } = peaks;
   const buckets = data.length / 2;

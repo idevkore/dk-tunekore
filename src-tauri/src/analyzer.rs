@@ -408,13 +408,7 @@ pub async fn analyzer_to_pads(
         let inner = state.0.lock().unwrap();
         (inner.song.clone().ok_or("open a song first")?, inner.stems.clone().ok_or("separate the song first")?)
     };
-    let folder = app
-        .path()
-        .audio_dir()
-        .map_err(|e| e.to_string())?
-        .join("tuneKore")
-        .join("Samples")
-        .join(safe_name(&loaded.name));
+    let folder = samples_folder(&app, &loaded.name)?;
     let a = app.clone();
     let result = spawn_blocking(move || -> Result<ToPads, String> {
         let audio = stems.get(&stem).ok_or_else(|| format!("no stem called {stem}"))?;
@@ -465,6 +459,48 @@ pub async fn analyzer_to_pads(
         let _ = app.emit("sampler:chopped", &r.folder);
     }
     result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToTimeline {
+    /// The new tracks' names, in order.
+    tracks: Vec<String>,
+    /// Where the WAV files were written.
+    folder: String,
+}
+
+/// Puts stems on the Timeline in the main window, each on a new track named
+/// after it, lined up at bar 1. `stems` names them as `STEM_NAMES` does;
+/// empty means all four. The audio is written as WAV where the pads' goes,
+/// under Music/tuneKore/Samples, so a saved project can find it again.
+#[tauri::command]
+pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: State<'_, Analyzer>) -> Result<ToTimeline, String> {
+    let (loaded, separated) = {
+        let inner = state.0.lock().unwrap();
+        (inner.song.clone().ok_or("open a song first")?, inner.stems.clone().ok_or("separate the song first")?)
+    };
+    let folder = samples_folder(&app, &loaded.name)?;
+    let names: Vec<String> = if stems.is_empty() { STEM_NAMES.iter().map(|s| s.to_string()).collect() } else { stems };
+    spawn_blocking(move || -> Result<ToTimeline, String> {
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let mut files = Vec::new();
+        for name in &names {
+            let audio = separated.get(name).ok_or_else(|| format!("no stem called {name}"))?;
+            let path = folder.join(format!("{} - {}.wav", safe_name(&loaded.name), title(name)));
+            export_wav(audio, separated.sample_rate, &path)?;
+            files.push((path, title(name)));
+        }
+        crate::timeline::add_tracks(&app, &files, 0.0)?;
+        Ok(ToTimeline { tracks: files.into_iter().map(|(_, n)| n).collect(), folder: folder.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Where a song's stems and slices are written: Music/tuneKore/Samples/<song>.
+fn samples_folder(app: &AppHandle, song: &str) -> Result<PathBuf, String> {
+    Ok(app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore").join("Samples").join(safe_name(song)))
 }
 
 /// A file or folder name with the characters macOS and Windows reject replaced.
@@ -525,6 +561,7 @@ pub fn commands() -> crate::Commands {
         analyzer_track,
         analyzer_export,
         analyzer_to_pads,
+        analyzer_to_timeline,
         analyzer_tempo_key,
     ]
 }

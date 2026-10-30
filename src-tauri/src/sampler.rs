@@ -1502,6 +1502,9 @@ pub async fn project_collect(app: AppHandle) -> Result<View, String> {
             }
         }
     }
+    // The Timeline's clip files go to the same folder.
+    let (a, folder) = (app.clone(), project.with_file_name(format!("{} Samples", file_stem(&project))));
+    spawn_blocking(move || crate::timeline::collect(&a, &folder)).await.map_err(|e| e.to_string())??;
     project_save(None, app).await
 }
 

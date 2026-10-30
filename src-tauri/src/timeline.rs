@@ -24,9 +24,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -274,6 +274,15 @@ struct Source {
     data: Track,
     peaks: Peaks,
     at: Mutex<HashMap<u32, Track>>,
+    /// The file's modified time and size when it was read.
+    stamp: Option<(SystemTime, u64)>,
+    /// Bumped each time a file is read, so the UI can tell new peaks from old.
+    version: u64,
+}
+
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 impl Source {
@@ -357,6 +366,8 @@ pub struct SourceView {
     frames: usize,
     rate: u32,
     missing: bool,
+    /// Changes when the file is read again (it changed on disk), so the UI fetches its peaks again.
+    version: u64,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -440,6 +451,11 @@ pub struct TimelineState {
     meters: Mutex<Vec<(TrackId, TrackMeter)>>,
     /// The document's revision, readable without its lock.
     revision: AtomicU64,
+    /// Counts files read, for each source's version.
+    reads: AtomicU64,
+    /// A file was read again after it changed on disk: every track's clips
+    /// go to their players again, so none plays the old audio.
+    replaced: AtomicBool,
     audio: &'static Mutex<Audio>,
     transport: Arc<TransportShared>,
 }
@@ -453,6 +469,8 @@ impl TimelineState {
             feeds: Mutex::default(),
             meters: Mutex::default(),
             revision: AtomicU64::new(0),
+            reads: AtomicU64::new(0),
+            replaced: AtomicBool::new(false),
             audio,
             transport,
         }
@@ -462,18 +480,28 @@ impl TimelineState {
         self.revision.store(doc.revision, Ordering::Relaxed);
     }
 
-    /// Decodes `path`, or finds it decoded already. Slow the first time: don't hold the document.
+    /// Decodes `path`, or finds it decoded already. A file that changed on
+    /// disk since it was read (an Analyzer stem written again) is read again.
+    /// Slow the first time: don't hold the document.
     fn decode(&self, path: &Path) -> Result<Arc<Source>, String> {
+        let stamp = file_stamp(path);
         if let Some(s) = lock(&self.sources).get(path) {
-            return Ok(s.clone());
+            // Gone from disk: it still plays from memory.
+            if stamp.is_none() || s.stamp == stamp {
+                return Ok(s.clone());
+            }
         }
         let song = decode_file(path)?;
         if song.frames() < 2 {
             return Err(format!("{} has no audio", file_stem(path)));
         }
         let peaks = Peaks::build(&song.channels);
-        let s = Arc::new(Source { rate: song.sample_rate, data: song.channels, peaks, at: Mutex::default() });
-        Ok(lock(&self.sources).entry(path.to_path_buf()).or_insert(s).clone())
+        let version = self.reads.fetch_add(1, Ordering::Relaxed) + 1;
+        let s = Arc::new(Source { rate: song.sample_rate, data: song.channels, peaks, at: Mutex::default(), stamp, version });
+        if lock(&self.sources).insert(path.to_path_buf(), s.clone()).is_some() {
+            self.replaced.store(true, Ordering::Relaxed);
+        }
+        Ok(s)
     }
 
     fn source(&self, path: &Path) -> Option<Arc<Source>> {
@@ -537,11 +565,12 @@ impl TimelineState {
                 }
             }
         }
+        let all = self.replaced.swap(false, Ordering::Relaxed);
         for id in &ids {
             let Some(f) = feeds.get_mut(id) else { continue };
             f.feed.collect();
             let rate = f.feed.rate();
-            let changed = match what {
+            let changed = all || match what {
                 Resend::All => true,
                 Resend::Changed(before) => before.get(id) != doc.clips.get(id),
                 Resend::Stale => false,
@@ -614,8 +643,9 @@ impl TimelineState {
                         frames: s.frames(),
                         rate: s.rate,
                         missing: false,
+                        version: s.version,
                     },
-                    None => SourceView { path: p.display().to_string(), seconds: 0.0, channels: 0, frames: 0, rate: 0, missing: true },
+                    None => SourceView { path: p.display().to_string(), seconds: 0.0, channels: 0, frames: 0, rate: 0, missing: true, version: 0 },
                 })
                 .collect(),
             tempo: self.transport.tempo(),
@@ -669,17 +699,31 @@ impl TimelineState {
     /// `track`, or each on a new track of its own when `track` is `None` or
     /// the Sampler's. Files that can't be read are skipped and named in the error.
     pub fn add_files(&self, files: &[PathBuf], track: Option<TrackId>, start: f64) -> Result<View, String> {
+        let named: Vec<(PathBuf, Option<String>)> = files.iter().map(|f| (f.clone(), None)).collect();
+        self.add(&named, track, start)
+    }
+
+    /// Puts each file on a new track of its own named as given, all from
+    /// `start` (beats), as one undoable step: the Analyzer's stems, lined up.
+    pub fn add_tracks(&self, files: &[(PathBuf, String)], start: f64) -> Result<View, String> {
+        let named: Vec<(PathBuf, Option<String>)> = files.iter().map(|(f, n)| (f.clone(), Some(n.clone()))).collect();
+        self.add(&named, None, start)
+    }
+
+    /// [`add_files`](Self::add_files), with a name for each file's new track
+    /// (its file's name when `None`).
+    fn add(&self, files: &[(PathBuf, Option<String>)], track: Option<TrackId>, start: f64) -> Result<View, String> {
         let mut read = Vec::new();
         let mut failed = Vec::new();
         let rate = self.live_rate();
-        for f in files {
+        for (f, name) in files {
             match self.decode(f) {
                 Ok(s) => {
                     // Ready for the player before the document is held.
                     if let Some(r) = rate {
                         let _ = s.at_rate(r);
                     }
-                    read.push((f.clone(), s));
+                    read.push((f.clone(), name.clone().unwrap_or_else(|| file_stem(f)), s));
                 }
                 Err(e) => failed.push(format!("{} ({e})", file_stem(f))),
             }
@@ -691,10 +735,10 @@ impl TimelineState {
                 let tempo = s.transport.tempo();
                 let on = track.filter(|&t| doc.is_audio_track(t));
                 let mut at = finite(start, 0.0).max(0.0);
-                for (path, src) in &read {
+                for (path, name, src) in &read {
                     let track = match on {
                         Some(t) => t,
-                        None => s.new_track(doc, &file_stem(path))?,
+                        None => s.new_track(doc, name)?,
                     };
                     let seconds = src.seconds();
                     let id = doc.take_id();
@@ -1001,6 +1045,76 @@ impl TimelineState {
         let s = self.source(path).ok_or_else(|| format!("{} isn't loaded", file_stem(path)))?;
         Ok(s.peaks.bytes(level))
     }
+
+    /// Copies every file a clip plays from outside `folder`'s parent (the
+    /// project's folder) into `folder`, and points the clips at the copies.
+    fn collect_into(&self, folder: &Path) -> Result<(), String> {
+        let base = folder.parent().unwrap_or(Path::new(""));
+        let files: Vec<PathBuf> = {
+            let doc = lock(&self.doc);
+            let mut v: Vec<PathBuf> = doc.clips.values().flatten().map(|c| c.path.clone()).filter(|p| !p.starts_with(base) && p.is_file()).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        if files.is_empty() {
+            return Ok(());
+        }
+        std::fs::create_dir_all(folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let mut moved = Vec::new();
+        for from in files {
+            let to = copy_into(&from, folder)?;
+            moved.push((from, to));
+        }
+        self.repoint(&moved);
+        Ok(())
+    }
+
+    /// Points the clips (and undo's copies of them) that play each `from` at
+    /// its `to`, a copy of the same file, which plays from memory as before.
+    fn repoint(&self, moved: &[(PathBuf, PathBuf)]) {
+        let mut doc = lock(&self.doc);
+        let to_of = |p: &Path| moved.iter().find(|(f, _)| f == p).map(|(_, t)| t.clone());
+        {
+            let Doc { clips, history, .. } = &mut *doc;
+            let kept = history.undo.iter_mut().chain(history.redo.iter_mut()).flat_map(|s| s.clips.values_mut());
+            for c in clips.values_mut().chain(kept).flatten() {
+                if let Some(t) = to_of(&c.path) {
+                    c.path = t;
+                }
+            }
+        }
+        {
+            let mut sources = lock(&self.sources);
+            for (from, to) in moved {
+                if let Some(s) = sources.get(from).cloned() {
+                    let copy = Source { rate: s.rate, data: s.data.clone(), peaks: s.peaks.clone(), at: Mutex::new(lock(&s.at).clone()), stamp: file_stamp(to), version: s.version };
+                    sources.insert(to.clone(), Arc::new(copy));
+                }
+            }
+        }
+        doc.revision += 1;
+        self.note_revision(&doc);
+    }
+}
+
+/// Copies `from` into `folder` under its own name, or reuses a copy of the
+/// same name and size there (as the Sampler's Collect does, so a file on a
+/// pad and in a clip is copied once); another file of that name gets a number.
+fn copy_into(from: &Path, folder: &Path) -> Result<PathBuf, String> {
+    let name = from.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "audio.wav".into());
+    let ext = from.extension().and_then(|e| e.to_str()).unwrap_or("wav");
+    let size = std::fs::metadata(from).map(|m| m.len()).ok();
+    let mut to = folder.join(&name);
+    let mut n = 2;
+    while to.exists() && std::fs::metadata(&to).map(|m| m.len()).ok() != size {
+        to = folder.join(format!("{} {n}.{ext}", file_stem(from)));
+        n += 1;
+    }
+    if !to.exists() {
+        std::fs::copy(from, &to).map_err(|e| format!("can't copy {}: {e}", from.display()))?;
+    }
+    Ok(to)
 }
 
 fn clip_view(c: &Clip) -> ClipView {
@@ -1235,6 +1349,25 @@ fn shared(app: &AppHandle) -> Arc<TimelineState> {
 fn publish(app: &AppHandle, v: View) -> View {
     let _ = app.emit("timeline:state", &v);
     v
+}
+
+// ---- For the other modules ----
+
+/// Puts files on new tracks named as given, lined up from `start` (beats),
+/// and shows them in every window. Blocking: the Analyzer's stems.
+pub fn add_tracks(app: &AppHandle, files: &[(PathBuf, String)], start: f64) -> Result<View, String> {
+    let v = shared(app).add_tracks(files, start)?;
+    Ok(publish(app, v))
+}
+
+/// Copies the files clips play from outside the project's folder into
+/// `folder` (the Sampler's "<project> Samples" beside the project file) and
+/// points the clips there. The Sampler's Collect calls it before it saves. Blocking.
+pub fn collect(app: &AppHandle, folder: &Path) -> Result<(), String> {
+    let s = shared(app);
+    s.collect_into(folder)?;
+    publish(app, s.current());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1664,6 +1797,47 @@ mod tests {
         rig.state.clear();
         let v = rig.state.current();
         assert_eq!(v.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Sampler", "Empty"], "Keys isn't an audio track");
+    }
+
+    #[test]
+    fn collect_copies_clip_files_into_the_project_and_points_the_clips_there() {
+        let rig = rig();
+        let outside = tempfile::tempdir().unwrap();
+        let far = outside.path().join("far.wav");
+        export_wav(&[vec![0.1; 4_800]], 48_000, &far).unwrap();
+        rig.state.add_files(&[far.clone(), rig.file("kick.wav")], None, 0.0).unwrap();
+        // An edit, so undo holds a copy of the clips with the old path.
+        rig.state.add_track().unwrap();
+        let file = rig.dir.path().join("song.tunek");
+        let folder = rig.dir.path().join("song Samples");
+        rig.state.collect_into(&folder).unwrap();
+        let copy = folder.join("far.wav");
+        assert!(copy.is_file(), "copied");
+        let v = rig.state.current();
+        let paths: Vec<&str> = v.tracks.iter().flat_map(|t| t.clips.iter().map(|c| c.path.as_str())).collect();
+        assert!(paths.contains(&copy.to_str().unwrap()) && paths.contains(&rig.file("kick.wav").to_str().unwrap()), "{paths:?}");
+        assert!(!v.sources.iter().any(|s| s.missing), "the copy plays from memory");
+        assert_eq!(rig.state.save_file(&file)["clips"]["2"][0]["file"], "song Samples/far.wav");
+        // Collecting again copies nothing new.
+        rig.state.collect_into(&folder).unwrap();
+        assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
+        rig.state.undo().unwrap();
+        assert!(rig.state.current().tracks.iter().flat_map(|t| &t.clips).all(|c| !c.path.contains("far.wav") || c.path == copy.to_str().unwrap()), "undo keeps the copy");
+    }
+
+    #[test]
+    fn a_file_written_again_is_read_again() {
+        let rig = rig();
+        let f = rig.file("kick.wav");
+        rig.state.add_files(&[f.clone()], None, 0.0).unwrap();
+        let before = rig.state.current().sources[0].clone();
+        // Another length and a later time, as when the Analyzer writes a stem again.
+        std::thread::sleep(Duration::from_millis(20));
+        export_wav(&[vec![0.25; 24_000]], 48_000, &f).unwrap();
+        let v = rig.state.add_tracks(&[(f.clone(), "Drums".into())], 0.0).unwrap();
+        let after = &v.sources[0];
+        assert_eq!(v.tracks[2].name, "Drums", "named as asked");
+        assert!(after.version > before.version && (after.seconds - 0.5).abs() < 1e-9, "{before:?} then {after:?}");
     }
 
     #[test]

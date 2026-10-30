@@ -90,6 +90,15 @@ export interface ToPads {
 export const toPads = (stem: string, how: string, count: number, firstPad: number | null, fromSeconds: number) =>
   invoke<ToPads>("analyzer_to_pads", { stem, how, count, firstPad, fromSeconds });
 
+export interface ToTimeline {
+  /** The new tracks' names. */
+  tracks: string[];
+  folder: string;
+}
+
+/** Puts stems on new Timeline tracks in the main window, named after them and lined up at bar 1. Empty means all four. */
+export const toTimeline = (stems: string[]) => invoke<ToTimeline>("analyzer_to_timeline", { stems });
+
 export interface TempoKey {
   bpm: number | null;
   bpmConfidence: number | null;

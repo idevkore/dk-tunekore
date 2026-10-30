@@ -52,7 +52,7 @@ export function installMocks() {
     let s = v.sources.find((x) => x.path === path);
     if (!s) {
       const seconds = 0.4 + (path.length % 7) * 0.6;
-      s = { path, seconds, channels: 2, frames: Math.round(seconds * 44_100), rate: 44_100, missing: false };
+      s = { path, seconds, channels: 2, frames: Math.round(seconds * 44_100), rate: 44_100, missing: false, version: 1 };
       v.sources.push(s);
     }
     return s;
