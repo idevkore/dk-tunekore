@@ -5,6 +5,24 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.16: 64-step patterns
+
+idevkore/dk-tunekore#60
+
+- The Steps picker now goes up to 64: four bars in one pattern, enough for a
+  four-chord progression with one chord to a bar. The engine already played
+  64; the picker stopped at 32.
+- A pattern longer than 32 steps shows two bars of the grid at a time. Pick
+  Bars 1–2 or Bars 3–4 beside the Steps picker; the page that is playing has
+  a lime foot, and Follow (on by default) turns the page to keep the
+  playhead in view. The arrow keys move on to the next page, and the velocity
+  lane and the right-click step editor work on every step.
+- Engine tests play a 64-step pattern through two passes (with velocity,
+  chance and a ratchet on the last bar), switch patterns on the bar and on the
+  next step, cut a 64-step pattern short, render a song of 64-step patterns,
+  and run it all on the audio thread without allocating (also under RTSAN).
+  A project test saves and reads back a pattern that uses all 64 steps.
+
 ## 0.1.15: colour themes
 
 idevkore/dk-tunekore#56

@@ -3,7 +3,7 @@
 // cells and Enter or Space toggles one.
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, type PadView, type PatternSwitch } from "./api";
+import { AUDIO_EXTENSIONS, PAD_KEYS, PATTERN_NAMES, STEP_CHOICES, STEP_PAGE, type PadView, type PatternSwitch } from "./api";
 import StepEditor from "./StepEditor";
 import SongStrip from "./SongStrip";
 
@@ -69,6 +69,25 @@ export default function Steps(props: Props) {
   const [focus, setFocus] = useState<[number, number]>([0, 0]);
   const [editing, setEditing] = useState<{ pad: number; step: number; x: number; y: number } | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
+
+  // A pattern longer than a page shows one page of the grid at a time. While
+  // "Follow" is on and the pattern plays, the page with the playhead shows.
+  const pages = Math.max(1, Math.ceil(steps / STEP_PAGE));
+  const [page, setPage] = useState(0);
+  const [follow, setFollow] = useState(true);
+  const playPage = current !== null ? Math.min(Math.floor(current / STEP_PAGE), pages - 1) : null;
+  const shown = follow && playPage !== null ? playPage : Math.min(page, pages - 1);
+  const from = shown * STEP_PAGE;
+  const count = Math.min(STEP_PAGE, steps - from);
+  const refocus = useRef<[number, number] | null>(null);
+
+  useEffect(() => {
+    // After a keyboard move onto another page, focus the cell it was heading for.
+    const target = refocus.current;
+    if (!target) return;
+    refocus.current = null;
+    gridRef.current?.querySelector<HTMLButtonElement>(`[data-cell="${target[0]}-${target[1]}"]`)?.focus();
+  }, [shown]);
 
   useEffect(() => {
     const stop = () => (paint.current = null);
@@ -144,6 +163,33 @@ export default function Steps(props: Props) {
           {STEP_CHOICES.map((n) => <option key={n} value={n}>{n}</option>)}
         </select>
       </label>
+      {pages > 1 && (
+        <div className="seg mini pages" role="radiogroup" aria-label="Steps shown">
+          {Array.from({ length: pages }, (_, i) => {
+            const first = (i * STEP_PAGE) / 16 + 1;
+            const last = Math.min(steps, (i + 1) * STEP_PAGE) / 16;
+            const label = `Bar${last > first ? "s" : ""} ${first}${last > first ? `–${Math.ceil(last)}` : ""}`;
+            return (
+              <label key={i} className={`${shown === i ? "on" : ""}${playPage === i ? " live" : ""}`} title={`Show steps ${i * STEP_PAGE + 1}–${Math.min(steps, (i + 1) * STEP_PAGE)}${playPage === i ? " (playing)" : ""}`}>
+                <input
+                  type="radio"
+                  name="step-page"
+                  checked={shown === i}
+                  onChange={() => {
+                    setPage(i);
+                    setFollow(false);
+                  }}
+                />
+                {label}
+              </label>
+            );
+          })}
+          <label className={follow ? "on" : ""} title="Switch pages to keep the playhead in view while playing">
+            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} />
+            Follow
+          </label>
+        </div>
+      )}
       <span className="small queued-note" role="status">
         {waiting}
       </span>
@@ -195,13 +241,22 @@ export default function Steps(props: Props) {
     );
   }
 
-  const [fr, fs] = [Math.min(focus[0], rows.length - 1), Math.min(focus[1], steps - 1)];
+  // The cell Tab lands on: the one last used, or the page's first when that is on another page.
+  const fr = Math.min(focus[0], rows.length - 1);
+  const fs = focus[1] >= from && focus[1] < from + count ? focus[1] : from;
   const lanePad = rows.find((p) => p.index === selected) ?? rows[0];
 
   function moveFocus(r: number, s: number) {
     const nr = (r + rows.length) % rows.length;
     const ns = (s + steps) % steps;
     setFocus([nr, ns]);
+    if (ns < from || ns >= from + count) {
+      // Off this page: show the page it is on, then focus once it has drawn.
+      refocus.current = [nr, ns];
+      setPage(Math.floor(ns / STEP_PAGE));
+      setFollow(false);
+      return;
+    }
     gridRef.current?.querySelector<HTMLButtonElement>(`[data-cell="${nr}-${ns}"]`)?.focus();
   }
 
@@ -212,19 +267,19 @@ export default function Steps(props: Props) {
       <div
         className="grid"
         role="grid"
-        aria-label={`Pattern, ${steps} steps`}
+        aria-label={pages > 1 ? `Pattern, ${steps} steps, showing steps ${from + 1} to ${from + count}` : `Pattern, ${steps} steps`}
         ref={gridRef}
         style={{
           ["--rows" as string]: rows.length,
           // Cells stay near square (at most 44 px); spare width stays empty instead of stretching them.
-          gridTemplateColumns: `minmax(150px, 190px) 30px repeat(${steps}, minmax(18px, 44px))`,
+          gridTemplateColumns: `minmax(150px, 190px) 30px repeat(${count}, minmax(18px, 44px))`,
           gridTemplateRows: `auto repeat(${rows.length}, minmax(26px, 44px)) minmax(56px, 110px)`,
         }}
       >
         <div role="row" className="grid-row grid-head">
           <span role="columnheader" className="corner">Pad</span>
           <span role="columnheader" className="corner" title="Mute">M</span>
-          {Array.from({ length: steps }, (_, s) => (
+          {Array.from({ length: count }, (_, i) => from + i).map((s) => (
             <span role="columnheader" key={s} className={`num${s % 4 === 0 ? " beat" : ""}${current === s ? " now" : ""}`}>
               {s % 4 === 0 ? s / 4 + 1 : ""}
             </span>
@@ -257,7 +312,7 @@ export default function Steps(props: Props) {
             >
               M
             </button>
-            {Array.from({ length: steps }, (_, s) => {
+            {Array.from({ length: count }, (_, i) => from + i).map((s) => {
               const on = p.steps[s] ?? false;
               const vel = p.velocity[s] ?? 1;
               const chance = p.chance[s] ?? 1;
@@ -314,7 +369,7 @@ export default function Steps(props: Props) {
             })}
           </div>
         ))}
-        <VelocityLane pad={lanePad} steps={steps} current={current} onVelocity={onVelocity} />
+        <VelocityLane pad={lanePad} from={from} count={count} current={current} onVelocity={onVelocity} />
       </div>
       {addRow}
       {editor}
@@ -323,7 +378,7 @@ export default function Steps(props: Props) {
 }
 
 /** Velocity bars for one pad's steps: drag up and down across them to set how hard each step plays. */
-function VelocityLane({ pad, steps, current, onVelocity }: { pad: PadView; steps: number; current: number | null; onVelocity: (pad: number, step: number, v: number) => void }) {
+function VelocityLane({ pad, from, count, current, onVelocity }: { pad: PadView; from: number; count: number; current: number | null; onVelocity: (pad: number, step: number, v: number) => void }) {
   const dragging = useRef(false);
   const set = (x: number, y: number) => {
     const cell = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-vel]");
@@ -357,7 +412,7 @@ function VelocityLane({ pad, steps, current, onVelocity }: { pad: PadView; steps
         Velocity
         <b>{pad.index + 1} · {pad.name}</b>
       </span>
-      {Array.from({ length: steps }, (_, s) => {
+      {Array.from({ length: count }, (_, i) => from + i).map((s) => {
         const on = pad.steps[s] ?? false;
         const v = pad.velocity[s] ?? 1;
         return (

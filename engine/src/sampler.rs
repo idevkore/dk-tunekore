@@ -3459,6 +3459,153 @@ mod tests {
         assert_eq!(shared.current_step(), Some(0));
     }
 
+    // 64 steps (four bars): the longest pattern the Sampler allows.
+
+    /// A 64-step rig at 120 BPM: a sixteenth is 6,000 frames, a pass 384,000.
+    fn long_rig() -> (Sampler, SamplerShared) {
+        let (s, shared) = song_rig();
+        shared.set_steps(MAX_STEPS);
+        (s, shared)
+    }
+
+    #[test]
+    fn a_64_step_pattern_plays_every_bar_and_wraps() {
+        let (mut s, shared) = long_rig();
+        assert_eq!(MAX_STEPS, 64);
+        assert_eq!(shared.steps(), 64);
+        shared.set_steps(500);
+        assert_eq!(shared.steps(), 64, "the length stops at 64");
+        shared.set_steps(64);
+        assert_eq!(shared.pattern_frames(RATE, 1), 384_000);
+
+        // The first step of each bar, then the last two: 62 never plays (chance 0), 63 plays softly.
+        let steps = [0usize, 16, 32, 48, 62, 63];
+        shared.set_bank_pattern(0, 0, steps.iter().fold(0u64, |b, s| b | 1 << s));
+        shared.set_chance(0, 0, 62, 0.0);
+        shared.set_velocity(0, 63, 0.5);
+        shared.set_playing(true);
+        let left = play_blocks(&mut s, &shared, 2 * 384_000 + 100, 777);
+
+        let bar = 96_000;
+        assert_eq!(onsets(&left), vec![0, bar, 2 * bar, 3 * bar, 378_000, 384_000, 384_000 + bar, 384_000 + 2 * bar, 384_000 + 3 * bar, 384_000 + 378_000, 768_000]);
+        let loud = peak(&left[3 * bar..3 * bar + 100]);
+        let soft = peak(&left[378_000..378_100]);
+        assert!(soft > 0.01 && soft < loud * 0.8, "step 64 sounds, at half velocity: {soft} vs {loud}");
+        assert_eq!(peak(&left[372_000..372_100]), 0.0, "step 63 has no chance");
+        assert_eq!(shared.current_step(), Some(0), "the second pass is on its first step");
+    }
+
+    #[test]
+    fn a_64_step_pattern_reports_its_playhead_across_all_four_bars() {
+        let (mut s, shared) = long_rig();
+        shared.set_bank_pattern(0, 0, 1);
+        shared.set_playing(true);
+        let mut at = 0;
+        for want in [0usize, 15, 16, 31, 32, 47, 48, 63] {
+            let to = want * 6_000 + 3_000; // the middle of that step
+            play_blocks(&mut s, &shared, to - at, 777);
+            at = to;
+            assert_eq!(shared.current_step(), Some(want));
+        }
+    }
+
+    #[test]
+    fn a_bank_switch_waits_for_the_end_of_the_fourth_bar() {
+        let (mut s, shared) = long_rig();
+        shared.set_bank_pattern(0, 0, 1 | 1 << 63); // A: the click on the first and last steps
+        shared.set_bank_pattern(1, 1, 1); // B: the flat pad on its first step
+        shared.set_playing(true);
+        let mut left = play_blocks(&mut s, &shared, 200_000, 777); // inside step 33
+        shared.set_bank(1);
+        assert_eq!(shared.playing_bank(), Some(0), "A plays on, B is queued");
+
+        left.extend(play_blocks(&mut s, &shared, 384_000 - 200_000, 777)); // frames up to 383,999
+        assert_eq!(left.len(), 384_000);
+        assert_eq!(shared.playing_bank(), Some(0), "the last frame of A's fourth bar");
+        assert_eq!(shared.current_step(), Some(63));
+        left.extend(play_blocks(&mut s, &shared, 1, 1));
+        assert_eq!(shared.playing_bank(), Some(1), "frame 384,000 starts B");
+        assert_eq!(shared.current_step(), Some(0));
+        left.extend(play_blocks(&mut s, &shared, 6_000, 777));
+
+        assert_eq!(onsets(&left), vec![0, 378_000, 384_000]);
+        assert_eq!(pad_at(&left, 378_000), Some(0), "A's step 64, after the switch was made");
+        assert_eq!(pad_at(&left, 384_000), Some(1), "B from the wrap's first frame");
+    }
+
+    #[test]
+    fn switching_now_at_64_steps_lands_on_the_next_step() {
+        let (mut s, shared) = long_rig();
+        shared.set_switch_now(true);
+        shared.set_bank_pattern(0, 0, 1 << 40 | 1 << 41 | 1 << 42); // A: the click, steps 41 to 43
+        shared.set_bank_pattern(1, 1, 1 << 41); // B: the flat pad on step 42
+        shared.set_playing(true);
+        let mut left = play_blocks(&mut s, &shared, 40 * 6_000 + 1_000, 777); // inside step 41
+        shared.set_bank(1);
+        left.extend(play_blocks(&mut s, &shared, 3 * 6_000, 777));
+        assert_eq!(onsets(&left), vec![240_000, 246_000], "A's step 41, then B's step 42 on the next step");
+        assert_eq!(pad_at(&left, 240_000), Some(0));
+        assert_eq!(pad_at(&left, 246_000), Some(1));
+    }
+
+    #[test]
+    fn a_pattern_cut_from_64_steps_keeps_a_waiting_switch_on_the_bar() {
+        let (mut s, shared) = long_rig();
+        shared.set_bank_pattern(0, 0, u64::MAX);
+        shared.set_bank_pattern(1, 1, u64::MAX);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 50 * 6_000 + 1_000, 500); // inside step 51
+        shared.set_bank(1);
+        shared.set_steps(32); // step 52 is now step 20 of 32: the pass still ends at 384,000
+        let left = play_blocks(&mut s, &shared, 384_000 - 301_000 - 1, 500);
+        assert_eq!(pad_at(&left, 5_000), Some(0), "A plays on, at 306,000");
+        assert_eq!(shared.playing_bank(), Some(0));
+        assert_eq!(shared.current_step(), Some(31));
+        let more = play_blocks(&mut s, &shared, 6_000, 500);
+        assert_eq!(shared.playing_bank(), Some(1), "B starts on the bar of the new length");
+        assert_eq!(pad_at(&more, 1), Some(1));
+        assert_eq!(shared.current_step(), Some(0));
+    }
+
+    #[test]
+    fn a_64_step_song_lasts_one_pass_of_four_bars_per_entry() {
+        let (_, shared) = long_rig();
+        a_and_b(&shared);
+        shared.set_chain(&[0, 1, 0]);
+        let samples = [Some(click(100)), Some(flat(100, 0.8))];
+        let out = render_song(&samples, &shared, RATE);
+        assert_eq!(out[0].len(), 3 * 384_000);
+        assert_eq!(onsets(&out[0]), vec![0, 384_000, 768_000]);
+        assert_eq!(pad_at(&out[0], 384_000), Some(1));
+        assert_eq!(render_pattern(&samples, &shared, RATE, 2)[0].len(), 2 * 384_000, "a bounce of two passes");
+    }
+
+    #[test]
+    fn a_64_step_pattern_runs_on_the_audio_thread_without_allocating() {
+        let (mut s, shared) = long_rig();
+        shared.set_bank_pattern(0, 0, u64::MAX);
+        shared.set_bank_pattern(1, 1, u64::MAX);
+        shared.set_ratchet(0, 0, 63, 4);
+        shared.set_chance(0, 0, 40, 0.5);
+        shared.set_swing(0.3);
+        shared.set_playing(true);
+        let mut out = vec![0.0f32; 512 * 2];
+        let mut total = 0;
+        for block in 0..1_600 {
+            // Two passes of 64 steps: a queued switch, then a cut, a stretch and a seek back.
+            match block {
+                300 => shared.set_bank(1),
+                800 => shared.set_steps(48),
+                1_000 => shared.set_steps(64),
+                _ => {}
+            }
+            let (_, n) = crate::testing::realtime(|| s.render(&shared, &mut out, 2));
+            total += n;
+        }
+        assert_eq!(total, 0, "64 steps allocated or freed {total} times");
+        assert!(out.iter().all(|x| x.is_finite()));
+    }
+
     #[test]
     fn render_song_renders_the_chain_once_sample_exact() {
         let (_, shared) = song_rig();
