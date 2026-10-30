@@ -5,6 +5,22 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.13: MIDI learn
+
+idevkore/dk-tunekore#20, PR #50
+
+- MIDI learn: click the MIDI light (it reads LEARN), click a control, move a
+  knob or fader, and it controls it. Stay in the mode to map more; Esc leaves.
+  Or right-click a control to learn it, learn it for one pad only, or forget it.
+- Pad settings for the selected pad or one pad, tempo, swing, the master level,
+  and the Sampler track's volume and pan. 7-bit or 14-bit controllers, each
+  control with its own curve, and one undo step per knob turn.
+- When a knob and its value disagree: pick-up (the default), catch up gradually,
+  or jump, set in Audio settings, where the list of mappings is too.
+- Mappings save with the project; older projects open with none.
+- Turning a pad's cutoff while it rings now glides instead of stepping.
+- Fixed: a MIDI controller plugged in after tuneKore starts now connects (macOS).
+
 ## 0.1.12: one clock, tracks and the Timeline switch
 
 idevkore/dk-tunekore#34, PR #45
