@@ -43,6 +43,13 @@ export default function TrackHeader({ track, height, selected, meter, onSelect, 
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(track.name);
   const resize = useRef<{ y0: number; h0: number } | null>(null);
+  const head = useRef<HTMLDivElement>(null);
+  // Enter or Escape goes back to the header, so the next Tab moves on from
+  // here (not to the view switch); a click or Tab away leaves focus where it went.
+  const done = (refocus: boolean) => {
+    setRenaming(false);
+    if (refocus) requestAnimationFrame(() => head.current?.focus({ preventScroll: true }));
+  };
   const mix = track.mix;
   const db = gainToDb(mix.volume);
   const renamable = track.kind !== "sampler";
@@ -50,14 +57,15 @@ export default function TrackHeader({ track, height, selected, meter, onSelect, 
 
   useEffect(() => setName(track.name), [track.name]);
 
-  const commit = () => {
-    setRenaming(false);
+  const commit = (refocus: boolean) => {
+    done(refocus);
     if (name.trim() && name !== track.name) onRename(name.trim());
     else setName(track.name);
   };
 
   return (
     <div
+      ref={head}
       className={`tl-head${selected ? " on" : ""}${mix.mute ? " muted" : ""}`}
       style={{ height }}
       data-track={track.id}
@@ -93,12 +101,12 @@ export default function TrackHeader({ track, height, selected, meter, onSelect, 
               autoFocus
               aria-label="Track name"
               onChange={(e) => setName(e.target.value)}
-              onBlur={commit}
+              onBlur={() => commit(false)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") commit();
+                if (e.key === "Enter") commit(true);
                 if (e.key === "Escape") {
                   setName(track.name);
-                  setRenaming(false);
+                  done(true);
                 }
               }}
             />

@@ -254,50 +254,69 @@ impl ClipSet {
 
 /// Where clips are in their files: the time between a clip's start and the
 /// playhead along the tempo map, through the tempo changes heard since the
-/// last jump. Each change is the beat it landed on and the map from there.
+/// last jump. The history belongs to the transport, not to a set of clips, so
+/// it carries on across edits. Each change is the beat it landed on, the map
+/// from there, and the clock's count of frames at that beat, so an old change
+/// can be dropped without moving anything that started after it.
 #[derive(Debug, Clone, Copy)]
 struct FileClock {
-    changes: [(f64, TempoMap); CHANGES],
+    /// `changes[0]` counts from beat 0 and holds before the first change.
+    changes: [(f64, TempoMap, f64); CHANGES],
     len: usize,
 }
 
 impl FileClock {
     /// No history: clips placed by `map` alone.
     fn new(map: TempoMap) -> Self {
-        Self { changes: [(f64::NEG_INFINITY, map); CHANGES], len: 1 }
+        Self { changes: [(0.0, map, 0.0); CHANGES], len: 1 }
     }
 
     fn map(&self) -> &TempoMap {
         &self.changes[self.len - 1].1
     }
 
-    /// A new map from `beat` on. False when no room is left: place the clips again.
+    /// The clock's count of frames at `beat`, through the changes.
+    fn at(&self, beat: f64) -> f64 {
+        let k = (1..self.len).rev().find(|&k| self.changes[k].0 <= beat).unwrap_or(0);
+        let (from, map, f) = &self.changes[k];
+        f + frames_into(map, *from, beat)
+    }
+
+    /// A new map from `beat` on. False when no room is left.
     fn change(&mut self, beat: f64, map: TempoMap) -> bool {
         if self.len == CHANGES {
             return false;
         }
-        self.changes[self.len] = (beat, map);
+        let f = self.at(beat);
+        self.changes[self.len] = (beat, map, f);
         self.len += 1;
         true
     }
 
-    /// Frames from `start` to `beat`, through the changes between them.
-    fn frames(&self, start: f64, beat: f64) -> f64 {
-        let (since, map) = &self.changes[self.len - 1];
-        // Started after the last change (or not started yet): the map alone.
-        if start >= *since {
-            return frames_into(map, start, beat);
-        }
-        let mut total = 0.0;
-        for k in 0..self.len {
-            let (from, map) = &self.changes[k];
-            let to = if k + 1 < self.len { self.changes[k + 1].0 } else { f64::INFINITY };
-            let (lo, hi) = (start.max(*from), beat.min(to));
-            if hi > lo {
-                total += frames_into(map, lo, hi);
+    /// Drops the oldest change no clip in `clips` that is still sounding at
+    /// `now` started inside of: only those count time through it. False when
+    /// every change is needed.
+    fn compact(&mut self, clips: &[Playing], now: f64) -> bool {
+        for k in 1..self.len {
+            let (from, to) = (self.changes[k].0, if k + 1 < self.len { self.changes[k + 1].0 } else { f64::INFINITY });
+            let needed = clips.iter().any(|c| c.start >= from && c.start < to && c.index_at(now, self) < c.length as f64);
+            if !needed {
+                self.changes.copy_within(k + 1..self.len, k);
+                self.len -= 1;
+                return true;
             }
         }
-        total
+        false
+    }
+
+    /// Frames from `start` to `beat`, through the changes between them.
+    fn frames(&self, start: f64, beat: f64) -> f64 {
+        let (since, map, _) = &self.changes[self.len - 1];
+        // Started after the last change (or not started yet), or no history: the map alone.
+        if self.len == 1 || start >= *since {
+            return frames_into(map, start, beat);
+        }
+        self.at(beat) - self.at(start)
     }
 }
 
@@ -601,18 +620,28 @@ impl Device for ClipPlayer {
         let level = self.fade_in.map_or(1.0, |pos| (pos as f32 / len as f32).min(1.0));
         let was = self.last;
         let onward = was.is_some_and(|b| ctx.playing && !ctx.jumped && !ctx.started && (ctx.beat - b).abs() <= 0.5 * ctx.beats_per_frame);
-        // A tempo change heard while playing on: the files keep running.
-        let mut place = !onward || swapped.is_some();
-        if !place && ctx.map != *self.clock.map() && !self.clock.change(ctx.beat, ctx.map) {
-            place = true;
-        }
-        if let (Some(beat), true) = (was, place) {
+        // A jump places the clips by the map again; an edit keeps the tempo
+        // history (it is the transport's), and only crossfades to the new set.
+        let mut place = !onward;
+        let fade = place || swapped.is_some();
+        if let (Some(beat), true) = (was, fade) {
             // What was playing (the replaced set, after an edit) fades out from where it was heading.
             let set = swapped.map_or(Which::Current, Which::Retired);
             self.add_tail(Tail { set, beat, clock: self.clock, from: level, pos: 0 });
         }
-        if ctx.playing && (place || was.is_none()) {
-            self.clock = FileClock::new(ctx.map);
+        // A tempo change heard while playing on: the files keep running.
+        if !place && ctx.map != *self.clock.map() {
+            while !self.clock.change(ctx.beat, ctx.map) {
+                if !self.clock.compact(&self.current.clips, ctx.beat) {
+                    place = true;
+                    break;
+                }
+            }
+        }
+        if ctx.playing && (fade || place || was.is_none()) {
+            if place || was.is_none() {
+                self.clock = FileClock::new(ctx.map);
+            }
             self.fade_in = Some(0);
         }
 
@@ -877,6 +906,37 @@ mod tests {
         // The first clip plays 0.25 throughout; the second's first frame adds to it.
         let second = rig.out.iter().position(|&x| x > 0.2501).unwrap();
         assert_eq!(second, BEAT + 2 * 48_000, "beat 3 after a change at beat 1 to 60 BPM");
+    }
+
+    #[test]
+    fn an_edit_after_a_tempo_change_keeps_the_files_running() {
+        let clips = || vec![(spec(0.0, 3.0), ramp(4 * 48_000))];
+        let mut rig = Rig::new(clips());
+        rig.shared.play();
+        rig.run(BEAT, 480);
+        rig.shared.set_tempo(90.0);
+        rig.run(BEAT, 480);
+        // The same clips again, as any edit on the Timeline sends them.
+        rig.feed.publish(ClipSet::new(RATE, clips()));
+        rig.run(BEAT, 480);
+        for k in 200..3 * BEAT {
+            assert!((rig.out[k] - k as f32).abs() < 0.05, "frame {k}: {}", rig.out[k]);
+        }
+    }
+
+    #[test]
+    fn a_long_tempo_sweep_never_moves_a_playing_clip() {
+        let mut rig = Rig::new(vec![(spec(0.0, 3.0), ramp(4 * 48_000))]);
+        rig.shared.play();
+        rig.run(512, 512);
+        // A knob swept for 200 blocks: a new tempo every block, far past the history's room.
+        for i in 0..200 {
+            rig.shared.set_tempo(100.0 + (i % 40) as f64);
+            rig.run(512, 512);
+        }
+        for k in 200..201 * 512 {
+            assert_eq!(rig.out[k], k as f32, "frame {k}");
+        }
     }
 
     #[test]

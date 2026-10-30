@@ -185,6 +185,14 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
 
   // ---- Layout ----
 
+  // Coming back on screen: the scroll positions again, in case the webview
+  // dropped them while the view was hidden.
+  useEffect(() => {
+    if (!active) return;
+    if (scrollEl.current) scrollEl.current.scrollTop = scrollTop;
+    if (hscroll.current) hscroll.current.scrollLeft = scroll * zoom;
+  }, [active]);
+
   useEffect(() => {
     const el = scrollEl.current;
     if (!el) return;
