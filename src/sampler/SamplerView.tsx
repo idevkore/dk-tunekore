@@ -99,8 +99,10 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   }, [take, fail]);
 
   // After a crash: offer the unsaved work the last session left behind.
+  // A file opened from the Finder waits for the answer (see below).
+  const recoveryAnswered = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => {
-    api
+    recoveryAnswered.current = api
       .autosaveCheck()
       .then(async (r) => {
         if (!r) return;
@@ -225,6 +227,21 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
     },
     [keepChanges, take, fail, say],
   );
+
+  // A .tunek file double-clicked in the Finder: at launch it is already
+  // waiting; later the Rust side says one arrived. One project is open at a
+  // time, so the newest file wins.
+  useEffect(() => {
+    const openWaiting = () =>
+      void recoveryAnswered.current
+        .catch(() => {})
+        .then(api.openedFiles)
+        .then((files) => (files.length > 0 ? openPath(files[files.length - 1]) : undefined))
+        .catch(fail);
+    const off = subscribe(api.onOpenFiles(openWaiting));
+    openWaiting();
+    return off;
+  }, [openPath, fail]);
 
   const doOpen = useCallback(async () => {
     const f = await open({ title: "Open a project", filters: [{ name: "tuneKore project", extensions: [api.PROJECT_EXT] }] }).catch(() => null);
@@ -428,10 +445,14 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
 
   const pad = view.pads[selected];
   const setTransport = (tempo: number, swing: number, steps: number) => api.setTransport(tempo, swing, steps).then(take).catch(fail);
+  const shownTempo = String(Math.round(view.tempo * 10) / 10);
   const commitTempo = () => {
+    // Leaving the box without typing a new tempo changes nothing (the box
+    // shows the tempo rounded, so sending its text back could).
+    if (tempoText.trim() === shownTempo) return setTempoText(shownTempo);
     const t = Number(tempoText);
     if (Number.isFinite(t) && t >= 40 && t <= 300) void setTransport(t, view.swing, view.steps);
-    else setTempoText(String(view.tempo));
+    else setTempoText(shownTempo);
   };
   const nudgeTempo = (d: number) => void setTransport(Math.min(300, Math.max(40, Math.round(view.tempo + d))), view.swing, view.steps);
   const hasPattern = view.pads.some((p) => p.name && p.steps.some(Boolean));

@@ -5,6 +5,18 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.13: open projects from the Finder
+
+idevkore/dk-tunekore#51
+
+- Double-clicking a `.tunek` file opens it in tuneKore, whether tuneKore is
+  running or not. The app now registers as the owner of `.tunek` files, and
+  macOS gives them the tuneKore project type. Dropping one on the Dock icon
+  works too. If the open project has unsaved changes, it asks first.
+- Fixed: a project you only looked at no longer asks to be saved when you
+  quit. Clicking into the tempo box and out again, or picking the length or
+  pattern already set, no longer counts as a change or adds an undo step.
+
 ## 0.1.12: one clock, tracks and the Timeline switch
 
 idevkore/dk-tunekore#34, PR #45

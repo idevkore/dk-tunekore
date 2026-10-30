@@ -265,6 +265,7 @@ pub fn run() {
         .manage(midi::state())
         .manage(pads.clone())
         .manage(player)
+        .manage(project::Opened::default())
         .manage(project::Project::<tauri::AppHandle>::new())
         .manage(recorder::RecorderState::default())
         .manage(sampler::SamplerState::new(pads))
@@ -310,6 +311,12 @@ pub fn run() {
                 }
                 // Don't leave a stem worker running after the app quits.
                 tauri::RunEvent::Exit => app.state::<analyzer::Analyzer>().cancel_job(),
+                // A .tunek file double-clicked in the Finder or dropped on the Dock icon,
+                // at launch or while running: the main window opens it.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Opened { urls } => {
+                    project::files_opened(app, urls.iter().filter_map(|u| u.to_file_path().ok()));
+                }
                 _ => {}
             }
         });
