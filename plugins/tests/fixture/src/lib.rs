@@ -12,6 +12,9 @@
 //!   sample is the velocity of the held note (sample-accurate), 0 when none. Poly pressure, and
 //!   MIDI CC 7 through `IMidiMapping` (hidden parameter 1), set it to their value too.
 //!
+//! - "Fixture Thru" (`Fx`, added by tuneKore): passes audio, note events and parameter changes
+//!   straight through, allocating nothing (see `Thru`).
+//!
 //! The module checks the host's module lifecycle the way real plugins depend on it (see "module
 //! lifecycle" below) and aborts the process when it is broken.
 //!
@@ -28,6 +31,7 @@ use vst3::{Class, ComRef, ComWrapper, uid};
 const GAIN_CID: TUID = uid(0x5C0A1D00, 0x11112222, 0x33334444, 0x55556666);
 const GAIN_CTRL_CID: TUID = uid(0x5C0A1D01, 0x11112222, 0x33334444, 0x55556666);
 const SYNTH_CID: TUID = uid(0x5C0A1D02, 0x11112222, 0x33334444, 0x55556666);
+const THRU_CID: TUID = uid(0x5C0A1D03, 0x11112222, 0x33334444, 0x55556666);
 
 fn copy_c8(src: &str, dst: &mut [c_char]) {
     for (d, s) in dst.iter_mut().zip(src.bytes().chain(std::iter::once(0))) {
@@ -626,6 +630,135 @@ impl IEditControllerTrait for Synth {
     }
 }
 
+// ---- thru (tuneKore) -------------------------------------------------------------------------
+
+/// "Fixture Thru" (`Fx`), added by tuneKore: stereo in to stereo out unchanged, every input note
+/// event echoed to the event output, and every input parameter queue's last point echoed to the
+/// output parameter changes. It allocates nothing in `process`, so a host's own allocations
+/// there can be counted.
+struct Thru {
+    _live: Live,
+}
+
+impl Class for Thru {
+    type Interfaces = (IComponent, IAudioProcessor);
+}
+
+impl IPluginBaseTrait for Thru {
+    unsafe fn initialize(&self, _context: *mut FUnknown) -> tresult {
+        kResultOk
+    }
+    unsafe fn terminate(&self) -> tresult {
+        kResultOk
+    }
+}
+
+impl IComponentTrait for Thru {
+    unsafe fn getControllerClassId(&self, _class_id: *mut TUID) -> tresult {
+        kNotImplemented
+    }
+    unsafe fn setIoMode(&self, _mode: IoMode) -> tresult {
+        kResultOk
+    }
+    unsafe fn getBusCount(&self, _media: MediaType, _dir: BusDirection) -> i32 {
+        1
+    }
+    unsafe fn getBusInfo(&self, media: MediaType, dir: BusDirection, index: i32, bus: *mut BusInfo) -> tresult {
+        if index != 0 {
+            return kInvalidArgument;
+        }
+        if media == MediaTypes_::kAudio as MediaType {
+            audio_bus(bus, dir, "Thru");
+        } else {
+            let b = unsafe { &mut *bus };
+            b.mediaType = media;
+            b.direction = dir;
+            b.channelCount = 16;
+            copy_c16("Notes", &mut b.name);
+            b.busType = BusTypes_::kMain as BusType;
+            b.flags = BusInfo_::BusFlags_::kDefaultActive as u32;
+        }
+        kResultOk
+    }
+    unsafe fn getRoutingInfo(&self, _i: *mut RoutingInfo, _o: *mut RoutingInfo) -> tresult {
+        kNotImplemented
+    }
+    unsafe fn activateBus(&self, _m: MediaType, _d: BusDirection, _i: i32, _s: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn setActive(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn setState(&self, _state: *mut IBStream) -> tresult {
+        kResultOk
+    }
+    unsafe fn getState(&self, _state: *mut IBStream) -> tresult {
+        kResultOk
+    }
+}
+
+impl IAudioProcessorTrait for Thru {
+    unsafe fn setBusArrangements(&self, _i: *mut SpeakerArrangement, _n_in: i32, _o: *mut SpeakerArrangement, _n_out: i32) -> tresult {
+        kResultTrue
+    }
+    unsafe fn getBusArrangement(&self, _dir: BusDirection, _index: i32, arr: *mut SpeakerArrangement) -> tresult {
+        unsafe { *arr = SpeakerArr::kStereo };
+        kResultOk
+    }
+    unsafe fn canProcessSampleSize(&self, size: i32) -> tresult {
+        if size == SymbolicSampleSizes_::kSample32 as i32 { kResultOk } else { kNotImplemented }
+    }
+    unsafe fn getLatencySamples(&self) -> u32 {
+        0
+    }
+    unsafe fn setupProcessing(&self, _setup: *mut ProcessSetup) -> tresult {
+        kResultOk
+    }
+    unsafe fn setProcessing(&self, _state: TBool) -> tresult {
+        kResultOk
+    }
+    unsafe fn process(&self, data: *mut ProcessData) -> tresult {
+        let d = unsafe { &*data };
+        let frames = d.numSamples.max(0) as usize;
+        if d.numInputs == 1 && d.numOutputs == 1 {
+            let (i, o) = unsafe { (&*d.inputs, &*d.outputs) };
+            for ch in 0..i.numChannels.min(o.numChannels).max(0) as usize {
+                unsafe {
+                    let src = *i.__field0.channelBuffers32.add(ch);
+                    let dst = *o.__field0.channelBuffers32.add(ch);
+                    std::ptr::copy_nonoverlapping(src, dst, frames);
+                }
+            }
+        }
+        if let (Some(inp), Some(out)) = (unsafe { ComRef::from_raw(d.inputEvents) }, unsafe { ComRef::from_raw(d.outputEvents) }) {
+            for k in 0..unsafe { inp.getEventCount() } {
+                let mut e: Event = unsafe { std::mem::zeroed() };
+                if unsafe { inp.getEvent(k, &mut e) } == kResultOk {
+                    unsafe { out.addEvent(&mut e) };
+                }
+            }
+        }
+        if let (Some(inp), Some(out)) = (unsafe { ComRef::from_raw(d.inputParameterChanges) }, unsafe { ComRef::from_raw(d.outputParameterChanges) }) {
+            for k in 0..unsafe { inp.getParameterCount() } {
+                let Some(q) = (unsafe { ComRef::from_raw(inp.getParameterData(k)) }) else { continue };
+                let n = unsafe { q.getPointCount() };
+                let (mut at, mut v) = (0i32, 0f64);
+                if n > 0 && unsafe { q.getPoint(n - 1, &mut at, &mut v) } == kResultOk {
+                    let id = unsafe { q.getParameterId() };
+                    let mut index = 0;
+                    if let Some(oq) = unsafe { ComRef::from_raw(out.addParameterData(&id, &mut index)) } {
+                        unsafe { oq.addPoint(at, v, &mut index) };
+                    }
+                }
+            }
+        }
+        kResultOk
+    }
+    unsafe fn getTailSamples(&self) -> u32 {
+        0
+    }
+}
+
 // ---- factory -------------------------------------------------------------------------------
 
 struct Factory {
@@ -636,10 +769,11 @@ impl Class for Factory {
     type Interfaces = (IPluginFactory2,);
 }
 
-const CLASSES: [(TUID, &str, &str, &str); 3] = [
+const CLASSES: [(TUID, &str, &str, &str); 4] = [
     (GAIN_CID, "Audio Module Class", "Fixture Gain", "Fx"),
     (GAIN_CTRL_CID, "Component Controller Class", "Fixture Gain", ""),
     (SYNTH_CID, "Audio Module Class", "Fixture Synth", "Instrument|Synth"),
+    (THRU_CID, "Audio Module Class", "Fixture Thru", "Fx"),
 ];
 
 impl IPluginFactoryTrait for Factory {
@@ -682,6 +816,8 @@ impl IPluginFactoryTrait for Factory {
             .to_com_ptr::<FUnknown>()
         } else if cid == SYNTH_CID {
             ComWrapper::new(Synth { level: AtomicU32::new(0), _live: Live::new(&OBJECTS) }).to_com_ptr::<FUnknown>()
+        } else if cid == THRU_CID {
+            ComWrapper::new(Thru { _live: Live::new(&OBJECTS) }).to_com_ptr::<FUnknown>()
         } else {
             None
         };

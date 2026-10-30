@@ -30,7 +30,7 @@ fn setup() -> ProcessSetup {
 #[test]
 fn the_bundle_lists_its_audio_classes_and_not_the_controller_class() {
     let found = vst3::classes(common::fixture_bundle()).unwrap();
-    assert_eq!(found.len(), 2, "{found:?}");
+    assert_eq!(found.len(), 3, "{found:?}");
     let g = found.iter().find(|d| d.name == "Fixture Gain").unwrap();
     assert_eq!((g.vendor.as_str(), g.version.as_str()), ("SoundCraft tests", "1.2.3"));
     assert_eq!((g.format, g.category, g.sub_categories.clone()), (Format::Vst3, Category::Effect, vec!["Fx".to_string()]));

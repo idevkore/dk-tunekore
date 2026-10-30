@@ -54,7 +54,7 @@ fn main() {
     // Off the main thread an editor is refused rather than attached where AppKit forbids it.
     let refused = std::thread::spawn(move || {
         let mut g = common::load_fixture("Fixture Gain");
-        g.open_editor(NativeParent(1 as *mut _), Box::new(|_| {})).is_err()
+        g.open_editor(NativeParent(std::ptr::dangling_mut()), Box::new(|_| {})).is_err()
     });
     assert!(refused.join().unwrap(), "editors are main-thread only");
     println!("editor_main_thread: ok");

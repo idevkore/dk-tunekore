@@ -24,8 +24,8 @@ fn options(dir: &std::path::Path, cache: &std::path::Path) -> ScanOptions {
 
 /// A plugin folder with the good fixture and one of each misbehaving plugin; `None` without a C++
 /// compiler.
-fn mixed_folder() -> Option<std::path::PathBuf> {
-    let dir = scratch_dir("scan-mixed");
+fn mixed_folder(tag: &str) -> Option<std::path::PathBuf> {
+    let dir = scratch_dir(&format!("scan-mixed-{tag}"));
     for (name, mode) in [("Throws", Misbehaviour::ThrowsInInitialize), ("Aborts", Misbehaviour::AbortsOnLoad), ("Hangs", Misbehaviour::HangsOnLoad), ("ThrowsEarly", Misbehaviour::ThrowsOnLoad)] {
         bad_plugin(&dir, name, mode)?;
     }
@@ -64,14 +64,14 @@ fn a_bundle_that_throws_while_loading_is_an_error_too() {
 
 #[test]
 fn the_scan_survives_a_crash_a_hang_and_exceptions_and_reports_each() {
-    let Some(dir) = mixed_folder() else { return eprintln!("skipped: no C++ compiler") };
+    let Some(dir) = mixed_folder("survives") else { return eprintln!("skipped: no C++ compiler") };
     let cache_path = dir.join("cache.json");
     let t = Instant::now();
     let cache = scan::scan(&options(&dir, &cache_path)).expect("the scan runs");
     assert!(t.elapsed() < Duration::from_secs(30), "the hang is cut off by the timeout");
 
     let good: Vec<&str> = cache.plugins().map(|e| e.info.name.as_str()).collect();
-    assert_eq!(good, vec!["Fixture Gain", "Fixture Synth"], "the good plugins are listed despite the bad ones");
+    assert_eq!(good, vec!["Fixture Gain", "Fixture Synth", "Fixture Thru"], "the good plugins are listed despite the bad ones");
     let synth = cache.find("Fixture Synth").unwrap();
     assert_eq!(synth.info.category, Category::Instrument);
     assert_eq!(synth.buses.event_inputs, 1);
@@ -96,7 +96,7 @@ fn the_scan_survives_a_crash_a_hang_and_exceptions_and_reports_each() {
 
 #[test]
 fn a_second_scan_reuses_the_cache_and_a_rescan_does_not() {
-    let Some(dir) = mixed_folder() else { return eprintln!("skipped: no C++ compiler") };
+    let Some(dir) = mixed_folder("reuse") else { return eprintln!("skipped: no C++ compiler") };
     let cache_path = dir.join("cache.json");
     let opts = options(&dir, &cache_path);
     let first = scan::scan(&opts).unwrap();
