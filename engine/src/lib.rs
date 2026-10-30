@@ -86,6 +86,9 @@ struct Shared {
     master: AtomicU32,
     /// Lowest limiter gain since the last take, f32 bits (1.0 = not limiting).
     limiting: AtomicU32,
+    /// Errors the output stream reported since the last take. cpal can report
+    /// them on the audio thread, so they are counted here and logged elsewhere.
+    stream_errors: AtomicU32,
 }
 
 impl Default for Shared {
@@ -99,6 +102,7 @@ impl Default for Shared {
             peak: AtomicU32::new(0),
             master: AtomicU32::new(1.0f32.to_bits()),
             limiting: AtomicU32::new(1.0f32.to_bits()),
+            stream_errors: AtomicU32::new(0),
         }
     }
 }
@@ -382,51 +386,44 @@ impl Engine {
     where
         T: cpal::SizedSample + cpal::FromSample<f32>,
     {
-        let shared = self.shared.clone();
         let channels = (config.channels as usize).max(1);
-        let rate = config.sample_rate;
-        let mut tone = Tone::new(rate as f64);
-        let (mut voice, link) = player::voice(rate);
-        let mut transport = Transport::new(rate);
-        // Prepares every track's devices for this rate and moves them into the graph.
-        let mut graph = self.mixer.start(rate);
-        let mut limiter = Limiter::new(rate, channels);
-        let mut scratch = vec![0.0f32; BLOCK_FRAMES * channels];
-        shared.peak.store(0, Ordering::Relaxed);
-        self.rate = rate;
+        let (mut output, link) = self.output(config.sample_rate, channels);
+        let errors = self.shared.clone();
         let stream = dev
             .build_output_stream(
-                config.clone(),
-                // Audio thread: atomics, lock-free queues and preallocated buffers only.
-                move |out: &mut [T], _| {
-                    #[cfg(debug_assertions)]
-                    rtsan_standalone::realtime_enter();
-                    let mut peak = 0.0f32;
-                    for block in out.chunks_mut(BLOCK_FRAMES * channels) {
-                        let frames = block.len() / channels;
-                        let buf = &mut scratch[..block.len()];
-                        tone.render(&shared.tone, buf, channels);
-                        voice.render(&shared.player, buf, channels);
-                        graph.run(&mut transport, &shared.transport, frames);
-                        mix_into(buf, channels, graph.master());
-                        let master = f32::from_bits(shared.master.load(Ordering::Relaxed));
-                        shared.lower_limiting(limiter.process(buf, master));
-                        for (o, &s) in block.iter_mut().zip(buf.iter()) {
-                            peak = peak.max(s.abs());
-                            *o = T::from_sample(s);
-                        }
-                    }
-                    shared.raise_peak(peak);
-                    #[cfg(debug_assertions)]
-                    rtsan_standalone::realtime_exit();
+                *config,
+                move |out: &mut [T], _| output.render(out),
+                // cpal may call this on the audio thread (an overload notice):
+                // count it here, and the app logs the count from its own thread.
+                move |_err| {
+                    errors.stream_errors.fetch_add(1, Ordering::Relaxed);
                 },
-                // cpal calls this off the audio thread.
-                |err| eprintln!("audio stream error: {err}"),
                 None,
             )
             .map_err(|e| e.to_string())?;
         self.link = Some(link);
         Ok(stream)
+    }
+
+    /// Everything the output callback runs, for a stream at `rate` that is
+    /// `channels` wide: prepares every track's devices for this rate and moves
+    /// them into its graph.
+    fn output(&mut self, rate: u32, channels: usize) -> (Output, player::VoiceLink) {
+        let (voice, link) = player::voice(rate);
+        let graph = self.mixer.start(rate);
+        self.shared.peak.store(0, Ordering::Relaxed);
+        self.rate = rate;
+        let out = Output {
+            shared: self.shared.clone(),
+            channels,
+            tone: Tone::new(rate as f64),
+            voice,
+            transport: Transport::new(rate),
+            graph,
+            limiter: Limiter::new(rate, channels),
+            scratch: vec![0.0f32; BLOCK_FRAMES * channels],
+        };
+        (out, link)
     }
 
     pub fn close_output(&mut self) {
@@ -474,6 +471,50 @@ impl Engine {
     /// A handle that reads the output peak without the engine's lock.
     pub fn meter(&self) -> Meter {
         Meter(self.shared.clone())
+    }
+}
+
+/// The output callback's state: the test tone, the Analyzer's player, the
+/// transport and the graph, then the master level and the limiter.
+struct Output {
+    shared: Arc<Shared>,
+    channels: usize,
+    tone: Tone,
+    voice: player::Voice,
+    transport: Transport,
+    graph: graph::Graph,
+    limiter: Limiter,
+    /// Interleaved, `BLOCK_FRAMES * channels`.
+    scratch: Vec<f32>,
+}
+
+impl Output {
+    /// One output callback: fills `out` (interleaved). Audio thread only:
+    /// atomics, lock-free queues and preallocated buffers. In debug builds it
+    /// runs in RealtimeSanitizer's real-time context.
+    fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, out: &mut [T]) {
+        #[cfg(debug_assertions)]
+        rtsan_standalone::realtime_enter();
+        let Output { shared, channels, tone, voice, transport, graph, limiter, scratch } = self;
+        let channels = *channels;
+        let mut peak = 0.0f32;
+        for block in out.chunks_mut(BLOCK_FRAMES * channels) {
+            let frames = block.len() / channels;
+            let buf = &mut scratch[..block.len()];
+            tone.render(&shared.tone, buf, channels);
+            voice.render(&shared.player, buf, channels);
+            graph.run(transport, &shared.transport, frames);
+            mix_into(buf, channels, graph.master());
+            let master = f32::from_bits(shared.master.load(Ordering::Relaxed));
+            shared.lower_limiting(limiter.process(buf, master));
+            for (o, &s) in block.iter_mut().zip(buf.iter()) {
+                peak = peak.max(s.abs());
+                *o = T::from_sample(s);
+            }
+        }
+        shared.raise_peak(peak);
+        #[cfg(debug_assertions)]
+        rtsan_standalone::realtime_exit();
     }
 }
 
@@ -534,12 +575,57 @@ impl Meter {
     pub fn take_limiting(&self) -> f32 {
         f32::from_bits(self.0.limiting.swap(1.0f32.to_bits(), Ordering::Relaxed))
     }
+
+    /// How many errors the output stream reported since the last call.
+    pub fn take_stream_errors(&self) -> u32 {
+        self.0.stream_errors.swap(0, Ordering::Relaxed)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The whole output callback, as a device runs it, with the main thread
+    /// editing between blocks: nothing on the heap, and sound comes out.
+    #[test]
+    fn the_output_callback_never_allocates() {
+        let mut engine = Engine::new();
+        let (mut out, mut link) = engine.output(48_000, 2);
+        let stem: Track = Arc::new(vec![vec![0.1; 96_000], vec![-0.1; 96_000]]);
+        link.send.push(Box::new(player::Clip { tracks: vec![stem], frames: 96_000 })).unwrap();
+        engine.shared.player.loaded(96_000, 48_000);
+        let hit: Track = Arc::new(vec![(0..4_000).map(|i| if i < 50 { 0.8 } else { 0.0 }).collect()]);
+        engine.sampler_link.send(0, Some(hit)).unwrap();
+        let pads = engine.sampler();
+        pads.set_pattern(0, 0x1111);
+        pads.set_metronome(true);
+        engine.set_tone(true, 440.0, 0.1);
+        engine.player().set_playing(true);
+        let transport = engine.transport();
+        transport.set_loop(0.0, 2.0);
+        transport.set_looping(true);
+        transport.play();
+        let extra = engine.mixer().add_track("extra").unwrap();
+        let meter = engine.meter();
+        let mut buf = vec![0.0f32; 512 * 2];
+        let mut total = 0;
+        for i in 0..400 {
+            match i % 4 {
+                0 => engine.mixer().set_mix(SAMPLER_TRACK, TrackMix { volume: 0.5 + (i % 3) as f32 * 0.25, ..Default::default() }).unwrap(),
+                1 => engine.mixer().set_mix(extra, TrackMix { solo: i % 8 == 1, ..Default::default() }).unwrap(),
+                2 => pads.trigger(0),
+                _ => engine.sampler_link.collect(),
+            }
+            let (_, n) = testing::realtime(|| out.render(&mut buf));
+            total += n;
+        }
+        assert_eq!(total, 0, "the callback allocated or freed {total} times");
+        assert!(meter.take_peak() > 0.1, "it played");
+        drop(out);
+        assert!(engine.mixer.stopped(), "the devices came home");
+    }
 
     #[test]
     fn has_a_version() {

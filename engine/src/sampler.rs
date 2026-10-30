@@ -187,6 +187,28 @@ impl Default for PadParams {
     }
 }
 
+/// How far swing (0..1) pushes the off-beats, in beats: up to a third of a sixteenth.
+fn swing_push(swing: f32) -> f64 {
+    0.25 * f64::from(swing) / 3.0
+}
+
+/// Where step `step` starts in a pass of the pattern, in beats: a sixteenth
+/// apiece, with each off-beat (odd) step pushed later by the swing.
+fn step_offset(step: usize, swing: f32) -> f64 {
+    step as f64 * 0.25 + if step % 2 == 1 { swing_push(swing) } else { 0.0 }
+}
+
+/// One pass of a pattern `steps` long, in beats: where a step after its
+/// last would start (an odd length ends on a long step, so it is a push longer).
+fn pass_beats(steps: usize, swing: f32) -> f64 {
+    step_offset(steps, swing)
+}
+
+/// Step `step`'s length in beats: even steps are longer, odd ones shorter.
+fn step_len(step: usize, swing: f32) -> f64 {
+    if step.is_multiple_of(2) { 0.25 + swing_push(swing) } else { 0.25 - swing_push(swing) }
+}
+
 /// `v` clamped to `lo..=hi`, or `default` when it is not a number.
 fn sane(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
     if v.is_nan() { default } else { v.clamp(lo, hi) }
@@ -753,14 +775,6 @@ impl SamplerShared {
         }
     }
 
-    /// Length of step `step` in beats, with swing: a sixteenth, with each
-    /// even step longer and each odd one shorter by up to a third of one, so
-    /// the off-beats land later.
-    fn step_beats(&self, step: usize) -> f64 {
-        let push = 0.25 * self.swing() as f64 / 3.0;
-        if step.is_multiple_of(2) { 0.25 + push } else { 0.25 - push }
-    }
-
     /// Length of step `step` in frames at `rate`, with swing, at the current tempo.
     fn step_frames(&self, step: usize, rate: f64) -> f64 {
         let sixteenth = rate * 60.0 / self.tempo() as f64 / 4.0;
@@ -1064,9 +1078,20 @@ pub struct Sampler {
     /// sequencer stays stopped until the transport has seen it.
     ended: bool,
     next_step: usize,
-    /// Beats left in the step that fired last. At a block boundary this says
-    /// where the sequencer is, so a recorded hit can be quantized.
-    countdown: f64,
+    /// The transport beat the next step fires on: the grid's origin, plus
+    /// whole passes, plus the step's place in a pass. Worked out afresh each
+    /// step rather than added up, so it never drifts from the clock.
+    next_beat: f64,
+    /// Where the pattern's grid starts, the passes played since, and the
+    /// length and swing it is laid out with. A change of either lays it out
+    /// again from the next step.
+    origin: f64,
+    passes: u64,
+    grid_steps: usize,
+    grid_swing: f32,
+    /// This piece's first beat, and the frame of it the next step is due on.
+    piece_beat: f64,
+    next_at: f64,
     /// A hit recorded onto `skip_step` was already played by hand: the
     /// sequencer leaves these pads (bit per pad) out of that step, once.
     skip_step: usize,
@@ -1084,11 +1109,12 @@ pub struct Sampler {
     rng: XorShift,
     /// Where the sequencer is, as of the step that fired last.
     pos: Position,
-    /// The rest of a ratcheted step, per pad: hits left, beats until the next
-    /// one, beats between hits and their velocity. `ratchet_active` has a bit
-    /// for each pad with hits left.
+    /// The rest of a ratcheted step, per pad: hits left, hits played, the
+    /// step's beat, beats between hits and their velocity. Hit `k` is at
+    /// `base + k * gap`. `ratchet_active` has a bit for each pad with hits left.
     ratchet_left: [u8; PADS],
-    ratchet_wait: [f64; PADS],
+    ratchet_done: [u8; PADS],
+    ratchet_base: [f64; PADS],
     ratchet_gap: [f64; PADS],
     ratchet_vel: [f32; PADS],
     ratchet_active: u32,
@@ -1204,7 +1230,13 @@ impl Sampler {
             was_playing: false,
             ended: false,
             next_step: 0,
-            countdown: 0.0,
+            next_beat: 0.0,
+            origin: 0.0,
+            passes: 0,
+            grid_steps: 16,
+            grid_swing: 0.0,
+            piece_beat: 0.0,
+            next_at: 0.0,
             skip_step: 0,
             skip_pads: 0,
             click_left: 0,
@@ -1218,7 +1250,8 @@ impl Sampler {
             rng: XorShift::new(RNG_SEED),
             pos: Position { chain_pos: NO_POS, song_bank: 0, plain_bank: 0 },
             ratchet_left: [0; PADS],
-            ratchet_wait: [0.0; PADS],
+            ratchet_done: [0; PADS],
+            ratchet_base: [0.0; PADS],
             ratchet_gap: [0.0; PADS],
             ratchet_vel: [1.0; PADS],
             ratchet_active: 0,
@@ -1299,6 +1332,7 @@ impl Sampler {
         self.bpf = ctx.beats_per_frame;
         self.fpb = ctx.frames_per_beat();
         self.eps = ctx.beats_per_frame * EDGE_FRAMES;
+        self.piece_beat = ctx.beat;
 
         if !ctx.playing || ctx.started {
             self.ended = false;
@@ -1322,6 +1356,10 @@ impl Sampler {
         // same place in the bar, so the wrap (and any switch waiting for it)
         // still lands on a multiple of the new length.
         self.next_step %= steps;
+        if playing {
+            self.relay(shared, steps);
+        }
+        self.next_at = self.due_at(self.next_beat);
         let recording = playing && shared.recording.load(Ordering::Relaxed);
 
         for slot in 0..SLOTS {
@@ -1346,7 +1384,7 @@ impl Sampler {
 
         for frame in 0..ctx.frames {
             if playing {
-                if self.countdown <= self.eps && !self.fire_step(shared, steps) {
+                if frame as f64 >= self.next_at && !self.fire_step(shared, steps) {
                     // A song that doesn't loop reached its end, on this frame:
                     // stop the transport, and stay stopped until it has.
                     shared.clock.set_playing(false);
@@ -1355,11 +1393,8 @@ impl Sampler {
                     self.was_playing = false;
                     playing = false;
                 }
-                if playing {
-                    self.countdown -= self.bpf;
-                    if self.ratchet_active != 0 {
-                        self.tick_ratchets(shared);
-                    }
+                if playing && self.ratchet_active != 0 {
+                    self.tick_ratchets(shared, frame);
                 }
             }
             let (left, right) = self.mix_frame(shared);
@@ -1371,36 +1406,67 @@ impl Sampler {
     /// Puts the sequencer where `beat` falls in the pattern, laid out on the
     /// beat grid from beat 0: on a step's first frame that step fires now;
     /// inside a step it waits for the next one. `fresh` starts a song from
-    /// its first entry; otherwise (a loop wrap, a seek) the song carries on.
+    /// its first entry, in the bank chosen now; otherwise (a loop wrap, a
+    /// seek) the song carries on.
     fn locate(&mut self, shared: &SamplerShared, beat: f64, steps: usize, fresh: bool) {
         if fresh {
             self.pos.chain_pos = NO_POS;
+            self.pos.plain_bank = shared.bank();
         }
         self.ratchet_active = 0;
         self.skip_pads = 0;
-        let pass: f64 = (0..steps).map(|s| shared.step_beats(s)).sum();
+        let swing = shared.swing();
+        let pass = pass_beats(steps, swing);
         let mut at = beat.rem_euclid(pass);
         if pass - at <= self.eps {
             at = 0.0;
         }
-        let mut start = 0.0;
+        self.origin = beat - at;
+        self.passes = 0;
+        self.grid_steps = steps;
+        self.grid_swing = swing;
+        self.next_step = 0;
         for s in 0..steps {
-            let len = shared.step_beats(s);
-            if at < start + len - self.eps {
+            let start = step_offset(s, swing);
+            if at < start + step_len(s, swing) - self.eps {
                 if at - start <= self.eps {
-                    self.next_step = s;
-                    self.countdown = start - at; // at most `eps`: fires on this frame
+                    self.next_step = s; // fires on this frame
+                } else if s + 1 < steps {
+                    self.next_step = s + 1;
+                    shared.step.store(s as u32, Ordering::Relaxed);
                 } else {
-                    self.next_step = (s + 1) % steps;
-                    self.countdown = start + len - at;
+                    self.passes = 1;
                     shared.step.store(s as u32, Ordering::Relaxed);
                 }
-                return;
+                break;
             }
-            start += len;
         }
-        self.next_step = 0;
-        self.countdown = 0.0;
+        self.next_beat = self.grid_beat(self.next_step);
+    }
+
+    /// The beat step `step` of the current pass falls on.
+    fn grid_beat(&self, step: usize) -> f64 {
+        self.origin + self.passes as f64 * pass_beats(self.grid_steps, self.grid_swing) + step_offset(step, self.grid_swing)
+    }
+
+    /// Lays the grid out again when the pattern's length or swing changed:
+    /// the next step stays where it was, and the ones after it follow the new
+    /// setting.
+    fn relay(&mut self, shared: &SamplerShared, steps: usize) {
+        let swing = shared.swing();
+        if steps == self.grid_steps && swing.to_bits() == self.grid_swing.to_bits() {
+            return;
+        }
+        self.grid_steps = steps;
+        self.grid_swing = swing;
+        self.origin = self.next_beat - step_offset(self.next_step, swing);
+        self.passes = 0;
+    }
+
+    /// The frame of this piece that `beat` falls due on (the first at or
+    /// after it), as a fraction: frame `n` is due when `n >= due_at(beat)`.
+    fn due_at(&self, beat: f64) -> f64 {
+        (beat - self.piece_beat) / self.bpf - EDGE_FRAMES
     }
 
     fn take_samples(&mut self) {
@@ -1501,7 +1567,8 @@ impl Sampler {
         shared.chain_pos.store(p.chain_pos, Ordering::Relaxed);
         shared.play_bank.store(playing as u32, Ordering::Relaxed);
         let bank = &shared.banks[playing];
-        let length = shared.step_beats(step);
+        let length = step_len(step, self.grid_swing);
+        let at = self.next_beat;
         // Pads whose hit was recorded onto this step a moment ago already sounded.
         let skip = if step == self.skip_step { self.skip_pads } else { 0 };
         self.skip_pads = 0;
@@ -1517,10 +1584,10 @@ impl Sampler {
                     self.step_hit(shared, pad, gap * self.fpb, vel);
                     self.ratchet_active &= !(1 << pad);
                     if n > 1 {
-                        // The rest land at multiples of `gap` from the step's exact
-                        // start, which `countdown` (zero or a bit under) marks.
+                        // The rest land at multiples of `gap` from the step's exact beat.
                         self.ratchet_left[pad] = n - 1;
-                        self.ratchet_wait[pad] = self.countdown + gap;
+                        self.ratchet_done[pad] = 1;
+                        self.ratchet_base[pad] = at;
                         self.ratchet_gap[pad] = gap;
                         self.ratchet_vel[pad] = vel;
                         self.ratchet_active |= 1 << pad;
@@ -1532,35 +1599,39 @@ impl Sampler {
             self.start_click(step == 0);
         }
         shared.step.store(step as u32, Ordering::Relaxed);
-        self.countdown += length;
-        self.next_step = (step + 1) % steps;
+        self.next_step = step + 1;
+        if self.next_step >= steps {
+            self.next_step = 0;
+            self.passes += 1;
+        }
+        self.next_beat = self.grid_beat(self.next_step);
+        self.next_at = self.due_at(self.next_beat);
         true
     }
 
-    /// Plays the ratchet hits that are due on this frame. They count down in
-    /// beats like `countdown` does, so they are as exact as the steps.
-    fn tick_ratchets(&mut self, shared: &SamplerShared) {
+    /// Plays the ratchet hits due on `frame` of this piece. Each one's beat is
+    /// worked out from its step's, so they are as exact as the steps.
+    fn tick_ratchets(&mut self, shared: &SamplerShared, frame: usize) {
         let mut active = self.ratchet_active;
         while active != 0 {
             let pad = active.trailing_zeros() as usize;
             active &= active - 1;
-            if self.ratchet_wait[pad] <= self.eps {
+            let beat = self.ratchet_base[pad] + f64::from(self.ratchet_done[pad]) * self.ratchet_gap[pad];
+            if frame as f64 >= self.due_at(beat) {
                 if shared.pads[pad].flags.load(Ordering::Relaxed) & MUTE == 0 {
                     self.step_hit(shared, pad, self.ratchet_gap[pad] * self.fpb, self.ratchet_vel[pad]);
                 }
+                self.ratchet_done[pad] += 1;
                 self.ratchet_left[pad] -= 1;
                 if self.ratchet_left[pad] == 0 {
                     self.ratchet_active &= !(1 << pad);
-                    continue;
                 }
-                self.ratchet_wait[pad] += self.ratchet_gap[pad];
             }
-            self.ratchet_wait[pad] -= self.bpf;
         }
     }
 
     /// Writes a hand-played hit on `pad` into the nearest step. Where the
-    /// sequencer is comes from `countdown`, the beats left in the step that
+    /// sequencer is comes from the beats left until the next step, in the step that
     /// fired last: in its first half the hit goes on that step, in its second
     /// half on the next one, which the sequencer then skips for this pad once
     /// (if it will play the bank written to there).
@@ -1570,8 +1641,8 @@ impl Sampler {
     /// song it goes into the bank being edited, as the chain decides what plays.
     fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize, vel: f32) {
         let current = (self.next_step + steps - 1) % steps;
-        let length = shared.step_beats(current);
-        let ahead = self.countdown <= length * 0.5;
+        let length = step_len(current, self.grid_swing);
+        let ahead = self.next_beat - self.piece_beat <= length * 0.5;
         let (step, at) = if ahead {
             (self.next_step, self.position_at(shared, self.next_step))
         } else {
@@ -3791,5 +3862,78 @@ mod tests {
         link.collect();
         run(&mut s, &shared, 64);
         assert!(s.held_back.is_none() && s.samples[1].is_some(), "both arrive once there is room");
+    }
+
+    /// Plays `frames` frames in blocks of `block` and returns where each hit
+    /// starts, without keeping the audio.
+    fn onsets_streamed(s: &mut Sampler, shared: &SamplerShared, frames: usize, block: usize) -> Vec<usize> {
+        let mut buf = vec![0.0; block * 2];
+        let (mut on, mut was, mut done) = (Vec::new(), false, 0);
+        while done < frames {
+            let n = block.min(frames - done);
+            let b = &mut buf[..n * 2];
+            b.fill(0.0);
+            s.render(shared, b, 2);
+            for (i, f) in b.chunks(2).enumerate() {
+                let hit = f[0].abs() > 0.01;
+                if hit && !was {
+                    on.push(done + i);
+                }
+                was = hit;
+            }
+            done += n;
+        }
+        on
+    }
+
+    #[test]
+    fn twenty_minutes_of_steps_land_on_their_exact_frames() {
+        for (rate, swing) in [(48_000u32, 0.0f32), (96_000, 0.0), (48_000, 1.0)] {
+            let shared = SamplerShared::default();
+            shared.set_tempo(120.0);
+            shared.set_swing(swing);
+            shared.set_steps(16);
+            shared.set_pattern(0, 0xFFFF);
+            shared.set_ratchet(0, 0, 0, 3); // step 0 splits in three
+            let mut s = Sampler::offline(rate);
+            s.set_sample(0, Some(click(20)));
+            shared.set_playing(true);
+            let sixteenth = rate as usize / 8; // 120 BPM
+            let push = (sixteenth as f32 * swing / 3.0) as usize;
+            let frames = rate as usize * 60 * 20;
+            let on = onsets_streamed(&mut s, &shared, frames, 512);
+            let mut want = Vec::new();
+            for step in 0..frames / sixteenth {
+                let pair = step / 2 * 2 * sixteenth;
+                let at = if step % 2 == 0 { pair } else { pair + sixteenth + push };
+                want.push(at);
+                if step % 16 == 0 {
+                    // A ratchet hit falls due on the first frame at or after its beat.
+                    let len = (sixteenth + push) as f64;
+                    want.extend([1.0, 2.0].map(|k| at + (k * len / 3.0).ceil() as usize));
+                }
+            }
+            want.retain(|&f| f < frames);
+            assert_eq!(on.len(), want.len(), "rate {rate}, swing {swing}");
+            let off = on.iter().zip(&want).position(|(a, b)| a != b);
+            assert_eq!(off, None, "rate {rate}, swing {swing}: hit {:?} is off", off.map(|i| (i, on[i], want[i])));
+        }
+    }
+
+    #[test]
+    fn playing_from_mid_pattern_plays_the_bank_chosen_while_stopped() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111); // A: the click
+        shared.set_bank_pattern(1, 1, 0b1111); // B: the flat pad
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 10_000, 500);
+        shared.set_playing(false);
+        play_blocks(&mut s, &shared, 500, 500);
+        shared.set_bank(1);
+        shared.clock().seek(0.5); // step 2
+        shared.set_playing(true);
+        let left = play_blocks(&mut s, &shared, 7_000, 500);
+        assert_eq!(onsets(&left), vec![0, 6_000]);
+        assert_eq!(pad_at(&left, 0), Some(1), "B from the first step, not A until the wrap");
     }
 }

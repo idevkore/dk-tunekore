@@ -410,6 +410,9 @@ pub struct Transport {
     map: TempoMap,
     continuous: u64,
     range: LoopRange,
+    /// The loop wrapped at the very end of the last block: the next block's
+    /// first piece starts the loop again and says so.
+    wrap_pending: bool,
 }
 
 impl Transport {
@@ -424,6 +427,7 @@ impl Transport {
             map: TempoMap::constant(120.0, TimeSignature::default(), sample_rate),
             continuous: 0,
             range: LoopRange::default(),
+            wrap_pending: false,
         }
     }
 
@@ -471,7 +475,7 @@ impl Transport {
         let starts = shared.starts.load(Ordering::Acquire);
         let seek = shared.take_seek();
         let mut started = false;
-        let mut jumped = false;
+        let mut jumped = std::mem::take(&mut self.wrap_pending) && self.playing;
         if want && (!self.playing || starts != self.starts) {
             self.playing = true;
             started = true;
@@ -520,9 +524,12 @@ impl Transport {
                 let floor = if wrapped { 1.0 } else { 0.0 };
                 // The first frame at or after a boundary belongs to what comes after it.
                 let frames_to = |at: f64| (map.frames_between(beat, at) - EDGE_FRAMES).ceil().max(floor);
-                if looping && beat < self.range.end {
+                // A position within a hair of the end has reached it.
+                let edge = EDGE_FRAMES * map.beats_per_frame_at(beat);
+                if looping && beat < self.range.end + edge {
                     let to_end = frames_to(self.range.end);
-                    if to_end < len as f64 {
+                    // `<=`: an end that falls on the block's last frame boundary wraps too.
+                    if to_end <= len as f64 {
                         len = to_end as usize;
                         wrap = true;
                     }
@@ -552,6 +559,8 @@ impl Transport {
                     wrapped = true;
                 }
             }
+            // A wrap on the block's last boundary: the next block starts the loop.
+            self.wrap_pending = jumped;
         }
         shared.beat.store(self.beat().to_bits(), Ordering::Relaxed);
         shared.frame.store(self.frame(), Ordering::Relaxed);
@@ -739,5 +748,36 @@ mod tests {
         assert_eq!(m.frames_between(2.0, 2.5), 16_000.0);
         assert_eq!(m.bar_at(7.0), (2, 6.0), "3/4 bars");
         assert_eq!(m.next_change(0.0), None, "one tempo for the whole song, for now");
+    }
+
+    /// Loop ends that fall exactly on a block boundary: every pass wraps.
+    #[test]
+    fn a_loop_end_on_a_block_boundary_wraps_every_time() {
+        for (rate, block, end) in [(48_000, 512, 16.0), (48_000, 512, 8.0), (48_000, 480, 1.0), (44_100, 441, 1.0), (96_000, 512, 2.0)] {
+            let s = TransportShared::default();
+            s.set_loop(0.0, end);
+            s.set_looping(true);
+            s.play();
+            let mut t = Transport::new(rate);
+            let pass = (end * 0.5 * f64::from(rate)).round() as usize; // 120 BPM: two beats a second
+            let p = pieces(&mut t, &s, pass * 4, block);
+            let jumps: Vec<usize> = p.iter().filter(|(_, c)| c.jumped).map(|(at, _)| *at).collect();
+            assert_eq!(jumps, vec![pass, 2 * pass, 3 * pass], "rate {rate}, block {block}, loop end {end}");
+            assert!(p.iter().all(|(_, c)| c.beat < end), "never past the end");
+            let first = p.iter().find(|(at, _)| *at == pass).unwrap().1;
+            assert!(first.beat.abs() < 1e-9, "the loop starts on its first beat");
+        }
+    }
+
+    #[test]
+    fn a_seek_onto_the_loop_end_wraps_at_once() {
+        let s = TransportShared::default();
+        s.set_loop(0.0, 4.0);
+        s.set_looping(true);
+        s.seek(4.0);
+        s.play();
+        let mut t = Transport::new(RATE);
+        let p = pieces(&mut t, &s, 512, 512);
+        assert!(p[0].1.beat.abs() < 1e-12 && p[0].1.jumped, "{:?}", p[0].1);
     }
 }
