@@ -68,6 +68,8 @@ const typing = (t: EventTarget | null) => {
 
 /** Peak 0..1 to a 0..1 bar position on a -60..0 dB scale. */
 const meterPosition = (peak: number) => (peak <= 0 ? 0 : Math.min(1, Math.max(0, (20 * Math.log10(peak) + 60) / 60)));
+/** The same signature keeps its identity, so the canvases don't redraw on every tick. */
+const sameSig = (next: [number, number]) => (s: [number, number]) => (s[0] === next[0] && s[1] === next[1] ? s : next);
 
 export default function Timeline({ switcher, message, onMessage }: Props) {
   const [view, setView] = useState<TimelineView | null>(null);
@@ -104,7 +106,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
   const take = useCallback((v: TimelineView) => {
     setView(v);
     setTempo(v.tempo);
-    setSignature(v.signature);
+    setSignature(sameSig(v.signature));
     retryFailed();
   }, []);
   /** The view's own settings (zoom, scroll, grid): at first, and after a project opens. */
@@ -129,7 +131,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
           tick.current = { ...t, at: performance.now() };
           setPlaying(t.playing);
           setTempo(t.tempo);
-          setSignature(t.signature);
+          setSignature(sameSig(t.signature));
           setLevels(Object.fromEntries(t.levels));
         }),
       ),
@@ -666,7 +668,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
                   {empty && !drop && (
                     <div className="tl-empty" style={{ top: Math.max(8, end - scrollTop + 10) }}>
                       <strong>Drag samples here</strong>
-                      <span>From the Library, from Finder, or from the Analyzer's stems saved to disk. Each one dropped below the tracks gets a track of its own; dropped on a track, they play one after another.</span>
+                      <span>From the Library or from Finder (stems the Analyzer exported, too). Each one dropped below the tracks gets a track of its own, lined up; dropped on a track, they play one after another.</span>
                     </div>
                   )}
                 </div>

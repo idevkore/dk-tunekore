@@ -234,6 +234,28 @@ rather than edit the same ones.
   `src/sampler/SamplerView.tsx` and stays mounted behind the Timeline;
   `src/timeline/Timeline.tsx` is the Timeline's.
 
+- **The Timeline** (#36, `engine/src/clip.rs`, `src-tauri/src/timeline.rs`,
+  `src/timeline/`). Every track but the Sampler's is an audio track whose
+  source is a `ClipPlayer`. A clip starts at a beat and plays a span of its
+  file at the file's own speed (Warp, Phase 8, makes clips follow the
+  tempo): `offset`, `content` (the span it loops over), `phase`, `length`
+  and fades in seconds. Where a clip is in its file is worked out from the
+  beat alone, as the Sampler's steps are, so it lands on the exact frame at
+  its edges, its own loop and the transport's loop wrap; a tempo change while
+  playing moves the clips under the playhead to where the new tempo puts
+  them. Each clip edge gets a 1.5 ms declick unless the next clip carries on
+  with the next sample of the same file (a split), and any jump (play, stop,
+  seek, loop wrap, tempo change, an edit while playing) is crossfaded over
+  the same time. The shell sends a track's clips to its player as a
+  `ClipSet` through the player's own one-slot mailbox, with a queue back for
+  freeing, so edits never go through `Mixer::set_source`. Files are decoded
+  with the Analyzer's decoder and resampled to the output's rate in the
+  shell, and kept in memory (streaming long files from disk comes later).
+  The `timeline` section saves each track's colour and height, the clips by
+  track id (paths relative to the project), the view and the loop; the
+  `tracks` section keeps names and mix. MIDI clips (#38) can join as another
+  kind of clip set, and plugins (#37) go after a track's source as before.
+
 Where the next pieces go:
 
 | Work | Engine | Shell and UI |
@@ -277,8 +299,11 @@ Where the next pieces go:
   small JSON messages. The engine answers with state events, and the UI keeps a
   read-only mirror of the document.
 - **Fast data** (meters at 30 Hz, the playhead) goes over binary channels.
-- **Waveform peaks** are computed in the engine and fetched from a custom
-  `tunekore://peaks/...` URL.
+- **Waveform peaks** are computed in the engine (`engine/src/peaks.rs`, off
+  the audio thread) and fetched as raw bytes by a command
+  (`timeline_peaks`, a `tauri::ipc::Response`), one zoom level of one file at
+  a time. A command needs no change to the window's builder, which a custom
+  `tunekore://` URL scheme would (#36).
 
 ## 3. What we take from Ableton, and in what order
 

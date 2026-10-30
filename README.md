@@ -6,8 +6,9 @@
 tuneKore is a lightweight DAW in the style of Ableton Live, built by devKore to
 host our own instruments, effects and tools alongside the plugins we already
 use (Serum, Arturia, Native Instruments). It is sampling first, and new tech
-only: VST3 and CLAP plugins, no legacy formats. The main window is the
-Sampler; the Analyzer splits a song into stems and sends them to its pads.
+only: VST3 and CLAP plugins, no legacy formats. The main window has two
+views on one beat clock, the Sampler and the Timeline (⌘1 and ⌘2); the
+Analyzer splits a song into stems and sends them to the Sampler's pads.
 
 [![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
 
@@ -15,7 +16,8 @@ CI: builds and tests the engine, the Analyzer, the stem worker and the app on
 macOS, and compiles and links them on Windows and Linux, for every push to
 `main` and every pull request.
 
-Status: Phase 2, the Sampler (the MVP).
+Status: the Sampler (Phase 2, the MVP) is in; the Timeline (Phase 4) has
+tracks and audio clips, with MIDI clips and plugins on tracks next.
 
 - **Sampler** (main window):
   - **Library:** pick a sample folder, click or arrow through samples to hear
@@ -45,6 +47,24 @@ Status: Phase 2, the Sampler (the MVP).
     the samples into a folder beside the project, and autosave recovers
     unsaved work after a crash. Export the pattern or the whole song as a WAV
     or as stems (one WAV per pad), or bounce it onto a pad to resample it.
+- **Timeline** (⌘2): tracks of audio clips on the Sampler's beat clock, with
+  the Sampler as the first track.
+  - **Tracks:** name, colour, volume, pan, mute, solo and a meter; drag a
+    track's foot to change its height. An arm button waits for recording.
+  - **Clips:** drag samples from the Library or files from Finder onto a
+    track (they play one after another), or below the tracks for a track
+    each, lined up. Move them (⌥ copies), trim either edge, loop one by
+    dragging the top of its right edge, fade in and out from its top corners,
+    set its gain, split at the playhead (⌘E), duplicate (⌘D) and delete (⌫).
+    Drags snap to the grid (bar, beat, 1/8, 1/16 or off; hold ⌘ to ignore it).
+  - **Ruler:** click to move the playhead; drag in its top strip for a loop
+    range, drag the brace to move it, click it to turn the loop on or off.
+    Zoom with ⌘-scroll, pinch, or = and -; the playhead is followed while
+    playing.
+  - Clips aren't warped yet: they play at their own speed, so a clip's length
+    in beats follows the tempo. Its files are decoded into memory.
+  - Undo and redo cover the Timeline's edits; tracks, clips, the loop and the
+    view are saved in the project.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
   or chopped at its hits from the playhead. It finds the song's tempo and key
@@ -52,7 +72,8 @@ Status: Phase 2, the Sampler (the MVP).
   separate worker process, with Demucs. Its weights are research-only, so a
   model we may ship replaces it before release (see `docs/PLAN.md` section 6).
 
-Keys: <kbd>Space</kbd> plays and stops, <kbd>1</kbd>–<kbd>4</kbd>,
+Keys: <kbd>Space</kbd> plays and stops, <kbd>⌘1</kbd> and <kbd>⌘2</kbd>
+show the Sampler and the Timeline, <kbd>1</kbd>–<kbd>4</kbd>,
 <kbd>Q</kbd>–<kbd>R</kbd>, <kbd>A</kbd>–<kbd>F</kbd> and <kbd>Z</kbd>–<kbd>V</kbd>
 play the pads, <kbd>/</kbd> searches the Library, <kbd>⌘S</kbd>,
 <kbd>⌘O</kbd>, <kbd>⌘N</kbd> and <kbd>⌘E</kbd> save, open, start a new
@@ -77,8 +98,8 @@ download to this Mac on first use. See [`stems/README.md`](stems/README.md).
 engine is the `tunekore-engine` crate in `engine/`, the Analyzer's decoding,
 worker and export code is `tunekore-analyzer` in `analyzer/`, and the Tauri
 shell in `src-tauri/` depends on both. To try the UI in a browser without
-Rust, run `npm run dev` and open `http://localhost:1420/?mock` (the Sampler)
-or `/analyzer.html?mock` (the Analyzer). The stem worker is Python, in
+Rust, run `npm run dev` and open `http://localhost:1420/?mock` (the Sampler
+and the Timeline) or `/analyzer.html?mock` (the Analyzer). The stem worker is Python, in
 `stems/`. To test the engine alone (it plays a short tone on the default
 output unless `CI` is set): `cargo test -p tunekore-engine`.
 

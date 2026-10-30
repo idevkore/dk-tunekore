@@ -561,12 +561,14 @@ impl TimelineState {
     }
 
     /// Lists the engine's tracks the document doesn't know yet (made by the
-    /// project's `tracks` section), as audio tracks.
+    /// project's `tracks` section) as audio tracks, when nothing else has put
+    /// a source on them: a track another module filled (an instrument) is its own.
     fn adopt(&self, doc: &mut Doc) {
         let tracks = lock(self.audio).engine.tracks();
+        let ours: Vec<TrackId> = lock(&self.feeds).iter().filter(|(_, f)| f.feed.is_attached()).map(|(id, _)| *id).collect();
         doc.tracks.retain(|m| tracks.iter().any(|t| t.id == m.id));
         for t in tracks {
-            if doc.tracks.iter().all(|m| m.id != t.id) {
+            if doc.tracks.iter().all(|m| m.id != t.id) && (t.id == SAMPLER_TRACK || !t.has_source || ours.contains(&t.id)) {
                 let meta = TrackMeta { id: t.id, colour: doc.next_colour(), height: DEFAULT_HEIGHT };
                 // The Sampler's track leads.
                 if t.id == SAMPLER_TRACK {
@@ -1157,6 +1159,8 @@ impl TimelineState {
         let lost: usize = orphans.iter().map(|id| clips.remove(&TrackId(*id)).map_or(0, |l| l.len())).sum();
         let next_clip = clips.values().flatten().map(|c| c.id).max().unwrap_or(0) + 1;
         let revision = doc.revision + 1;
+        // The last project's files go; this one's were decoded as it was read.
+        lock(&self.sources).retain(|p, _| clips.values().flatten().any(|c| c.path == *p));
         *doc = Doc { tracks, clips, next_clip, view: read.view, history: History::default(), revision };
         self.adopt(&mut doc);
         self.apply_loop(&doc.view);
@@ -1637,6 +1641,29 @@ mod tests {
         assert!(v.tracks[0].mix.mute);
         let v = rig.state.set_track(TrackId(3), TrackChange { height: Some(5_000), ..Default::default() }).unwrap();
         assert_eq!(v.tracks[1].height, MAX_HEIGHT);
+    }
+
+    #[test]
+    fn a_track_another_module_filled_is_left_alone() {
+        struct Instrument;
+        impl tunekore_engine::Device for Instrument {
+            fn process(&mut self, _: &tunekore_engine::ProcessContext, _: &mut tunekore_engine::Events, _: tunekore_engine::Buffers<'_>) {}
+        }
+        let rig = rig();
+        let keys = {
+            let mut a = lock(rig.audio);
+            let m = a.engine.mixer();
+            let keys = m.add_track("Keys").unwrap();
+            m.set_source(keys, Some(Box::new(Instrument))).unwrap();
+            m.add_track("Empty").unwrap();
+            keys
+        };
+        rig.project.open_text(&(), r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler"},{"id":2,"name":"Keys"},{"id":3,"name":"Empty"}]}"#, Path::new("/a.tunek"), None, false).unwrap();
+        // The project's tracks section made both empty; give Keys its instrument back, as its module would.
+        lock(rig.audio).engine.mixer().set_source(keys, Some(Box::new(Instrument))).unwrap();
+        rig.state.clear();
+        let v = rig.state.current();
+        assert_eq!(v.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Sampler", "Empty"], "Keys isn't an audio track");
     }
 
     #[test]
