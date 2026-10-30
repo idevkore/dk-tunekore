@@ -218,6 +218,16 @@ impl Mixer {
         Ok(())
     }
 
+    /// Puts a device back in a track's empty source slot after it was lost
+    /// with the output. The same as [`set_source`](Self::set_source) but not an
+    /// edit: the project's revision stays, since nothing it saves changed.
+    pub fn restore_source(&mut self, id: TrackId, device: Box<dyn Device>) -> Result<(), String> {
+        let before = self.revision();
+        self.set_source(id, Some(device))?;
+        self.revision.store(before, Ordering::Relaxed);
+        Ok(())
+    }
+
     /// Inserts a device into a track's chain at `index` (clamped to its end).
     pub fn insert(&mut self, id: TrackId, index: usize, device: Box<dyn Device>) -> Result<(), String> {
         let i = self.index(id)?;
@@ -293,11 +303,11 @@ impl Mixer {
             Err(_) => {
                 self.taken.fill(false);
                 self.pending.clear();
+                // Not an edit: the track list and mixes a project saves are unchanged.
                 for t in &mut self.tracks {
                     t.source = None;
                     t.chain.clear();
                 }
-                self.revision.fetch_add(1, Ordering::Relaxed);
                 false
             }
         }
@@ -773,8 +783,12 @@ mod tests {
         m.set_source(t, Some(Box::new(Dc(0.5)))).unwrap();
         let graph = m.start(RATE);
         std::mem::forget(graph); // a stream that never drops its callback
+        let r = m.revision();
         assert!(!m.stopped());
         assert_eq!(m.track(t).map(|i| i.has_source), Some(false));
+        m.restore_source(t, Box::new(Dc(0.5))).unwrap();
+        assert_eq!(m.track(t).map(|i| i.has_source), Some(true));
+        assert_eq!(m.revision(), r, "losing and restoring devices is not an edit");
     }
 
     #[test]

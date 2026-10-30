@@ -80,6 +80,12 @@ pub trait Section<C>: Send + Sync + 'static {
     fn revision(&self, ctx: &C) -> u64;
 }
 
+/// Takes a lock even if a section panicked while it was held: the project's
+/// own state stays usable (the section's own state is the section's).
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// The second half of [`Section::read`]: applies what was read.
 pub type Apply<C> = Box<dyn FnOnce(&C) -> Result<(), String> + Send>;
 
@@ -87,6 +93,8 @@ pub type Apply<C> = Box<dyn FnOnce(&C) -> Result<(), String> + Send>;
 pub struct Project<C: 'static> {
     path: Mutex<Option<PathBuf>>,
     sections: Mutex<Vec<Arc<dyn Section<C>>>>,
+    /// How many of `sections`, at the front, are the core ones (`transport`, `tracks`).
+    core: Mutex<usize>,
     /// Sections from the file that no module here reads, written back as they were.
     kept: Mutex<Map<String, Value>>,
     /// Every section's revision at the last save or open; `None` while the
@@ -110,6 +118,7 @@ impl<C: 'static> Project<C> {
         Self {
             path: Mutex::default(),
             sections: Mutex::default(),
+            core: Mutex::new(0),
             kept: Mutex::default(),
             saved: Mutex::new(None),
             busy: Mutex::default(),
@@ -118,19 +127,30 @@ impl<C: 'static> Project<C> {
     }
 
     /// Adds a module's section. Call it once, from the module's setup.
+    /// Sections read and apply in the order they registered, after the core ones.
     pub fn register(&self, section: impl Section<C>) {
-        let mut list = self.sections.lock().unwrap();
+        let mut list = lock(&self.sections);
         assert!(list.iter().all(|s| s.key() != section.key()), "two project sections are called {}", section.key());
         list.push(Arc::new(section));
     }
 
+    /// Adds a core section (`transport`, `tracks`): it goes before every
+    /// module's, whenever it registers, so modules find their tracks applied.
+    pub fn register_core(&self, section: impl Section<C>) {
+        let mut list = lock(&self.sections);
+        assert!(list.iter().all(|s| s.key() != section.key()), "two project sections are called {}", section.key());
+        let mut core = lock(&self.core);
+        list.insert(*core, Arc::new(section));
+        *core += 1;
+    }
+
     fn sections(&self) -> Vec<Arc<dyn Section<C>>> {
-        self.sections.lock().unwrap().clone()
+        lock(&self.sections).clone()
     }
 
     /// The project's file, or `None` before it is first saved.
     pub fn path(&self) -> Option<PathBuf> {
-        self.path.lock().unwrap().clone()
+        lock(&self.path).clone()
     }
 
     /// The project's name: its file's name, or "Untitled".
@@ -145,18 +165,18 @@ impl<C: 'static> Project<C> {
     /// Whether anything changed since the project was last saved or opened.
     pub fn is_dirty(&self, ctx: &C) -> bool {
         let now = self.revisions(ctx);
-        self.saved.lock().unwrap().as_ref() != Some(&now)
+        lock(&self.saved).as_ref() != Some(&now)
     }
 
     /// Counts what is there now as saved: at launch, once every module has registered.
     pub fn mark_saved(&self, ctx: &C) {
         let now = self.revisions(ctx);
-        *self.saved.lock().unwrap() = Some(now);
+        *lock(&self.saved) = Some(now);
     }
 
     /// The whole project as file text, for `file`. The caller holds `busy`.
     fn serialize(&self, ctx: &C, file: &Path) -> Result<String, String> {
-        let mut obj = self.kept.lock().unwrap().clone();
+        let mut obj = lock(&self.kept).clone();
         obj.insert("format".into(), FORMAT.into());
         obj.insert("version".into(), VERSION.into());
         for key in HOOKS {
@@ -173,7 +193,6 @@ impl<C: 'static> Project<C> {
     /// itself, or the original project for a recovered autosave), and
     /// `dirty` marks the work unsaved.
     pub fn open_text(&self, ctx: &C, text: &str, file: &Path, belongs_to: Option<PathBuf>, dirty: bool) -> Result<(), String> {
-        let _busy = self.busy.lock().unwrap();
         let mut obj = parse(text)?;
         let sections = self.sections();
         let mut steps = Vec::with_capacity(sections.len());
@@ -181,7 +200,10 @@ impl<C: 'static> Project<C> {
             // A hook written as null is a section with nothing in it yet.
             steps.push(s.read(ctx, obj.get(s.key()).filter(|v| !v.is_null()), file)?);
         }
-        // From here the project changes: apply every section, even past a failure.
+        // From here the project changes: apply every section, even past a
+        // failure. Only this part holds `busy`, so a save or autosave waits
+        // for the applying, never for the decoding above.
+        let _busy = lock(&self.busy);
         let mut failed = None;
         for step in steps {
             if let Err(e) = step(ctx) {
@@ -192,15 +214,15 @@ impl<C: 'static> Project<C> {
             obj.remove(s.key());
         }
         obj.retain(|_, v| !v.is_null());
-        *self.kept.lock().unwrap() = obj;
+        *lock(&self.kept) = obj;
         if let Some(e) = failed {
-            *self.path.lock().unwrap() = None;
-            *self.saved.lock().unwrap() = None;
+            *lock(&self.path) = None;
+            *lock(&self.saved) = None;
             return Err(format!("the project opened only in part ({e}). It is untitled now, so saving it won't write over the original"));
         }
-        *self.path.lock().unwrap() = belongs_to;
+        *lock(&self.path) = belongs_to;
         if dirty {
-            *self.saved.lock().unwrap() = None;
+            *lock(&self.saved) = None;
         } else {
             self.mark_saved(ctx);
         }
@@ -215,23 +237,31 @@ impl<C: 'static> Project<C> {
 
     /// Empties every module for a new, untitled project.
     pub fn new_project(&self, ctx: &C) -> Result<(), String> {
-        let _busy = self.busy.lock().unwrap();
+        let _busy = lock(&self.busy);
         let mut failed = None;
         for s in self.sections() {
             if let Err(e) = s.clear(ctx) {
                 failed.get_or_insert(e);
             }
         }
-        self.kept.lock().unwrap().clear();
-        *self.path.lock().unwrap() = None;
-        self.mark_saved(ctx);
-        failed.map_or(Ok(()), Err)
+        lock(&self.kept).clear();
+        *lock(&self.path) = None;
+        match failed {
+            None => {
+                self.mark_saved(ctx);
+                Ok(())
+            }
+            Some(e) => {
+                *lock(&self.saved) = None;
+                Err(format!("the new project isn't empty everywhere ({e})"))
+            }
+        }
     }
 
     /// Saves to `to` (given the `.tunek` extension), or to the project's own
     /// file when `to` is `None`. Returns where it saved.
     pub fn save(&self, ctx: &C, to: Option<PathBuf>) -> Result<PathBuf, String> {
-        let _busy = self.busy.lock().unwrap();
+        let _busy = lock(&self.busy);
         let mut file = to.or_else(|| self.path()).ok_or("choose where to save the project")?;
         if file.extension().and_then(|e| e.to_str()) != Some(PROJECT_EXT) {
             file.set_extension(PROJECT_EXT);
@@ -240,7 +270,7 @@ impl<C: 'static> Project<C> {
         let tmp = file.with_extension(format!("{PROJECT_EXT}.part"));
         std::fs::write(&tmp, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
         std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
-        *self.path.lock().unwrap() = Some(file.clone());
+        *lock(&self.path) = Some(file.clone());
         self.mark_saved(ctx);
         Ok(file)
     }
@@ -252,7 +282,7 @@ impl<C: 'static> Project<C> {
         if self.recovery_pending.load(Ordering::Acquire) {
             return None;
         }
-        let _busy = self.busy.lock().unwrap();
+        let _busy = lock(&self.busy);
         let now = self.revisions(ctx);
         if !self.is_dirty(ctx) || written == Some(&now) {
             return None;
@@ -512,7 +542,9 @@ fn spawn_autosave(app: AppHandle) {
             std::thread::sleep(AUTOSAVE_EVERY);
             let Some(dir) = autosave_dir(&app) else { continue };
             let file = dir.join("recovery.tunek");
-            let Some((text, now)) = project(&app).autosave_text(&app, &file, written.as_ref()) else { continue };
+            // A section that panics costs this autosave, not the thread.
+            let text = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| project(&app).autosave_text(&app, &file, written.as_ref())));
+            let Ok(Some((text, now))) = text else { continue };
             let meta = Recovery {
                 project_name: name(&app),
                 project_path: path(&app).map(|p| p.display().to_string()),
@@ -573,17 +605,24 @@ pub fn autosave_discard(app: AppHandle) {
     clear_autosave(&app);
 }
 
+/// The question about the last session's work couldn't be asked: keep its
+/// files, but let autosave carry on for this session.
+#[tauri::command]
+pub fn autosave_resume(app: AppHandle) {
+    project(&app).recovery_pending.store(false, Ordering::Release);
+}
+
 /// This file's commands. The Sampler answers new, open, save and recover,
 /// since the UI wants its view back from them.
 pub fn commands() -> crate::Commands {
-    crate::commands![autosave_check, autosave_discard]
+    crate::commands![autosave_check, autosave_discard, autosave_resume]
 }
 
 /// Registers the core sections, first, and starts autosave.
 pub fn setup(app: &AppHandle) {
     let p = project(app);
-    p.register(TransportSection(crate::audio(app).lock().unwrap().engine.transport()));
-    p.register(TracksSection::new(crate::audio(app)));
+    p.register_core(TransportSection(crate::audio(app).lock().unwrap().engine.transport()));
+    p.register_core(TracksSection::new(crate::audio(app)));
     spawn_autosave(app.clone());
 }
 
@@ -652,12 +691,89 @@ mod tests {
         let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
         let transport = audio.lock().unwrap().engine.transport();
         let p = Project::new();
-        p.register(TransportSection(transport.clone()));
-        p.register(TracksSection::new(audio));
+        // A module that registers before the core still reads after it.
         let (fake, state, rev) = Fake::new("sampler");
         p.register(fake);
+        p.register(SeesTracks { audio, saw: Arc::default() });
+        p.register_core(TransportSection(transport.clone()));
+        p.register_core(TracksSection::new(audio));
         p.mark_saved(&());
         (p, transport, state, rev)
+    }
+
+    /// A module's section that checks, as it applies, that the file's tracks already are.
+    struct SeesTracks {
+        audio: &'static Mutex<Audio>,
+        saw: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl Section<()> for SeesTracks {
+        fn key(&self) -> &'static str {
+            "plugins"
+        }
+        fn save(&self, _: &(), _: &Path) -> Result<Value, String> {
+            Ok(Value::Null)
+        }
+        fn read(&self, _: &(), _: Option<&Value>, _: &Path) -> Result<Apply<()>, String> {
+            let (audio, saw) = (self.audio, self.saw.clone());
+            Ok(Box::new(move |_| {
+                *saw.lock().unwrap() = audio.lock().unwrap().engine.tracks().iter().map(|t| t.id.0).collect();
+                Ok(())
+            }))
+        }
+        fn clear(&self, _: &()) -> Result<(), String> {
+            Ok(())
+        }
+        fn revision(&self, _: &()) -> u64 {
+            0
+        }
+    }
+
+    #[test]
+    fn a_module_section_applies_after_the_tracks_it_refers_to() {
+        let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
+        let p: Project<()> = Project::new();
+        let saw = Arc::new(Mutex::new(Vec::new()));
+        p.register(SeesTracks { audio, saw: saw.clone() }); // "plugins" sorts before "project"
+        p.register_core(TransportSection(audio.lock().unwrap().engine.transport()));
+        p.register_core(TracksSection::new(audio));
+        let text = r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler"},{"id":7,"name":"Keys"}]}"#;
+        p.open_text(&(), text, Path::new("/a.tunek"), None, false).unwrap();
+        assert_eq!(*saw.lock().unwrap(), vec![1, 7], "track 7 was there when the plugins section applied");
+    }
+
+    #[test]
+    fn a_failed_clear_leaves_the_new_project_unsaved() {
+        let (p, _, _, _) = rig();
+        struct Stuck;
+        impl Section<()> for Stuck {
+            fn key(&self) -> &'static str { "timeline" }
+            fn save(&self, _: &(), _: &Path) -> Result<Value, String> { Ok(Value::Null) }
+            fn read(&self, _: &(), _: Option<&Value>, _: &Path) -> Result<Apply<()>, String> { Ok(Box::new(|_| Ok(()))) }
+            fn clear(&self, _: &()) -> Result<(), String> { Err("a clip is still loading".into()) }
+            fn revision(&self, _: &()) -> u64 { 0 }
+        }
+        p.register(Stuck);
+        assert!(p.new_project(&()).unwrap_err().contains("a clip is still loading"));
+        assert!(p.is_dirty(&()) && p.path().is_none());
+    }
+
+    #[test]
+    fn a_panicking_section_does_not_lock_the_project_up() {
+        let (p, _, _, _) = rig();
+        struct Boom;
+        impl Section<()> for Boom {
+            fn key(&self) -> &'static str { "midi" }
+            fn save(&self, _: &(), _: &Path) -> Result<Value, String> { panic!("boom") }
+            fn read(&self, _: &(), _: Option<&Value>, _: &Path) -> Result<Apply<()>, String> { Ok(Box::new(|_| Ok(()))) }
+            fn clear(&self, _: &()) -> Result<(), String> { Ok(()) }
+            fn revision(&self, _: &()) -> u64 { 0 }
+        }
+        p.register(Boom);
+        let dir = tempfile::tempdir().unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.save(&(), Some(dir.path().join("a")))));
+        assert!(r.is_err(), "the section panicked while `busy` was held");
+        assert!(p.open_text(&(), r#"{"format":"tunekore-project","version":2}"#, Path::new("/b.tunek"), None, false).is_ok(), "and the project still opens");
     }
 
     const V2: &str = r#"{

@@ -4,6 +4,7 @@
 // recovery prompts, the window title and the project shortcuts keep working;
 // `active` says whether it is the view on screen.
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, open, save } from "@tauri-apps/plugin-dialog";
@@ -69,6 +70,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   viewRef.current = view;
   const activeRef = useRef(active);
   activeRef.current = active;
+  const lastTick = useRef<Tick | null>(null);
   const libraryRoot = useRef<string | null>(null);
 
   const say = useCallback((text: string, error = false) => setMessage({ text, error }), [setMessage]);
@@ -80,7 +82,15 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
     api.state().then(take).catch(fail);
     const offs = [
       subscribe(api.onState(take)),
-      subscribe(api.onTick(setTick)),
+      // Hidden behind the Timeline it keeps only whether the transport plays;
+      // the full tick comes back when it shows again.
+      subscribe(
+        api.onTick((t) => {
+          lastTick.current = t;
+          if (activeRef.current) setTick(t);
+          else setTick((prev) => (prev.playing === t.playing ? prev : { ...prev, playing: t.playing }));
+        }),
+      ),
       // Hidden behind the Timeline, the meter needn't redraw 30 times a second.
       subscribe(onMeter((peak) => activeRef.current && setLevel((prev) => Math.max(peak, prev * 0.8)))),
       subscribe(onLimiter(() => setLimiting(true))),
@@ -100,6 +110,10 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
           kind: "info",
           okLabel: "Recover",
           cancelLabel: "Discard",
+        }).catch((e) => {
+          // No answer: keep the files, but let autosave run for this session.
+          void invoke("autosave_resume").catch(() => {});
+          throw e;
         });
         if (recover) {
           const v = await api.autosaveRecover();
@@ -268,6 +282,8 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
       }
       if (typing(e.target) || e.altKey) return;
       if (e.key === " ") {
+        // A focused button takes its Space (the view switch, a pad, a menu item).
+        if ((e.target as HTMLElement | null)?.closest?.("button, [role=button]")) return;
         e.preventDefault();
         if (!e.repeat) togglePlay();
         return;
@@ -292,6 +308,11 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
       window.removeEventListener("keyup", onUp);
     };
   }, [togglePlay, press, unpress, doSave, doOpen, doNew, take, fail, active]);
+
+  // Coming back: the step and pad flashes as they are now.
+  useEffect(() => {
+    if (active && lastTick.current) setTick(lastTick.current);
+  }, [active]);
 
   // Switching away lets go of pads held down on the keyboard.
   useEffect(() => {

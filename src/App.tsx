@@ -5,9 +5,10 @@
 //
 // Switching: ⌘1 is the Sampler and ⌘2 the Timeline (Ctrl elsewhere), from the
 // keyboard, the View menu or the switch buttons; ⌘3 is kept for the Clip
-// Grid. Tab also flips between them, but only while nothing has focus: on
-// any control it moves focus as usual.
-import { useCallback, useEffect, useState } from "react";
+// Grid. Tab also flips between them, but only while nothing has focus; the
+// flip then focuses the shown view's switch, so the next Tab moves into the
+// view's controls. On any control Tab moves focus as usual.
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import SamplerView from "./sampler/SamplerView";
 import Timeline from "./timeline/Timeline";
@@ -32,10 +33,15 @@ const mod = isMac ? "⌘" : "Ctrl+";
 export default function App() {
   const [view, setView] = useState<MainView>("sampler");
   const [message, setMessage] = useState<Message | null>(null);
-  // Bumped by ⌘1, ⌘2 and the View menu: focus moves to the shown view's switch.
+  // Bumped by a switch from the keyboard or the menu: focus moves to the shown view's switch.
   const [focusSwitch, setFocusSwitch] = useState(0);
 
+  const viewRef = useRef(view);
+  viewRef.current = view;
+
+  // ⌘1, ⌘2 and the menu: the view already showing stays as it is, focus included.
   const show = useCallback((v: MainView, byKey: boolean) => {
+    if (v === viewRef.current) return;
     setView(v);
     if (byKey) setFocusSwitch((n) => n + 1);
   }, []);
@@ -54,9 +60,9 @@ export default function App() {
       if (e.key !== FLIP_KEY || e.shiftKey || e.altKey || e.repeat) return;
       const at = document.activeElement;
       if (at && at !== document.body && at !== document.documentElement) return;
-      // Nothing had focus, so nothing is left in the hidden view: focus stays free, and Tab can flip back.
       e.preventDefault();
       setView((v) => (v === "sampler" ? "timeline" : "sampler"));
+      setFocusSwitch((n) => n + 1);
     };
     window.addEventListener("keydown", onKey);
     // The View menu's Sampler and Timeline items.
@@ -79,7 +85,8 @@ export default function App() {
     };
   }, [show]);
 
-  // After ⌘1, ⌘2 or the menu, focus the shown view's switch, so focus isn't left in the hidden view.
+  // After a switch from the keyboard or the menu, focus the shown view's switch,
+  // so focus isn't left in the hidden view and Tab carries on from there.
   useEffect(() => {
     if (focusSwitch === 0) return;
     document.querySelector<HTMLElement>(".app:not([hidden]) .view-switch button[aria-pressed=true]")?.focus({ preventScroll: true });

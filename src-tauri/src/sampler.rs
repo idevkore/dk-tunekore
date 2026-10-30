@@ -1287,10 +1287,14 @@ impl project::Section<AppHandle> for SamplerSection {
 
 // The project commands answer with the Sampler's view, which the main window shows.
 
+/// Off the UI thread: emptying the pads waits for an open or save in progress.
 #[tauri::command]
-pub fn project_new(app: AppHandle) -> Result<View, String> {
-    project::new_project(&app)?;
-    Ok(publish_now(&app))
+pub async fn project_new(app: AppHandle) -> Result<View, String> {
+    let a = app.clone();
+    let cleared = spawn_blocking(move || project::new_project(&a)).await.map_err(|e| e.to_string())?;
+    // Whatever cleared is what the windows show, even if a part didn't.
+    let view = publish_now(&app);
+    cleared.map(|()| view)
 }
 
 #[tauri::command]
@@ -1311,8 +1315,9 @@ pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> 
 
 /// Saves to `path` (as `.tunek`), or to the project's own file when `path` is `None`.
 #[tauri::command]
-pub fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String> {
-    project::save(&app, path.map(PathBuf::from))?;
+pub async fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String> {
+    let a = app.clone();
+    spawn_blocking(move || project::save(&a, path.map(PathBuf::from))).await.map_err(|e| e.to_string())??;
     Ok(publish_now(&app))
 }
 
@@ -1497,7 +1502,7 @@ pub async fn project_collect(app: AppHandle) -> Result<View, String> {
             }
         }
     }
-    project_save(None, app)
+    project_save(None, app).await
 }
 
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.

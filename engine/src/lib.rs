@@ -203,7 +203,7 @@ impl Engine {
         if self.mixer.track(SAMPLER_TRACK).is_none() {
             let _ = self.mixer.add_track_as(SAMPLER_TRACK, "Sampler");
         }
-        let _ = self.mixer.set_source(SAMPLER_TRACK, Some(Box::new(device)));
+        let _ = self.mixer.restore_source(SAMPLER_TRACK, Box::new(device));
     }
 
     pub fn list_outputs(&self) -> Result<Vec<OutputDevice>, String> {
