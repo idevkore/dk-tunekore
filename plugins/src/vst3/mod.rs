@@ -2,6 +2,8 @@
 
 #[allow(unsafe_code, dead_code)]
 mod ffi;
+#[allow(unsafe_code, dead_code)]
+pub(crate) mod shim;
 
 /// Why a VST3 operation failed.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
