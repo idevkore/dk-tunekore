@@ -57,6 +57,11 @@ export function installMocks() {
           return null;
         case "analyzer_to_pads":
           return { pads: (args as { how: string }).how === "whole" ? [0] : [0, 1, 2, 3, 4, 5, 6, 7], folder: "/Users/test/Music/tuneKore/Samples/Quantum Love" };
+        case "analyzer_to_timeline": {
+          const names = (args as { stems: string[] }).stems;
+          const all = names.length ? names : ["vocals", "drums", "bass", "other"];
+          return { tracks: all.map((n) => n[0].toUpperCase() + n.slice(1)), folder: "/Users/test/Music/tuneKore/Samples/Quantum Love" };
+        }
         case "analyzer_tempo_key":
           // Slow enough to see the "finding" state.
           return new Promise((resolve) =>

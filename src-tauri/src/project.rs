@@ -41,7 +41,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
-use tunekore_engine::{track::TRACK_SLOTS, TrackId, TrackMix, TransportShared, SAMPLER_TRACK};
+use tunekore_engine::{track::TRACK_SLOTS, TrackId, TrackKind, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::Audio;
 
@@ -146,6 +146,17 @@ impl<C: 'static> Project<C> {
 
     fn sections(&self) -> Vec<Arc<dyn Section<C>>> {
         lock(&self.sections).clone()
+    }
+
+    /// Runs `f` while no open, new, save or autosave runs, and keeps them
+    /// waiting until it returns: for a module's background work on its own
+    /// document that mustn't land in the middle of one (the Timeline's players
+    /// fed again after the output's rate changes). Lock order: this (`busy`),
+    /// then the module's document, then the engine. `f` must not open, save or
+    /// start a project, nor call `exclusive` again: `busy` is held already.
+    pub fn exclusive<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _busy = lock(&self.busy);
+        f()
     }
 
     /// The project's file, or `None` before it is first saved.
@@ -326,7 +337,7 @@ fn from_v1(mut obj: Map<String, Value>) -> Map<String, Value> {
     let tempo = obj.remove("tempo").unwrap_or(json!(120.0));
     let mut v2 = Map::new();
     v2.insert("transport".into(), json!({ "tempo": tempo, "timeSignature": [4, 4] }));
-    v2.insert("tracks".into(), json!([TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default() }]));
+    v2.insert("tracks".into(), json!([TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }]));
     v2.insert("sampler".into(), Value::Object(obj));
     v2
 }
@@ -417,6 +428,26 @@ struct TrackFile {
     name: String,
     #[serde(default)]
     mix: TrackMix,
+    /// Left out when it is the default: the Sampler's for track 1, audio for
+    /// the rest (as every version 2 file before kinds were saved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TrackKind>,
+}
+
+impl TrackFile {
+    /// The kind it names, or its default. Only track 1 is the Sampler's.
+    fn kind(&self) -> TrackKind {
+        match (self.id == SAMPLER_TRACK, self.kind) {
+            (true, _) => TrackKind::Sampler,
+            (false, Some(TrackKind::Sampler) | None) => TrackKind::Audio,
+            (false, Some(k)) => k,
+        }
+    }
+}
+
+/// What a track's kind is when the file doesn't say.
+fn default_kind(id: TrackId) -> TrackKind {
+    if id == SAMPLER_TRACK { TrackKind::Sampler } else { TrackKind::Audio }
 }
 
 /// Sets the engine's track list to `tracks`: the Sampler's track always
@@ -430,6 +461,7 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String
     if tracks.iter().all(|f| f.id != SAMPLER_TRACK) {
         mixer.set_mix(SAMPLER_TRACK, TrackMix::default())?;
         mixer.rename(SAMPLER_TRACK, "Sampler")?;
+        mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler)?;
     }
     for f in tracks {
         if mixer.track(f.id).is_none() {
@@ -437,6 +469,7 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String
         }
         mixer.rename(f.id, &f.name)?;
         mixer.set_mix(f.id, f.mix)?;
+        mixer.set_kind(f.id, f.kind())?;
     }
     Ok(())
 }
@@ -447,8 +480,15 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
-        let tracks: Vec<TrackFile> =
-            self.audio.lock().unwrap().engine.tracks().into_iter().map(|t| TrackFile { id: t.id, name: t.name, mix: t.mix }).collect();
+        let tracks: Vec<TrackFile> = self
+            .audio
+            .lock()
+            .unwrap()
+            .engine
+            .tracks()
+            .into_iter()
+            .map(|t| TrackFile { kind: (t.kind != default_kind(t.id)).then_some(t.kind), id: t.id, name: t.name, mix: t.mix })
+            .collect();
         serde_json::to_value(tracks).map_err(|e| e.to_string())
     }
 
@@ -475,11 +515,58 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn clear(&self, _: &C) -> Result<(), String> {
-        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default() }])
+        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }])
     }
 
     fn revision(&self, _: &C) -> u64 {
         self.revision.load(Ordering::Relaxed)
+    }
+}
+
+/// `trackIds`: the id the project's next new track gets, `{"next": n}`, so a
+/// deleted track's id never comes back for another (a MIDI mapping or a plugin
+/// reference to it stays dangling rather than landing on the new track). Its
+/// own section so the `tracks` list keeps the shape older builds read; they
+/// keep this one as a section they don't know. Opening a file without it, and
+/// New, start past the highest track there is.
+pub struct TrackIdsSection(pub &'static Mutex<Audio>);
+
+#[derive(Serialize, Deserialize, Default)]
+struct TrackIdsFile {
+    next: u32,
+}
+
+impl<C: 'static> Section<C> for TrackIdsSection {
+    fn key(&self) -> &'static str {
+        "trackIds"
+    }
+
+    fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
+        let next = self.0.lock().unwrap().engine.mixer().next_track_id().0;
+        serde_json::to_value(TrackIdsFile { next }).map_err(|e| e.to_string())
+    }
+
+    fn read(&self, _: &C, value: Option<&Value>, _: &Path) -> Result<Apply<C>, String> {
+        let file: TrackIdsFile = match value {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's track ids are damaged ({e})"))?,
+            None => TrackIdsFile::default(),
+        };
+        let audio = self.0;
+        // Applies after `tracks`: it is registered after it.
+        Ok(Box::new(move |_| {
+            audio.lock().unwrap().engine.mixer().set_next_track_id(TrackId(file.next));
+            Ok(())
+        }))
+    }
+
+    fn clear(&self, _: &C) -> Result<(), String> {
+        self.0.lock().unwrap().engine.mixer().set_next_track_id(TrackId(0));
+        Ok(())
+    }
+
+    /// Changes only when tracks are added or removed, which the `tracks` section counts.
+    fn revision(&self, _: &C) -> u64 {
+        0
     }
 }
 
@@ -492,6 +579,12 @@ fn project(app: &AppHandle) -> tauri::State<'_, Project<AppHandle>> {
 /// Adds a module's section. Call it once, from the module's setup.
 pub fn register(app: &AppHandle, section: impl Section<AppHandle>) {
     project(app).register(section);
+}
+
+/// [`Project::exclusive`] on the app's project: `f` runs while no open, new,
+/// save or autosave does. Lock order: busy, then a module's document, then the engine.
+pub fn exclusive<R>(app: &AppHandle, f: impl FnOnce() -> R) -> R {
+    project(app).exclusive(f)
 }
 
 pub fn path(app: &AppHandle) -> Option<PathBuf> {
@@ -641,6 +734,7 @@ pub fn setup(app: &AppHandle) {
     let p = project(app);
     p.register_core(TransportSection(crate::audio(app).lock().unwrap().engine.transport()));
     p.register_core(TracksSection::new(crate::audio(app)));
+    p.register_core(TrackIdsSection(crate::audio(app)));
     spawn_autosave(app.clone());
 }
 
@@ -868,6 +962,90 @@ mod tests {
         assert!(p.open_text(&(), &twice, Path::new("/a.tunek"), None, false).unwrap_err().contains("two tracks numbered 3"));
         assert_eq!(transport.tempo(), 120.0, "no section applied");
         assert_eq!(*state.lock().unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn track_kinds_save_when_they_differ_from_the_default() {
+        let (p, _, _, _) = rig();
+        let text = r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler","kind":"audio"},{"id":4,"name":"Drums"},{"id":7,"name":"Keys","kind":"instrument"},{"id":9,"name":"Odd","kind":"sampler"}]}"#;
+        p.open_text(&(), text, Path::new("/a.tunek"), None, false).unwrap();
+        let saved = json(&p.serialize(&(), Path::new("/a.tunek")).unwrap());
+        let kinds: Vec<Value> = saved["tracks"].as_array().unwrap().iter().map(|t| t.get("kind").cloned().unwrap_or(Value::Null)).collect();
+        // Track 1 is always the Sampler's, and only it: those and audio, the defaults, aren't written.
+        assert_eq!(kinds, vec![Value::Null, Value::Null, json!("instrument"), Value::Null]);
+    }
+
+    /// A project with its own engine and the track sections, as a launch of the app has.
+    fn launch() -> (Project<()>, &'static Mutex<Audio>) {
+        let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
+        let p: Project<()> = Project::new();
+        p.register_core(TransportSection(audio.lock().unwrap().engine.transport()));
+        p.register_core(TracksSection::new(audio));
+        p.register_core(TrackIdsSection(audio));
+        (p, audio)
+    }
+
+    fn tracks_text(ids: &[u32]) -> String {
+        let list: Vec<Value> = ids.iter().map(|&i| json!({ "id": i, "name": format!("t{i}") })).collect();
+        json!({ "format": FORMAT, "version": 2, "tracks": list }).to_string()
+    }
+
+    #[test]
+    fn a_deleted_tracks_id_isnt_given_to_a_new_track_after_reopening() {
+        let (p, audio) = launch();
+        p.open_text(&(), &tracks_text(&[1, 2, 3]), Path::new("/a.tunek"), None, false).unwrap();
+        audio.lock().unwrap().engine.mixer().remove_track(TrackId(3)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = p.save(&(), Some(dir.path().join("a"))).unwrap();
+        let saved = json(&std::fs::read_to_string(&file).unwrap());
+        assert!(saved["tracks"].is_array(), "the list older builds read");
+        assert_eq!(saved["trackIds"], json!({ "next": 4 }));
+        // Relaunch, reopen, add a track.
+        let (p, audio) = launch();
+        p.open(&(), &file, Some(file.clone()), false).unwrap();
+        assert_eq!(audio.lock().unwrap().engine.mixer().add_track("New").unwrap(), TrackId(4), "not 3, the deleted track's");
+    }
+
+    #[test]
+    fn the_next_id_is_the_projects_not_the_sessions() {
+        let (p, audio) = launch();
+        p.open_text(&(), &tracks_text(&[1, 2, 3, 4]), Path::new("/a.tunek"), None, false).unwrap();
+        // Another project with two tracks, in the same session: its own next id.
+        p.open_text(&(), &tracks_text(&[1, 2]), Path::new("/b.tunek"), None, false).unwrap();
+        let saved = json(&p.serialize(&(), Path::new("/b.tunek")).unwrap());
+        assert!(saved["tracks"].is_array());
+        assert_eq!(saved["trackIds"], json!({ "next": 3 }));
+        p.new_project(&()).unwrap();
+        assert_eq!(audio.lock().unwrap().engine.mixer().next_track_id(), TrackId(2), "a new project starts after the Sampler");
+    }
+
+    #[test]
+    fn a_build_without_track_ids_keeps_the_section_as_it_found_it() {
+        // rig() has no trackIds section, as 0.1.12 and 0.1.13 don't.
+        let (p, _, _, _) = rig();
+        let text = json!({ "format": FORMAT, "version": 2, "tracks": [{ "id": 1, "name": "Sampler" }, { "id": 2, "name": "Bass" }], "trackIds": { "next": 9 } }).to_string();
+        p.open_text(&(), &text, Path::new("/a.tunek"), None, false).unwrap();
+        assert_eq!(json(&p.serialize(&(), Path::new("/a.tunek")).unwrap())["trackIds"], json!({ "next": 9 }));
+    }
+
+    #[test]
+    fn exclusive_work_holds_off_a_save() {
+        let (p, _, _, _) = rig();
+        let p = Arc::new(p);
+        let dir = tempfile::tempdir().unwrap();
+        let saved = Arc::new(AtomicBool::new(false));
+        let t = p.exclusive(|| {
+            let (p2, file, saved2) = (p.clone(), dir.path().join("a"), saved.clone());
+            let t = std::thread::spawn(move || {
+                p2.save(&(), Some(file)).unwrap();
+                saved2.store(true, Ordering::Release);
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!saved.load(Ordering::Acquire), "the save waits for the exclusive work");
+            t
+        });
+        t.join().unwrap();
+        assert!(saved.load(Ordering::Acquire));
     }
 
     #[test]

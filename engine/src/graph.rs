@@ -23,7 +23,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 
 use crate::device::{Buffers, Device, Events};
 use crate::snapshot::Mailbox;
-use crate::track::{TrackId, TrackInfo, TrackMeter, TrackMeters, TrackMix, TRACK_SLOTS};
+use crate::track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMeters, TrackMix, TRACK_SLOTS};
 use crate::transport::{ProcessContext, Transport, TransportShared};
 
 /// The most devices the engine holds at once, over all tracks.
@@ -92,6 +92,7 @@ struct TrackDoc {
     id: TrackId,
     slot: usize,
     name: String,
+    kind: TrackKind,
     mix: TrackMix,
     source: Option<usize>,
     chain: Vec<usize>,
@@ -165,9 +166,23 @@ impl Mixer {
             .find(|s| self.tracks.iter().all(|t| t.slot != *s))
             .ok_or(format!("tuneKore runs at most {TRACK_SLOTS} tracks"))?;
         self.next_id = self.next_id.max(id.0.saturating_add(1));
-        self.tracks.push(TrackDoc { id, slot, name: name.to_string(), mix: TrackMix::default(), source: None, chain: Vec::new() });
+        self.tracks.push(TrackDoc { id, slot, name: name.to_string(), kind: TrackKind::default(), mix: TrackMix::default(), source: None, chain: Vec::new() });
         self.changed();
         Ok(())
+    }
+
+    /// The id the next new track gets. Projects save it, so a deleted
+    /// track's id never comes back for another track after a relaunch.
+    pub fn next_track_id(&self) -> TrackId {
+        TrackId(self.next_id)
+    }
+
+    /// New tracks get ids from `next` on (as a project saved it), or from
+    /// past the highest track there is when that is higher. Opening and new
+    /// projects set it, so it belongs to the project, not the app's session.
+    pub fn set_next_track_id(&mut self, next: TrackId) {
+        let highest = self.tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        self.next_id = next.0.max(highest.saturating_add(1)).max(1);
     }
 
     /// Removes a track and its devices.
@@ -200,6 +215,17 @@ impl Mixer {
         let i = self.index(id)?;
         if self.tracks[i].name != name {
             self.tracks[i].name = name.to_string();
+            self.revision.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
+    }
+
+    /// Says what a track is (an audio track until set). Not heard: it tells
+    /// modules whose a track is, and the project saves it.
+    pub fn set_kind(&mut self, id: TrackId, kind: TrackKind) -> Result<(), String> {
+        let i = self.index(id)?;
+        if self.tracks[i].kind != kind {
+            self.tracks[i].kind = kind;
             self.revision.fetch_add(1, Ordering::Relaxed);
         }
         Ok(())
@@ -393,7 +419,7 @@ impl Mixer {
 }
 
 fn info(t: &TrackDoc) -> TrackInfo {
-    TrackInfo { id: t.id, name: t.name.clone(), mix: t.mix, has_source: t.source.is_some(), chain: t.chain.len() }
+    TrackInfo { id: t.id, name: t.name.clone(), kind: t.kind, mix: t.mix, has_source: t.source.is_some(), chain: t.chain.len() }
 }
 
 /// Per-track state the audio thread keeps between blocks.
@@ -806,6 +832,17 @@ mod tests {
         let r = m.revision();
         m.rename(next, "Renamed").unwrap();
         assert!(m.revision() > r);
+        assert_eq!(m.track(next).map(|t| t.kind), Some(TrackKind::Audio), "audio until said otherwise");
+        let r = m.revision();
+        m.set_kind(next, TrackKind::Instrument).unwrap();
+        assert_eq!(m.track(next).map(|t| t.kind), Some(TrackKind::Instrument));
+        assert!(m.revision() > r, "saved, so an edit");
+        assert!(m.set_kind(TrackId(99), TrackKind::Audio).is_err());
+        m.set_next_track_id(TrackId(20));
+        assert_eq!(m.next_track_id(), TrackId(20));
+        assert_eq!(m.add_track("After").unwrap(), TrackId(20));
+        m.set_next_track_id(TrackId(0));
+        assert_eq!(m.next_track_id(), TrackId(21), "never at or below a track there is");
     }
 
     #[test]

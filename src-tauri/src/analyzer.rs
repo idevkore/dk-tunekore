@@ -408,13 +408,7 @@ pub async fn analyzer_to_pads(
         let inner = state.0.lock().unwrap();
         (inner.song.clone().ok_or("open a song first")?, inner.stems.clone().ok_or("separate the song first")?)
     };
-    let folder = app
-        .path()
-        .audio_dir()
-        .map_err(|e| e.to_string())?
-        .join("tuneKore")
-        .join("Samples")
-        .join(safe_name(&loaded.name));
+    let folder = samples_folder(&app, &loaded.name)?;
     let a = app.clone();
     let result = spawn_blocking(move || -> Result<ToPads, String> {
         let audio = stems.get(&stem).ok_or_else(|| format!("no stem called {stem}"))?;
@@ -465,6 +459,61 @@ pub async fn analyzer_to_pads(
         let _ = app.emit("sampler:chopped", &r.folder);
     }
     result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToTimeline {
+    /// The new tracks' names, in order.
+    tracks: Vec<String>,
+    /// Where the WAV files were written.
+    folder: String,
+}
+
+/// Puts stems on the Timeline in the main window, each on a new track named
+/// after it, lined up at bar 1. `stems` names them as `STEM_NAMES` does;
+/// empty means all four. The audio is written as WAV where the pads' goes,
+/// under Music/tuneKore/Samples, so a saved project can find it again.
+#[tauri::command]
+pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: State<'_, Analyzer>) -> Result<ToTimeline, String> {
+    let (loaded, separated) = {
+        let inner = state.0.lock().unwrap();
+        (inner.song.clone().ok_or("open a song first")?, inner.stems.clone().ok_or("separate the song first")?)
+    };
+    let folder = samples_folder(&app, &loaded.name)?;
+    let names: Vec<String> = if stems.is_empty() { STEM_NAMES.iter().map(|s| s.to_string()).collect() } else { stems };
+    spawn_blocking(move || -> Result<ToTimeline, String> {
+        std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
+        let mut files = Vec::new();
+        for name in &names {
+            let audio = separated.get(name).ok_or_else(|| format!("no stem called {name}"))?;
+            let path = free_name(&folder, &format!("{} - {}", safe_name(&loaded.name), title(name)));
+            export_wav(audio, separated.sample_rate, &path)?;
+            files.push((path, title(name)));
+        }
+        crate::timeline::add_tracks(&app, &files, 0.0)?;
+        Ok(ToTimeline { tracks: files.into_iter().map(|(_, n)| n).collect(), folder: folder.display().to_string() })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `<base>.wav` in `folder`, or `<base> 2.wav`, `<base> 3.wav`... when it is
+/// taken: a stem sent to the Timeline again never writes over the file that
+/// clips and saved projects already play.
+fn free_name(folder: &Path, base: &str) -> PathBuf {
+    let mut path = folder.join(format!("{base}.wav"));
+    let mut n = 2;
+    while path.exists() {
+        path = folder.join(format!("{base} {n}.wav"));
+        n += 1;
+    }
+    path
+}
+
+/// Where a song's stems and slices are written: Music/tuneKore/Samples/<song>.
+fn samples_folder(app: &AppHandle, song: &str) -> Result<PathBuf, String> {
+    Ok(app.path().audio_dir().map_err(|e| e.to_string())?.join("tuneKore").join("Samples").join(safe_name(song)))
 }
 
 /// A file or folder name with the characters macOS and Windows reject replaced.
@@ -525,6 +574,7 @@ pub fn commands() -> crate::Commands {
         analyzer_track,
         analyzer_export,
         analyzer_to_pads,
+        analyzer_to_timeline,
         analyzer_tempo_key,
     ]
 }
@@ -532,4 +582,19 @@ pub fn commands() -> crate::Commands {
 /// Sends the player's position to the Analyzer window.
 pub fn setup(app: &AppHandle) {
     spawn_position(app.clone(), app.state::<Player>().inner().clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stem_sent_again_gets_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = free_name(dir.path(), "Song - Drums");
+        assert_eq!(first, dir.path().join("Song - Drums.wav"));
+        std::fs::write(&first, b"x").unwrap();
+        let second = free_name(dir.path(), "Song - Drums");
+        assert_eq!(second, dir.path().join("Song - Drums 2.wav"), "the first isn't written over");
+    }
 }

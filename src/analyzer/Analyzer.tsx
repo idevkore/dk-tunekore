@@ -283,6 +283,21 @@ export default function Analyzer() {
     }
   }
 
+  /** Puts stems on new Timeline tracks in the main window (all four when `stems` is empty). */
+  async function toTimeline(stems: string[], label: string) {
+    setError("");
+    try {
+      const r = await api.toTimeline(stems);
+      setNote(
+        r.tracks.length === 1
+          ? `Put ${label.toLowerCase()} on a new Timeline track in the main window, at bar 1. The WAV is in ${r.folder}.`
+          : `Put the ${r.tracks.length} stems on new Timeline tracks in the main window, lined up at bar 1. The WAVs are in ${r.folder}.`,
+      );
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   const update = (i: number, change: Partial<Mix>) => setMix((m) => m.map((x, j) => (j === i ? { ...x, ...change } : x)));
   const anySolo = mix.some((m) => m.solo);
   const playhead = pos.duration > 0 ? Math.min(1, pos.position / pos.duration) : 0;
@@ -487,17 +502,22 @@ export default function Analyzer() {
                         <select
                           className="to-pads"
                           value=""
-                          aria-label={`Send ${s.label} to the Sampler's pads`}
-                          title="Put this stem on the Sampler's pads, whole or chopped at its hits from the playhead"
-                          onChange={(e) => void toPads(s.name, s.label, e.target.value)}
+                          aria-label={`Send ${s.label} to the Sampler's pads or the Timeline`}
+                          title="Put this stem on the Sampler's pads, whole or chopped at its hits from the playhead, or on a new Timeline track"
+                          onChange={(e) => void (e.target.value === "timeline" ? toTimeline([s.name], s.label) : toPads(s.name, s.label, e.target.value))}
                         >
                           <option value="" disabled>
-                            To pads
+                            Send to
                           </option>
-                          <option value="whole">Whole stem → next free pad</option>
-                          <option value="chop:8:0">Chop 8 from playhead → pads 1–8</option>
-                          <option value="chop:8:8">Chop 8 from playhead → pads 9–16</option>
-                          <option value="chop:16:0">Chop 16 from playhead → pads 1–16</option>
+                          <optgroup label="Sampler pads">
+                            <option value="whole">Whole stem → next free pad</option>
+                            <option value="chop:8:0">Chop 8 from playhead → pads 1–8</option>
+                            <option value="chop:8:8">Chop 8 from playhead → pads 9–16</option>
+                            <option value="chop:16:0">Chop 16 from playhead → pads 1–16</option>
+                          </optgroup>
+                          <optgroup label="Timeline">
+                            <option value="timeline">Whole stem → a new track at bar 1</option>
+                          </optgroup>
                         </select>
                         <button className="btn small" onClick={() => void exportTo([s.name])} aria-label={`Export ${s.label} as WAV`}>
                           <svg width="13" height="13" viewBox="0 0 16 16" aria-hidden="true">
@@ -530,6 +550,9 @@ export default function Analyzer() {
                 <footer className="foot">
                   <span className="dim">Four WAV files, 24-bit, the same length and rate as the song.</span>
                   <span className="grow" />
+                  <button className="btn" onClick={() => void toTimeline([], "")} title="Put the four stems on new tracks in the main window's Timeline, lined up at bar 1">
+                    All stems → Timeline
+                  </button>
                   <button className="btn" onClick={() => void exportTo([])}>
                     Export all
                   </button>

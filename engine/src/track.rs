@@ -16,6 +16,18 @@ pub const TRACK_SLOTS: usize = 64;
 #[serde(transparent)]
 pub struct TrackId(pub u32);
 
+/// What a track is, so each module knows which tracks are its own: the
+/// Sampler's (track 1), an audio track (the Timeline's clips play on it), or
+/// an instrument track (a plugin instrument, #37). Saved in projects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackKind {
+    Sampler,
+    #[default]
+    Audio,
+    Instrument,
+}
+
 /// A track's level, pan, mute and solo.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -55,6 +67,7 @@ impl TrackMix {
 pub struct TrackInfo {
     pub id: TrackId,
     pub name: String,
+    pub kind: TrackKind,
     pub mix: TrackMix,
     /// Whether something is in the source slot.
     pub has_source: bool,

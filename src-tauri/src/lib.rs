@@ -25,6 +25,7 @@ mod midi;
 mod project;
 mod recorder;
 mod sampler;
+mod timeline;
 
 use tunekore_engine::{Engine, Meter, OutputDevice};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -251,6 +252,7 @@ pub fn run() {
         recorder::commands(),
         sampler::commands(),
         shell_commands(),
+        timeline::commands(),
     ];
 
     tauri::Builder::default()
@@ -287,6 +289,7 @@ pub fn run() {
             midi::setup(app.handle());
             project::setup(app.handle());
             sampler::setup(app.handle());
+            timeline::setup(app.handle());
             // Last: every module has registered its part of the project.
             project::ready(app.handle());
             // Open the default output now, so the pads play on the first click.

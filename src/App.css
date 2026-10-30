@@ -62,10 +62,6 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
   .view-switch .vs-icon { display: none; }
 }
 
-/* The Timeline, a placeholder until #36. */
-.timeline-empty { flex: 1; display: grid; place-content: center; justify-items: center; gap: 8px; padding: 24px 16px; text-align: center; color: var(--soft); }
-.timeline-empty h1 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text); }
-.timeline-empty p { margin: 0; max-width: 46ch; line-height: 1.5; font-size: 12.5px; }
 .app.dragging, .app.dragging * { cursor: grabbing !important; }
 .bar { height: 52px; flex-shrink: 0; background: var(--deep); border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 10px; padding: 0 14px; min-width: 0; }
 .bar-logo { height: 17px; flex-shrink: 0; }
