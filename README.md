@@ -1,3 +1,8 @@
+[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
+
+CI: the last build and test run on `main`. CI runs by hand for now (see
+`.github/workflows/ci.yml`), so the badge shows the latest run started.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/tunekore-logo-color.svg">
   <img alt="tuneKore" src="brand/tunekore-logo-color-on-light.svg" width="420">
