@@ -13,6 +13,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import SamplerView from "./sampler/SamplerView";
 import Timeline from "./timeline/Timeline";
+import ThemePicker from "./theme/ThemePicker";
 import type { Message } from "./StatusBar";
 
 type MainView = "sampler" | "timeline";
@@ -102,7 +103,12 @@ export default function App() {
     return () => clearTimeout(t);
   }, [message]);
 
-  const switcher = <ViewSwitch view={view} onView={(v) => show(v, false)} />;
+  const switcher = (
+    <>
+      <ViewSwitch view={view} onView={(v) => show(v, false)} />
+      <ThemePicker />
+    </>
+  );
   return (
     <>
       <SamplerView active={view === "sampler"} switcher={switcher} message={message} onMessage={setMessage} />

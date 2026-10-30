@@ -5,6 +5,19 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.15: colour themes
+
+idevkore/dk-tunekore#56
+
+- Pick a colour theme from the new button beside the view switch: tuneKore
+  (the default, unchanged), Dracula, Nord, Gruvbox Dark and Tokyo Night, or
+  the light Solarized Light, GitHub Light and Gruvbox Light. It applies at
+  once and is remembered for the next launch.
+- Every colour in the window comes from the theme, the Timeline's lanes,
+  ruler and clips included. On a light theme, clips take a tint of their
+  track's colour, waveforms are shaded darker, and the logo's TUNE is in ink.
+- Text in each theme reads at 4.5:1 or better against its backgrounds.
+
 ## 0.1.14: the Timeline, with tracks and audio clips
 
 idevkore/dk-tunekore#36, PR #47

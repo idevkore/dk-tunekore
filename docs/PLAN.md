@@ -333,6 +333,14 @@ Where the next pieces go:
   (`timeline_peaks`, a `tauri::ipc::Response`), one zoom level of one file at
   a time. A command needs no change to the window's builder, which a custom
   `tunekore://` URL scheme would (#36).
+- **Colours** are CSS tokens, never literals (#56). tuneKore's own theme is
+  the tokens on `:root` in `src/App.css`; the other themes (Dracula, Nord,
+  Gruvbox, Tokyo Night, Solarized Light, GitHub Light) set the core ones in
+  `src/theme/themes.css`, and `src/theme/theme.ts` works out the rest as
+  plain colours (no CSS `color-mix()`, which macOS 12's WebKit may lack).
+  Canvas drawing reads them through `palette()` and redraws on `useTheme()`.
+  A new control uses the existing tokens; a new colour role gets a token in
+  every theme.
 
 ## 3. What we take from Ableton, and in what order
 
