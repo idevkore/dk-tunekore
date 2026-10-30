@@ -65,6 +65,8 @@ pub enum Misbehaviour {
     HangsOnLoad = 2,
     /// `GetPluginFactory` throws a C++ exception.
     ThrowsOnLoad = 3,
+    /// Loads and runs as an instrument until `process` throws.
+    ThrowsInProcess = 4,
 }
 
 /// Compiles the misbehaving plugin and installs it as `<dir>/<name>.vst3`. `None` when there is no

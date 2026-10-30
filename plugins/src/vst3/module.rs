@@ -367,7 +367,7 @@ impl Bundle {
         // (VST3 contract), which the `PlugPtr` takes over.
         let factory = unsafe { PlugPtr::from_raw(raw) }.ok_or_else(|| fail("GetPluginFactory returned null".into()))?;
         // Plugins that want to know their host (Serum 2 on Linux needs this) learn it here.
-        let host = ComWrapper::new(HostContext::new());
+        let host = ComWrapper::new(HostContext::new(0));
         if let Some(f3) = factory.query::<sb::IPluginFactory3>()
             && let Some(unknown) = host.as_com_ref::<sv::IHostApplication>()
         {

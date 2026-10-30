@@ -97,6 +97,12 @@ fn kontakt_7_runs_with_all_its_output_buses() {
     assert_eq!(r.channels.len(), r.layout.output_channels());
     assert!(r.channels.len() > 2);
     assert!(r.channels.iter().all(|ch| ch.len() == 48_000));
+    // The main output and the second extra one only.
+    let some = RenderSpec { outputs: BusSelection::Only(vec![0, 2]), ..notes(0.25) };
+    let r = offline::render(&mut *c, &some).unwrap();
+    let active: Vec<usize> = r.layout.audio_outputs.iter().enumerate().filter(|(_, b)| b.active).map(|(i, _)| i).collect();
+    assert_eq!(active, vec![0, 2]);
+    assert_eq!(r.channels.len(), 4);
 }
 
 fn guitar_rig_7_processes_audio_as_an_effect() {

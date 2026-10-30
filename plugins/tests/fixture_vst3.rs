@@ -13,12 +13,12 @@ const FRAMES: usize = 64;
 fn run(plugin: &mut dyn Plugin, input: f32, events: &[Event], changes: &[ParamChange]) -> Vec<f32> {
     let layout = plugin.layout().clone();
     let ins: Vec<Vec<f32>> = (0..layout.input_channels()).map(|_| vec![input; FRAMES]).collect();
-    let in_refs: Vec<&[f32]> = ins.iter().map(Vec::as_slice).collect();
     let mut outs: Vec<Vec<f32>> = (0..layout.output_channels()).map(|_| vec![9.0; FRAMES]).collect();
-    let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
+    let mut table = ChannelTable::default();
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
     let (mut midi, mut params) = (OutBuf::with_capacity(16), OutBuf::with_capacity(16));
     let t = Transport::default();
-    let mut block = ProcessBlock { frames: FRAMES, inputs: &in_refs, outputs: &mut out_refs, events, param_changes: changes, transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events, param_changes: changes, transport: &t, midi_out: &mut midi, param_out: &mut params };
     plugin.process(&mut block).expect("process");
     outs.swap_remove(0)
 }
@@ -65,8 +65,13 @@ fn an_effect_has_buses_parameters_latency_and_changes_the_audio() {
     let mut p = c.activate(&setup()).unwrap();
     assert_eq!(p.layout().input_channels(), 2);
     assert_eq!(c.latency_samples(), 3);
-    // The plugin's own state starts at gain 0.25 (normalized), which doubles to x0.5.
-    assert_eq!(run(&mut *p, 0.25, &[], &[]), vec![0.125; FRAMES]);
+    assert_eq!(p.latency_samples(), 3, "the processor carries the latency it was activated with");
+    // The fixture's controller makes an edit as soon as it is loaded (gain 0.9, as if the user
+    // had turned the knob). There was no processor yet; the edit waited and arrives with the first
+    // block: x1.8.
+    assert!(c.has_pending_params());
+    assert_eq!(run(&mut *p, 0.25, &[], &[]), vec![0.45; FRAMES]);
+    assert!(!c.has_pending_params());
     // A parameter change in the block reaches the plugin.
     let change = ParamChange { id: 7, offset: 0, value: 1.0 };
     assert_eq!(run(&mut *p, 0.25, &[], &[change]), vec![0.5; FRAMES]);
@@ -102,18 +107,20 @@ fn a_block_that_does_not_fit_is_refused_and_a_replaced_processor_goes_stale() {
     let t = Transport::default();
     let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
     let mut outs = vec![vec![1.0f32; FRAMES]; 2];
-    let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
-    let mut block = ProcessBlock { frames: FRAMES, inputs: &[], outputs: &mut out_refs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let mut table = ChannelTable::default();
+    let none: [Vec<f32>; 0] = [];
+    let (inputs, outputs) = table.audio(&none, &mut outs);
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
     assert_eq!(p.process(&mut block), Err(ProcessError::BadBlock), "no input channels given");
     assert!(outs.iter().all(|c| c.iter().all(|&x| x == 0.0)), "outputs are silent after a refusal");
 
     let mut q = c.activate(&setup()).unwrap();
-    assert_eq!(run(&mut *q, 0.5, &[], &[]), vec![0.25; FRAMES]);
+    // The refused block did not take the edit made at load; the new processor gets it.
+    assert_eq!(run(&mut *q, 0.5, &[], &[]), vec![0.9; FRAMES]);
     let ins = vec![vec![0.5f32; FRAMES]; 2];
-    let in_refs: Vec<&[f32]> = ins.iter().map(Vec::as_slice).collect();
     let mut outs = vec![vec![1.0f32; FRAMES]; 2];
-    let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
-    let mut block = ProcessBlock { frames: FRAMES, inputs: &in_refs, outputs: &mut out_refs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
     assert_eq!(p.process(&mut block), Err(ProcessError::Stale), "the first processor was replaced");
 }
 
@@ -151,4 +158,64 @@ fn an_event_past_the_end_of_the_block_lands_on_its_last_frame() {
     let out = run(&mut *p, 0.0, &[late], &[]);
     assert!(out[..FRAMES - 1].iter().all(|&x| x == 0.0));
     assert_eq!(out[FRAMES - 1], 0.5);
+}
+
+#[test]
+fn edits_wait_through_deactivation_and_a_zero_frame_block_delivers_them() {
+    let mut c = load_fixture("Fixture Gain");
+    let mut p = c.activate(&setup()).unwrap();
+    let _ = run(&mut *p, 0.0, &[], &[]);
+    c.deactivate();
+    // Set while there is no processor: nothing is lost.
+    c.set_param(7, 0.25);
+    c.set_param(7, 0.75);
+    assert!(c.has_pending_params());
+    let mut p = c.activate(&setup()).unwrap();
+    // A zero-frame block (what a stopped engine runs) delivers it, and only the latest value.
+    let t = Transport::default();
+    let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
+    let mut block = ProcessBlock { frames: 0, inputs: AudioIn::none(), outputs: AudioOut::none(), events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    // The block's channel counts must still match the layout; a zero-frame flush passes none.
+    assert_eq!(p.process(&mut block), Err(ProcessError::BadBlock));
+    let (ins, mut outs) = (vec![Vec::<f32>::new(); 2], vec![Vec::<f32>::new(); 2]);
+    let mut table = ChannelTable::default();
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
+    let mut block = ProcessBlock { frames: 0, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    p.process(&mut block).unwrap();
+    assert!(!c.has_pending_params());
+    // The processor has it, so the saved state has it.
+    let state = c.save_state().unwrap();
+    let mut fresh = load_fixture("Fixture Gain");
+    fresh.load_state(&state).unwrap();
+    assert_eq!(fresh.param_value(7), Some(0.75));
+}
+
+#[test]
+fn a_stale_processor_cannot_unblock_a_live_one() {
+    // Two processors from two activations; the old one going stale must not disturb the new one.
+    let mut c = load_fixture("Fixture Gain");
+    let mut old = c.activate(&setup()).unwrap();
+    let mut new = c.activate(&setup()).unwrap();
+    let _ = run(&mut *new, 0.0, &[], &[]);
+    let t = Transport::default();
+    let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
+    let (ins, mut outs) = (vec![vec![0.5f32; FRAMES]; 2], vec![vec![0.0f32; FRAMES]; 2]);
+    let mut table = ChannelTable::default();
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    assert_eq!(old.process(&mut block), Err(ProcessError::Stale));
+    assert!(run(&mut *new, 0.5, &[], &[]).iter().all(|&x| x > 0.0));
+    c.deactivate();
+    drop(new);
+    drop(old);
+}
+
+#[test]
+fn buses_can_be_chosen_one_by_one() {
+    let mut c = load_fixture("Fixture Gain");
+    let only_out = ProcessSetup { inputs: BusSelection::Only(vec![]), outputs: BusSelection::Only(vec![0]), ..setup() };
+    let p = c.activate(&only_out).unwrap();
+    assert_eq!((p.layout().input_channels(), p.layout().output_channels()), (0, 2));
+    assert!(!p.layout().audio_inputs[0].active && p.layout().audio_outputs[0].active);
+    assert!(BusSelection::Only(vec![2, 5]).includes(5, 0) && !BusSelection::Only(vec![2, 5]).includes(0, 0));
 }

@@ -20,6 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 
 /// A plugin parameter's id. Stable across sessions for a given plugin, so it is what projects
@@ -125,13 +126,27 @@ fn channel_range(buses: &[BusInfo], bus: usize) -> std::ops::Range<usize> {
 }
 
 /// Which of a direction's buses to switch on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum BusSelection {
     /// The main bus only: what an ordinary instrument or effect needs.
     #[default]
     Main,
     /// Every bus, including sidechains and extra outputs.
     All,
+    /// Exactly these buses, by index in the plugin's list (Kontakt's main output and two of its
+    /// extra ones; or a sidechain input on its own). An empty list switches every bus off.
+    Only(Vec<usize>),
+}
+
+impl BusSelection {
+    /// Whether bus `index` is on, `main` being the index of the direction's main bus.
+    pub fn includes(&self, index: usize, main: usize) -> bool {
+        match self {
+            BusSelection::Main => index == main,
+            BusSelection::All => true,
+            BusSelection::Only(list) => list.contains(&index),
+        }
+    }
 }
 
 /// How the plugin will be run, set at activation.
@@ -164,6 +179,25 @@ impl Default for ProcessSetup {
 
 /// The host's transport at the start of a block, for tempo-synced plugins. Sent to the plugin
 /// every block.
+///
+/// Filling it from the engine core's `ProcessContext` (#34), whose positions are already in
+/// quarter notes:
+///
+/// | `Transport` | engine `ProcessContext` |
+/// | --- | --- |
+/// | `playing` | `playing` |
+/// | `recording` | `false` until the engine records (it has no flag for it yet) |
+/// | `looping`, `loop_start_beats`, `loop_end_beats` | `looping`, `loop_range` |
+/// | `tempo` | `tempo` |
+/// | `time_sig_numerator`, `time_sig_denominator` | `time_signature` |
+/// | `project_samples` | `frame` |
+/// | `continuous_samples` | `continuous_frame` |
+/// | `project_beats` | `beat` |
+/// | `bar_start_beats` | `bar_start` |
+///
+/// The engine splits blocks where the loop wraps, so each piece is one call with its own
+/// transport. If a position is only known as a bar number, [`Transport::bar_start_from`] turns
+/// it into quarter notes for a constant meter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Transport {
     pub playing: bool,
@@ -183,6 +217,14 @@ pub struct Transport {
     pub bar_start_beats: f64,
     pub loop_start_beats: f64,
     pub loop_end_beats: f64,
+}
+
+impl Transport {
+    /// The quarter note bar `bar` (from 0) starts on, when every bar so far has had this
+    /// transport's time signature.
+    pub fn bar_start_from(&self, bar: i64) -> f64 {
+        bar as f64 * f64::from(self.time_sig_numerator) * 4.0 / f64::from(self.time_sig_denominator.max(1))
+    }
 }
 
 impl Default for Transport {
@@ -278,25 +320,201 @@ impl<T: Copy> OutBuf<T> {
     }
 }
 
+/// A block's input channels: pointers to the caller's buffers, each at least `len` long.
+///
+/// Built every block from a preallocated table ([`ChannelTable`]) or from raw pointers, so making
+/// one allocates nothing. Input and output channels may be the same buffers (in place).
+#[derive(Clone, Copy)]
+pub struct AudioIn<'a> {
+    ptrs: &'a [*const f32],
+    len: usize,
+    _borrow: PhantomData<&'a [f32]>,
+}
+
+impl<'a> AudioIn<'a> {
+    /// No input channels.
+    pub fn none() -> AudioIn<'static> {
+        AudioIn { ptrs: &[], len: 0, _borrow: PhantomData }
+    }
+
+    /// # Safety
+    /// Each pointer must be valid for `len` reads of `f32` for `'a`, and nothing may write
+    /// through any other reference to that memory while this is in use, except the plugin itself
+    /// when an input is also an output (in-place processing).
+    pub unsafe fn from_raw(ptrs: &'a [*const f32], len: usize) -> AudioIn<'a> {
+        AudioIn { ptrs, len, _borrow: PhantomData }
+    }
+
+    pub fn channels(&self) -> usize {
+        self.ptrs.len()
+    }
+
+    /// Frames each channel holds.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ptrs.is_empty() || self.len == 0
+    }
+
+    pub fn as_ptrs(&self) -> &'a [*const f32] {
+        self.ptrs
+    }
+}
+
+/// A block's output channels: pointers to the caller's buffers, each at least `len` long. See
+/// [`AudioIn`].
+pub struct AudioOut<'a> {
+    ptrs: &'a [*mut f32],
+    len: usize,
+    _borrow: PhantomData<&'a mut [f32]>,
+}
+
+impl<'a> AudioOut<'a> {
+    pub fn none() -> AudioOut<'static> {
+        AudioOut { ptrs: &[], len: 0, _borrow: PhantomData }
+    }
+
+    /// # Safety
+    /// Each pointer must be valid for `len` reads and writes of `f32` for `'a`, the channels must
+    /// not overlap one another, and nothing else may touch that memory while this is in use (an
+    /// input of the same block may point at it: in-place processing).
+    pub unsafe fn from_raw(ptrs: &'a [*mut f32], len: usize) -> AudioOut<'a> {
+        AudioOut { ptrs, len, _borrow: PhantomData }
+    }
+
+    pub fn channels(&self) -> usize {
+        self.ptrs.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.ptrs.is_empty() || self.len == 0
+    }
+
+    pub fn as_ptrs(&self) -> &[*mut f32] {
+        self.ptrs
+    }
+
+    /// Writes zeros to the first `frames` frames of every channel.
+    pub fn silence(&mut self, frames: usize) {
+        let n = frames.min(self.len);
+        for &p in self.ptrs {
+            // SAFETY: `from_raw`'s contract: valid for `len` writes, and `n <= len`.
+            unsafe { std::slice::from_raw_parts_mut(p, n) }.fill(0.0);
+        }
+    }
+
+    /// Channel `i` for reading (empty if out of range).
+    pub fn channel(&self, i: usize) -> &[f32] {
+        match self.ptrs.get(i) {
+            // SAFETY: `from_raw`'s contract; borrowed from `self`, so no `&mut` to it can coexist.
+            Some(&p) => unsafe { std::slice::from_raw_parts(p, self.len) },
+            None => &[],
+        }
+    }
+}
+
+/// Preallocated pointer tables that make [`AudioIn`] and [`AudioOut`] from the caller's own
+/// buffers every block, without allocating (as long as the channel counts stay within the
+/// capacity it was made with).
+#[derive(Debug, Default)]
+pub struct ChannelTable {
+    ins: Vec<*const f32>,
+    outs: Vec<*mut f32>,
+}
+
+// SAFETY: the table only holds addresses between `audio` calls; they are never dereferenced
+// through it.
+unsafe impl Send for ChannelTable {}
+
+impl ChannelTable {
+    pub fn with_capacity(inputs: usize, outputs: usize) -> ChannelTable {
+        ChannelTable { ins: Vec::with_capacity(inputs), outs: Vec::with_capacity(outputs) }
+    }
+
+    /// Inputs and outputs from separate buffers. Their length is the shortest buffer's.
+    pub fn audio<'a, I: AsRef<[f32]>, O: AsMut<[f32]>>(&'a mut self, inputs: &'a [I], outputs: &'a mut [O]) -> (AudioIn<'a>, AudioOut<'a>) {
+        self.ins.clear();
+        self.outs.clear();
+        let mut len = usize::MAX;
+        for i in inputs {
+            let s = i.as_ref();
+            len = len.min(s.len());
+            self.ins.push(s.as_ptr());
+        }
+        for o in outputs.iter_mut() {
+            let s = o.as_mut();
+            len = len.min(s.len());
+            self.outs.push(s.as_mut_ptr());
+        }
+        if len == usize::MAX {
+            len = 0;
+        }
+        // SAFETY: the pointers come from `inputs` (shared) and `outputs` (exclusive), both
+        // borrowed for `'a`, so they stay valid and unaliased; `len` is the shortest buffer.
+        unsafe { (AudioIn::from_raw(&self.ins, len), AudioOut::from_raw(&self.outs, len)) }
+    }
+
+    /// In place: the first `inputs` buffers are also the plugin's inputs, and every buffer is an
+    /// output (an effect on a track's channels).
+    pub fn in_place<'a, B: AsMut<[f32]>>(&'a mut self, buffers: &'a mut [B], inputs: usize) -> (AudioIn<'a>, AudioOut<'a>) {
+        self.ins.clear();
+        self.outs.clear();
+        let mut len = usize::MAX;
+        for b in buffers.iter_mut() {
+            let s = b.as_mut();
+            len = len.min(s.len());
+            self.outs.push(s.as_mut_ptr());
+        }
+        for &p in self.outs.iter().take(inputs) {
+            self.ins.push(p.cast_const());
+        }
+        if len == usize::MAX {
+            len = 0;
+        }
+        // SAFETY: the pointers come from `buffers`, borrowed exclusively for `'a`; inputs alias
+        // outputs only as in-place processing, which `from_raw` allows.
+        unsafe { (AudioIn::from_raw(&self.ins, len), AudioOut::from_raw(&self.outs, len)) }
+    }
+}
+
 /// Everything one call to [`Plugin::process`] reads and writes.
-pub struct ProcessBlock<'a, 'b> {
-    /// Frames in this block: at most [`ProcessSetup::max_block_size`].
+pub struct ProcessBlock<'a> {
+    /// Frames in this block: at most [`ProcessSetup::max_block_size`], and at most the buffers'
+    /// length. 0 is allowed: it only delivers parameter changes (VST3 hosts flush parameters
+    /// this way while stopped).
     pub frames: usize,
-    /// One slice per channel of every *active* input bus, in bus order (see
-    /// [`BusLayout::input_range`]). Each is at least `frames` long.
-    pub inputs: &'b [&'a [f32]],
+    /// One channel per channel of every *active* input bus, in bus order (see
+    /// [`BusLayout::input_range`]).
+    pub inputs: AudioIn<'a>,
     /// The same for the outputs. Every channel is written (silence is written as zeros).
-    pub outputs: &'b mut [&'a mut [f32]],
-    /// Notes and MIDI for this block, sorted by offset.
-    pub events: &'b [Event],
+    pub outputs: AudioOut<'a>,
+    /// Notes and MIDI for this block, sorted by offset. An offset past the block lands on its
+    /// last frame.
+    pub events: &'a [Event],
     /// Parameter changes for this block (automation, knob moves), sorted by offset. Changes the
-    /// user makes in the plugin's own editor reach the plugin by themselves.
-    pub param_changes: &'b [ParamChange],
-    pub transport: &'b Transport,
+    /// user makes in the plugin's own editor, and [`PluginController::set_param`], reach the
+    /// plugin by themselves.
+    pub param_changes: &'a [ParamChange],
+    pub transport: &'a Transport,
     /// Notes the plugin sends out (a sequencer or arpeggiator plugin). Cleared by the caller.
-    pub midi_out: &'b mut OutBuf<Event>,
+    pub midi_out: &'a mut OutBuf<Event>,
     /// Parameter changes the plugin makes itself (its own LFOs or macros). Cleared by the caller.
-    pub param_out: &'b mut OutBuf<ParamChange>,
+    pub param_out: &'a mut OutBuf<ParamChange>,
+}
+
+/// What the fixed-size lists inside a plugin had to drop since the last
+/// [`Plugin::take_dropped`]: events beyond 1,024 in a block (note-offs are kept to the last), and
+/// parameter points beyond 32 per parameter in a block (the last point is always kept).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Dropped {
+    pub events: u32,
+    pub param_points: u32,
 }
 
 /// Why [`Plugin::process`] did nothing.
@@ -324,9 +542,17 @@ pub trait Plugin: Send {
     /// The buses in force since activation.
     fn layout(&self) -> &BusLayout;
 
-    /// Runs the plugin over one block. On the audio thread: no allocation, locks or logging.
-    /// On an error the outputs are left as zeros.
-    fn process(&mut self, block: &mut ProcessBlock<'_, '_>) -> Result<(), ProcessError>;
+    /// The plugin's processing latency in samples, as it reported it at activation. When it
+    /// changes, the controller reports [`ControllerEvent::LatencyChanged`] and the plugin needs
+    /// activating again.
+    fn latency_samples(&self) -> u32;
+
+    /// Runs the plugin over one block. On the audio thread: no allocation, locks or logging,
+    /// even when the plugin fails. On an error the outputs are left as zeros.
+    fn process(&mut self, block: &mut ProcessBlock<'_>) -> Result<(), ProcessError>;
+
+    /// What had to be dropped since the last call, and resets the counts. Audio thread; cheap.
+    fn take_dropped(&mut self) -> Dropped;
 }
 
 /// A parameter, as the plugin lists it.
@@ -361,8 +587,9 @@ pub enum ControllerEvent {
     /// value; this is for the UI and for recording automation.
     ParamEdit { id: ParamId, value: f64 },
     EditEnd { id: ParamId },
-    /// The plugin's latency changed: ask [`PluginController::latency_samples`] and re-plan delay
-    /// compensation.
+    /// The plugin's latency changed. VST3 applies a new latency only across a restart: deactivate
+    /// and activate the plugin again, then read the new [`Plugin::latency_samples`] and re-plan
+    /// delay compensation.
     LatencyChanged,
     /// Parameter values or names changed on the plugin's side (a preset was loaded in its own
     /// browser): read them again.
@@ -370,6 +597,9 @@ pub enum ControllerEvent {
     /// The plugin wants to be reloaded (its buses or parameter list changed). Deactivate and
     /// activate it again, and read its parameters again.
     ReloadRequested,
+    /// The plugin threw or hung and is switched off for good: its processor returns
+    /// [`ProcessError::Failed`]. [`PluginController::take_error`] says why. Reported once.
+    Failed,
 }
 
 /// A native window the editor goes into: an `NSView*` on macOS, an `HWND` on Windows.
@@ -454,7 +684,18 @@ pub trait PluginController: Send {
     fn param_plain(&mut self, id: ParamId, normalized: f64) -> Option<f64>;
 
     /// The plugin's whole state (sound, settings) as one opaque blob for the project file.
+    ///
+    /// VST3 plugins with a separate processor keep their sound in the processor, so values set
+    /// since the processor last ran are not in it yet. When [`has_pending_params`] says so, run
+    /// a block first: a zero-frame block is enough.
+    ///
+    /// [`has_pending_params`]: Self::has_pending_params
     fn save_state(&mut self) -> Result<Vec<u8>, PluginError>;
+
+    /// Whether parameter values set from the UI or the plugin's editor are still waiting for the
+    /// processor (the next block delivers them, even a zero-frame one; they also survive
+    /// deactivation).
+    fn has_pending_params(&self) -> bool;
 
     /// Restores a blob from [`save_state`](Self::save_state). The data is untrusted. Call it
     /// while the processor is idle where you can.

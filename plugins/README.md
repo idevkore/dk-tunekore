@@ -49,21 +49,41 @@ vst3::shutdown();
 **Two halves.** A loaded plugin is a `PluginController` and, once activated, a
 `Plugin`. That is VST3's and CLAP's own threading split, and it means the
 engine never locks on the audio thread: the controller handles parameters,
-state and the editor on the main thread while the `Plugin` processes. Edits
-made in the plugin's editor reach its processor through a lock-free queue and
-are also reported by `poll`, for the UI and automation recording. Activating
-again (new sample rate or block size) makes the old `Plugin` stale; it returns
-`ProcessError::Stale`. Drop the `Plugin` first (off the audio thread), then the
-controller.
+state and the editor on the main thread while the `Plugin` processes.
+Activating again (new sample rate, block size or buses) makes the old `Plugin`
+stale; it returns `ProcessError::Stale`. Deactivating, reactivating and
+dropping the controller wait for a block in progress. A block that runs for
+more than 10 s is taken as hung: the plugin is switched off and leaked, never
+stopped or terminated under a running `process`. The plugin's objects are
+released when the controller is dropped, on its thread, so a plugin's
+destructors never run on the audio thread, even if the `Plugin` is dropped
+last. Activation picks the buses (`BusSelection::Main`, `All`, or `Only`
+chosen indices) and records the latency the `Plugin` reports.
 
-**`process` allocates nothing, locks nothing and logs nothing.** Bus pointer
-tables, event lists (1,024 events), parameter queues (256 parameters × 32
-points in, 64 out) and the process context are allocated at activation. Notes
-become VST3 events; control change, pitch bend and channel pressure go through
-the plugin's `IMidiMapping` as parameter changes. The transport (tempo, time
-signature, position in samples and beats, bar start, playing, recording, loop)
-goes to the plugin every block. `tests/no_alloc.rs` counts allocations inside
-`process` with a global allocator and expects none.
+**Parameter values from outside the processor** (the UI's `set_param`, the
+plugin's own editor) go into a mailbox with one slot per parameter: the
+latest value waits, across deactivation, and the next block delivers it. A
+zero-frame block is enough, as VST3 hosts flush parameters while stopped.
+`has_pending_params` says whether any are waiting (the state is what the
+processor has seen). Editor edits, gestures and restart requests reach the
+main thread through a lock-free queue read by `poll`, so a plugin may report
+them from any thread, the audio thread included.
+
+**`process` allocates nothing, locks nothing and logs nothing**, even when the
+plugin throws. The caller's channels come in as `AudioIn`/`AudioOut`, built
+each block from a preallocated `ChannelTable` (or raw pointers, in place if it
+likes). Bus pointer tables, event lists (1,024 events, the last 128 places kept
+for note-offs so a full block cannot leave notes stuck), parameter queues (256
+parameters × 32 points in, 64 out; points kept in time order, and a full queue
+keeps the last value) and the process context are allocated at activation.
+What had to be dropped is counted (`Plugin::take_dropped`). Notes become VST3
+events; control change, pitch bend and channel pressure go through the
+plugin's `IMidiMapping` as parameter changes (re-read when the plugin says the
+mapping changed). The transport (tempo, time signature, position in samples
+and quarter notes, bar start, playing, recording, loop) goes to the plugin
+every block; `Transport`'s documentation maps it onto the engine's
+`ProcessContext`. `tests/no_alloc.rs` counts every allocation from building the
+block to the plugin returning, including when it throws, and expects none.
 
 **The exception shim.** Rust cannot catch a C++ exception; one that reaches a
 Rust frame aborts the process (Analog Lab V did this in the hosting spike). So
@@ -75,8 +95,10 @@ method we use, `addRef`/`release`/`queryInterface`, and the module's
 `bundleEntry`, `GetPluginFactory` and `bundleExit`. The success path costs one
 indirect call. A plugin that throws while setting up or processing is switched
 off: it is never called again, and its objects are leaked rather than released.
-One that throws while answering a question (a parameter's text) only records
-the error. A crash (a segfault, an abort) still takes the process down; the
+On the audio thread the message goes into a fixed buffer and the failure is
+reported later: `poll` gives `ControllerEvent::Failed` once, `take_error` says
+why. One that throws while answering a question (a parameter's text) only
+records the error. A crash (a segfault, an abort) still takes the process down; the
 scanner is what protects the app from those.
 
 **The scanner.** `tunekore-scan` finds `.vst3` bundles in

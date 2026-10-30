@@ -120,8 +120,21 @@ method!(sv::IAudioProcessor, can_process_sample_size, i_pi, [canProcessSampleSiz
 method!(sv::IAudioProcessor, get_latency_samples, u_p, [getLatencySamples], () -> u32);
 method!(sv::IAudioProcessor, setup_processing, i_pp, [setupProcessing], (setup: *mut sv::ProcessSetup) -> i32);
 method!(sv::IAudioProcessor, set_processing, i_pb, [setProcessing], (state: u8) -> i32);
-method!(sv::IAudioProcessor, process, i_pp, [process], (data: *mut sv::ProcessData) -> i32);
 method!(sv::IAudioProcessor, get_tail_samples, u_p, [getTailSamples], () -> u32);
+
+impl PlugPtr<sv::IAudioProcessor> {
+    /// `process`, for the audio thread: a throw comes back as [`shim::Thrown`] with nothing
+    /// allocated (see `shim::i_pp_rt`).
+    ///
+    /// # Safety
+    /// As for any call here: `data` and everything it points to must be valid for the call.
+    #[inline]
+    pub unsafe fn process_rt(&self, data: *mut sv::ProcessData) -> Result<i32, shim::Thrown> {
+        let p = self.ptr.as_ptr();
+        // SAFETY: the vtable of a live object; the caller keeps `data` valid.
+        unsafe { shim::i_pp_rt((*(*p).vtbl).process, p, data) }
+    }
+}
 
 // IEditController (and IPluginBase)
 method!(sv::IEditController, initialize, i_pp, [base.initialize], (context: *mut sb::FUnknown) -> i32);

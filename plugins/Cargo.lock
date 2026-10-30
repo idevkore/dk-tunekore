@@ -31,6 +31,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ce183b975b8fc736a20919c4002717255fbd867df575c792aeefa9a56a73ad0"
 
 [[package]]
+name = "crossbeam-queue"
+version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03e8bd762f7479489c70ed6c768ddca99d7296857de437a68dcb2a94365b3fae"
+dependencies = [
+ "crossbeam-utils",
+]
+
+[[package]]
+name = "crossbeam-utils"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
+
+[[package]]
 name = "dispatch2"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -141,12 +156,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtrb"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5974e397833d890f2f74963408e0d4a6cd8eda2f6a445ae06750291b5d7a997e"
-
-[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -231,12 +240,12 @@ name = "tunekore-plugins"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "crossbeam-queue",
  "libloading",
  "log",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
- "rtrb",
  "serde",
  "serde_json",
  "thiserror",

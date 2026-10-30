@@ -112,8 +112,8 @@ pub fn render(controller: &mut dyn PluginController, spec: &RenderSpec) -> Resul
         sample_rate: spec.sample_rate,
         max_block_size: spec.block_size as u32,
         realtime: false,
-        inputs: spec.inputs,
-        outputs: spec.outputs,
+        inputs: spec.inputs.clone(),
+        outputs: spec.outputs.clone(),
         main_channels: 2,
     };
     let mut plugin = controller.activate(&setup)?;
@@ -126,6 +126,7 @@ pub fn render(controller: &mut dyn PluginController, spec: &RenderSpec) -> Resul
     let mut in_bufs = vec![vec![0.0f32; spec.block_size]; n_in];
     let mut out_bufs = vec![vec![0.0f32; spec.block_size]; n_out];
     let mut channels = vec![Vec::with_capacity(total); n_out];
+    let mut table = ChannelTable::with_capacity(n_in, n_out);
     let samples_per_beat = 60.0 / spec.tempo * spec.sample_rate;
     // Note on/off times in samples.
     let mut edges: Vec<(usize, Event)> = Vec::new();
@@ -167,12 +168,11 @@ pub fn render(controller: &mut dyn PluginController, spec: &RenderSpec) -> Resul
         };
         midi_out.clear();
         param_out.clear();
-        let in_refs: Vec<&[f32]> = in_bufs.iter().map(Vec::as_slice).collect();
-        let mut out_refs: Vec<&mut [f32]> = out_bufs.iter_mut().map(Vec::as_mut_slice).collect();
+        let (inputs, outputs) = table.audio(&in_bufs, &mut out_bufs);
         let mut block = ProcessBlock {
             frames,
-            inputs: &in_refs,
-            outputs: &mut out_refs,
+            inputs,
+            outputs,
             events: &events,
             param_changes: &[],
             transport: &transport,

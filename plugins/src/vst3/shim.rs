@@ -19,6 +19,7 @@ pub type Guarded<T> = Result<T, Exception>;
 
 unsafe extern "C" {
     fn tk_last_exception() -> *const c_char;
+    fn tk_demangle(name: *const c_char, out: *mut c_char, n: usize) -> i32;
 
     fn tk_i_p(f: *const c_void, out: *mut i32, a1: *mut c_void) -> i32;
     fn tk_u_p(f: *const c_void, out: *mut u32, a1: *mut c_void) -> i32;
@@ -76,7 +77,41 @@ fn thrown() -> Exception {
     // SAFETY: returns a NUL-terminated thread-local buffer that stays valid until this thread's
     // next exception; it is copied out immediately.
     let s = unsafe { CStr::from_ptr(tk_last_exception()) };
-    Exception(s.to_string_lossy().into_owned())
+    Exception(readable(&s.to_string_lossy()))
+}
+
+/// A plugin call on the audio thread threw. The message stays in a thread-local buffer until
+/// [`copy_last_exception`] takes it; nothing is allocated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thrown;
+
+/// Copies this thread's last exception message (raw: the type as the compiler names it) into
+/// `dst` and returns the bytes written. No allocation: fit for the audio thread.
+pub fn copy_last_exception(dst: &mut [u8]) -> usize {
+    // SAFETY: as in `thrown`.
+    let src = unsafe { CStr::from_ptr(tk_last_exception()) }.to_bytes();
+    let n = src.len().min(dst.len());
+    dst[..n].copy_from_slice(&src[..n]);
+    n
+}
+
+/// Makes a raw message ("St13runtime_error: boom") readable ("std::runtime_error: boom").
+/// Allocates: not for the audio thread.
+pub fn readable(raw: &str) -> String {
+    let (ty, rest) = match raw.split_once(": ") {
+        Some((t, r)) => (t, Some(r)),
+        None => (raw, None),
+    };
+    let Ok(name) = std::ffi::CString::new(ty) else { return raw.to_string() };
+    let mut buf = vec![0u8; 512];
+    // SAFETY: `name` is NUL-terminated; `buf` is writable for its length.
+    unsafe { tk_demangle(name.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let ty = String::from_utf8_lossy(&buf[..end]);
+    match rest {
+        Some(r) => format!("{ty}: {r}"),
+        None => ty.into_owned(),
+    }
 }
 
 #[inline]
@@ -101,6 +136,12 @@ pub unsafe fn u_p<T>(f: unsafe extern "system" fn(*mut T) -> u32, this: *mut T) 
 pub unsafe fn i_pp<T, A: RawPtr>(f: unsafe extern "system" fn(*mut T, A) -> i32, this: *mut T, a: A) -> Guarded<i32> {
     let mut out = 0;
     finish(unsafe { tk_i_pp(f as *const c_void, &mut out, this.cast(), a.raw()) }, out)
+}
+/// [`i_pp`] for the audio thread: a throw comes back as [`Thrown`], with nothing allocated.
+#[inline]
+pub unsafe fn i_pp_rt<T, A: RawPtr>(f: unsafe extern "system" fn(*mut T, A) -> i32, this: *mut T, a: A) -> Result<i32, Thrown> {
+    let mut out = 0;
+    if unsafe { tk_i_pp(f as *const c_void, &mut out, this.cast(), a.raw()) } == 0 { Ok(out) } else { Err(Thrown) }
 }
 #[inline]
 pub unsafe fn i_pi<T>(f: unsafe extern "system" fn(*mut T, i32) -> i32, this: *mut T, a: i32) -> Guarded<i32> {
@@ -275,6 +316,23 @@ mod tests {
         let e = call(tk_selftest_throws_std).unwrap_err();
         assert!(e.0.contains("runtime_error"), "{e}");
         assert!(e.0.contains("boom from a plugin"), "{e}");
+    }
+
+    #[test]
+    fn the_audio_thread_variant_copies_the_message_into_a_fixed_buffer() {
+        type Sys = unsafe extern "system" fn(*mut c_void, *mut c_void) -> i32;
+        // SAFETY: "system" is the C calling convention on every platform this builds for except
+        // 32-bit Windows; the test double ignores its arguments.
+        let f: Sys = unsafe { std::mem::transmute::<Method, Sys>(tk_selftest_throws_std) };
+        let r = unsafe { i_pp_rt(f, std::ptr::null_mut(), std::ptr::null_mut::<c_void>()) };
+        assert_eq!(r, Err(Thrown));
+        let mut buf = [0u8; 64];
+        let n = copy_last_exception(&mut buf);
+        let raw = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(raw.contains("boom from a plugin"), "{raw}");
+        assert!(readable(raw).starts_with("std::runtime_error"), "{}", readable(raw));
+        let mut tiny = [0u8; 4];
+        assert_eq!(copy_last_exception(&mut tiny), 4, "cut to the buffer");
     }
 
     #[test]

@@ -4,8 +4,10 @@
 //! Derived from soundCraft's `vst3-host` (`ffi.rs`), MIT OR Apache-2.0; see
 //! `third_party/soundcraft/`. What changed: no mutexes (these objects belong to one thread at a
 //! time: the audio thread, filling them before `process` and reading them after, while the plugin
-//! reads or fills them inside it), and a parameter queue holds many points so automation can
-//! ramp inside a block.
+//! reads or fills them inside it); a parameter queue holds many points so automation can ramp
+//! inside a block, kept in time order and always ending on the latest value; note-offs have
+//! room kept for them so a full list cannot leave notes stuck; and everything dropped is
+//! counted.
 
 use crate::plugin::{Event, EventKind};
 use std::cell::{Cell, UnsafeCell};
@@ -19,6 +21,10 @@ pub(crate) const PITCH_BEND: usize = sv::ControllerNumbers_::kPitchBend as usize
 
 // ---- events --------------------------------------------------------------------------------
 
+/// Room in each event list kept for note-offs only, so that a block full of notes can always
+/// still end the ones it started.
+const NOTE_OFF_RESERVE: usize = 128;
+
 /// A fixed-capacity `IEventList`.
 ///
 /// Not thread-safe by design: the audio thread fills it, calls `process` (the plugin reads it,
@@ -27,6 +33,7 @@ pub(crate) const PITCH_BEND: usize = sv::ControllerNumbers_::kPitchBend as usize
 pub(crate) struct EventList {
     events: UnsafeCell<Vec<sv::Event>>,
     cap: usize,
+    dropped: Cell<u32>,
 }
 
 impl Class for EventList {
@@ -35,7 +42,7 @@ impl Class for EventList {
 
 impl EventList {
     pub fn new(cap: usize) -> EventList {
-        EventList { events: UnsafeCell::new(Vec::with_capacity(cap)), cap }
+        EventList { events: UnsafeCell::new(Vec::with_capacity(cap)), cap, dropped: Cell::new(0) }
     }
 
     /// # Safety
@@ -51,16 +58,25 @@ impl EventList {
         unsafe { self.list() }.clear();
     }
 
-    /// Adds an event; `false` when the list is full (the event is dropped).
+    /// Adds an event; `false` when there is no room (the event is dropped and counted). The
+    /// last [`NOTE_OFF_RESERVE`] places take note-offs only.
     pub fn push(&self, e: sv::Event) -> bool {
         // SAFETY: as above.
         let l = unsafe { self.list() };
-        if l.len() < self.cap {
+        let is_off = u32::from(e.r#type) == sv::Event_::EventTypes_::kNoteOffEvent as u32;
+        let room = if is_off { self.cap } else { self.cap.saturating_sub(NOTE_OFF_RESERVE) };
+        if l.len() < room {
             l.push(e);
             true
         } else {
+            self.dropped.set(self.dropped.get().saturating_add(1));
             false
         }
+    }
+
+    /// Events dropped since the last call.
+    pub fn take_dropped(&self) -> u32 {
+        self.dropped.replace(0)
     }
 
     pub fn len(&self) -> usize {
@@ -176,22 +192,31 @@ impl ParamQueue {
         ParamQueue { id: Cell::new(0), count: Cell::new(0), points: UnsafeCell::new([Point::default(); POINTS_PER_QUEUE]) }
     }
 
-    /// Adds a point; `false` when this queue is full. Points at the same offset replace each
-    /// other, so a later write wins.
-    fn add(&self, offset: i32, value: f64) -> Option<usize> {
+    /// Adds a point in time order. A point at an offset already present replaces it (the later
+    /// write wins). When the queue is full, a point after the last one replaces the last one, so
+    /// a ramp always ends on its final value; any other point is dropped. Returns the index the
+    /// point went to, and whether a point was lost.
+    fn add(&self, offset: i32, value: f64) -> (Option<usize>, bool) {
         let n = self.count.get();
         // SAFETY: single-threaded use, see `EventList`.
         let pts = unsafe { &mut *self.points.get() };
-        if n > 0 && pts[n - 1].offset == offset {
-            pts[n - 1].value = value;
-            return Some(n - 1);
+        // Where it goes: after every point at or before `offset`.
+        let at = pts[..n].partition_point(|p| p.offset <= offset);
+        if at > 0 && pts[at - 1].offset == offset {
+            pts[at - 1].value = value;
+            return (Some(at - 1), false);
         }
         if n >= POINTS_PER_QUEUE {
-            return None;
+            if at == n {
+                pts[n - 1] = Point { offset, value };
+                return (Some(n - 1), true);
+            }
+            return (None, true);
         }
-        pts[n] = Point { offset, value };
+        pts.copy_within(at..n, at + 1);
+        pts[at] = Point { offset, value };
         self.count.set(n + 1);
-        Some(n)
+        (Some(at), false)
     }
 
     fn point(&self, i: usize) -> Option<Point> {
@@ -223,7 +248,7 @@ impl IParamValueQueueTrait for ParamQueue {
         }
     }
     unsafe fn addPoint(&self, offset: sb::int32, value: sv::ParamValue, index: *mut sb::int32) -> sb::tresult {
-        match self.add(offset, value) {
+        match self.add(offset, value).0 {
             Some(i) => {
                 // SAFETY: out-pointer from the plugin (or null, handled).
                 if let Some(out) = unsafe { index.as_mut() } {
@@ -240,6 +265,7 @@ impl IParamValueQueueTrait for ParamQueue {
 pub(crate) struct ParamChanges {
     queues: Vec<ComWrapper<ParamQueue>>,
     count: Cell<usize>,
+    dropped: Cell<u32>,
 }
 
 impl Class for ParamChanges {
@@ -248,7 +274,7 @@ impl Class for ParamChanges {
 
 impl ParamChanges {
     pub fn new(queues: usize) -> ParamChanges {
-        ParamChanges { queues: (0..queues).map(|_| ComWrapper::new(ParamQueue::new())).collect(), count: Cell::new(0) }
+        ParamChanges { queues: (0..queues).map(|_| ComWrapper::new(ParamQueue::new())).collect(), count: Cell::new(0), dropped: Cell::new(0) }
     }
 
     pub fn clear(&self) {
@@ -273,15 +299,27 @@ impl ParamChanges {
         Some((n, q))
     }
 
-    /// Host side: one point for `id` at `offset`. Dropped if the pool or the queue is full.
+    /// Host side: one point for `id` at `offset`, in time order (see [`ParamQueue::add`]).
+    /// Returns whether it went in; anything lost is counted.
     pub fn add(&self, id: u32, offset: u32, value: f64) -> bool {
-        match self.queue_for(id) {
-            Some((_, q)) => q.add(i32::try_from(offset).unwrap_or(0), value).is_some(),
-            None => false,
+        let (placed, lost) = match self.queue_for(id) {
+            Some((_, q)) => {
+                let (at, lost) = q.add(i32::try_from(offset).unwrap_or(0), value);
+                (at.is_some(), lost)
+            }
+            None => (false, true),
+        };
+        if lost {
+            self.dropped.set(self.dropped.get().saturating_add(1));
         }
+        placed
     }
 
-    #[cfg(test)]
+    /// Points dropped since the last call.
+    pub fn take_dropped(&self) -> u32 {
+        self.dropped.replace(0)
+    }
+
     pub fn queue_count(&self) -> usize {
         self.count.get()
     }
@@ -353,19 +391,56 @@ mod tests {
     }
 
     #[test]
-    fn full_pools_drop_instead_of_growing() {
+    fn full_pools_drop_instead_of_growing_and_a_full_ramp_keeps_its_last_value() {
         let pc = ComWrapper::new(ParamChanges::new(1));
         assert!(pc.add(1, 0, 0.0));
         assert!(!pc.add(2, 0, 0.0), "no queue left");
+        assert_eq!(pc.take_dropped(), 1);
         for i in 1..POINTS_PER_QUEUE as u32 {
             assert!(pc.add(1, i, 0.5));
         }
-        assert!(!pc.add(1, 1000, 0.5), "queue full");
+        assert!(pc.add(1, 1000, 0.75), "a later point replaces the last one");
+        assert!(!pc.add(1, 500, 0.1), "a point before the last one is dropped when full");
+        assert_eq!(pc.take_dropped(), 2);
+        let mut last = None;
+        let mut n = 0;
+        pc.for_each(|_, off, v| {
+            n += 1;
+            last = Some((off, v));
+        });
+        assert_eq!((n, last), (POINTS_PER_QUEUE, Some((1000, 0.75))), "the ramp ends on its final value");
+    }
+
+    #[test]
+    fn points_go_in_time_order_whatever_order_they_come_in() {
+        let pc = ComWrapper::new(ParamChanges::new(2));
+        // Automation at 0 and 100, then a MIDI-mapped controller at 50 on the same parameter.
+        pc.add(7, 0, 0.0);
+        pc.add(7, 100, 1.0);
+        pc.add(7, 50, 0.4);
+        let mut seen = Vec::new();
+        pc.for_each(|_, off, v| seen.push((off, v)));
+        assert_eq!(seen, vec![(0, 0.0), (50, 0.4), (100, 1.0)]);
+    }
+
+    #[test]
+    fn note_offs_have_room_kept_for_them() {
+        let l = ComWrapper::new(EventList::new(NOTE_OFF_RESERVE + 2));
+        let on = to_vst3_event(&Event { offset: 0, kind: EventKind::NoteOn { channel: 0, key: 60, velocity: 0.8, note_id: -1 } }).unwrap();
+        let off = to_vst3_event(&Event { offset: 1, kind: EventKind::NoteOff { channel: 0, key: 60, velocity: 0.0, note_id: -1 } }).unwrap();
+        assert!(l.push(on) && l.push(on));
+        assert!(!l.push(on), "notes stop where the reserve starts");
+        for _ in 0..NOTE_OFF_RESERVE {
+            assert!(l.push(off), "note-offs still fit");
+        }
+        assert!(!l.push(off));
+        assert_eq!(l.take_dropped(), 2);
+        assert_eq!(l.take_dropped(), 0);
     }
 
     #[test]
     fn the_event_list_has_a_fixed_capacity() {
-        let l = ComWrapper::new(EventList::new(2));
+        let l = ComWrapper::new(EventList::new(NOTE_OFF_RESERVE + 2));
         let e = to_vst3_event(&Event { offset: 3, kind: EventKind::NoteOn { channel: 0, key: 60, velocity: 0.8, note_id: -1 } }).unwrap();
         assert!(l.push(e) && l.push(e));
         assert!(!l.push(e));

@@ -97,17 +97,17 @@ mod mac {
                     let layout = plugin.layout().clone();
                     let ins = vec![vec![0.0f32; 512]; layout.input_channels()];
                     let mut outs = vec![vec![0.0f32; 512]; layout.output_channels()];
+                    let mut table = ChannelTable::with_capacity(ins.len(), outs.len());
                     let (mut midi, mut params) = (OutBuf::with_capacity(64), OutBuf::with_capacity(64));
                     let (start, mut rendered) = (Instant::now(), 0usize);
                     while !stop.load(Ordering::Relaxed) {
                         let due = (start.elapsed().as_secs_f64() * rate) as usize;
                         while rendered + 512 <= due {
-                            let in_refs: Vec<&[f32]> = ins.iter().map(Vec::as_slice).collect();
-                            let mut out_refs: Vec<&mut [f32]> = outs.iter_mut().map(Vec::as_mut_slice).collect();
+                            let (inputs, outputs) = table.audio(&ins, &mut outs);
                             midi.clear();
                             params.clear();
                             let transport = Transport { project_samples: rendered as i64, continuous_samples: rendered as i64, ..Transport::default() };
-                            let mut block = ProcessBlock { frames: 512, inputs: &in_refs, outputs: &mut out_refs, events: &[], param_changes: &[], transport: &transport, midi_out: &mut midi, param_out: &mut params };
+                            let mut block = ProcessBlock { frames: 512, inputs, outputs, events: &[], param_changes: &[], transport: &transport, midi_out: &mut midi, param_out: &mut params };
                             plugin.process(&mut block).map_err(|e| format!("process failed: {e}"))?;
                             rendered += 512;
                         }

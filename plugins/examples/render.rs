@@ -84,7 +84,7 @@ fn spec(a: &Args) -> RenderSpec {
         seconds: a.seconds,
         notes: if a.notes { RenderSpec::arpeggio() } else { Vec::new() },
         input: if a.sine { Input::Sine { hz: 220.0, level: 0.25 } } else { Input::Silence },
-        inputs: sel,
+        inputs: sel.clone(),
         outputs: sel,
         params: a.params.clone(),
         ..RenderSpec::default()

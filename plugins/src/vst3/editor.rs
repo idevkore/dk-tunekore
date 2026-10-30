@@ -92,11 +92,27 @@ fn create_view(c: &PlugPtr<sv::IEditController>) -> Result<Option<PlugPtr<sb::IP
 
 impl Editor {
     /// Whether the controller has an editor this platform can show.
-    pub fn supported(c: &PlugPtr<sv::IEditController>) -> bool {
+    pub fn supported(inst: &Instance, c: &PlugPtr<sv::IEditController>) -> bool {
         let Some(platform) = platform_type() else { return false };
-        let Ok(Some(view)) = create_view(c) else { return false };
+        let view = match create_view(c) {
+            Ok(Some(v)) => v,
+            Ok(None) => return false,
+            Err(e) => {
+                inst.note_exception("IEditController::createView", &e.0);
+                return false;
+            }
+        };
         // SAFETY: valid view; `platform` is a static NUL-terminated string.
-        matches!(unsafe { view.is_platform_type_supported(platform) }, Ok(sb::kResultTrue))
+        match unsafe { view.is_platform_type_supported(platform) } {
+            Ok(r) => r == sb::kResultTrue,
+            Err(e) => {
+                // It threw: leak the view rather than release it.
+                inst.note_exception("IPlugView::isPlatformTypeSupported", &e.0);
+                std::mem::forget(view);
+                inst.mark_leaked();
+                false
+            }
+        }
     }
 
     /// Creates the view and attaches it to `parent`. Main thread only.
@@ -114,15 +130,20 @@ impl Editor {
                 PluginError::Exception { during: "IEditController::createView", message: e.0 }
             })?
             .ok_or_else(|| PluginError::Unsupported("this plugin has no editor".into()))?;
-        let throws = |during: &'static str, e: Exception| {
+        // A view that threw is leaked, never released or called again (and its frame with it,
+        // since the view may still hold it).
+        let throws = |during: &'static str, e: Exception, view: PlugPtr<sb::IPlugView>, frame: Option<ComWrapper<PlugFrame>>| {
             inst.note_exception(during, &e.0);
+            std::mem::forget(view);
+            std::mem::forget(frame);
+            inst.mark_leaked();
             PluginError::Exception { during, message: e.0 }
         };
         // SAFETY: valid view; `platform` is a static NUL-terminated string.
         match unsafe { view.is_platform_type_supported(platform) } {
             Ok(sb::kResultTrue) => {}
             Ok(_) => return Err(PluginError::Unsupported("the editor does not support this platform's windows".into())),
-            Err(e) => return Err(throws("IPlugView::isPlatformTypeSupported", e)),
+            Err(e) => return Err(throws("IPlugView::isPlatformTypeSupported", e, view, None)),
         }
         let mut rect = sb::ViewRect { left: 0, top: 0, right: 400, bottom: 300 };
         // SAFETY: valid view; `rect` is writable. On failure the default size stays.
@@ -131,7 +152,9 @@ impl Editor {
         let frame = ComWrapper::new(PlugFrame { on_resize: Mutex::new(on_resize) });
         let frame_ptr = frame.as_com_ref::<sb::IPlugFrame>().map_or(std::ptr::null_mut(), |f| f.as_ptr());
         // SAFETY: valid view; the frame is kept in the `Editor` and detached before it goes.
-        unsafe { view.set_frame(frame_ptr) }.map_err(|e| throws("IPlugView::setFrame", e))?;
+        if let Err(e) = unsafe { view.set_frame(frame_ptr) } {
+            return Err(throws("IPlugView::setFrame", e, view, Some(frame)));
+        }
         // SAFETY: valid view; the parent is a live native view of the type named, owned by the host.
         match unsafe { view.attached(parent.0, platform) } {
             Ok(sb::kResultOk) => {}
@@ -140,7 +163,7 @@ impl Editor {
                 let _ = unsafe { view.set_frame(std::ptr::null_mut()) };
                 return Err(PluginError::Failed(format!("the editor could not attach to its window (result {r})")));
             }
-            Err(e) => return Err(throws("IPlugView::attached", e)),
+            Err(e) => return Err(throws("IPlugView::attached", e, view, Some(frame))),
         }
         // Many editors only know their size once attached (Kontakt reports one then).
         let mut after = rect;
@@ -152,20 +175,26 @@ impl Editor {
         Ok((Editor { view, _frame: frame }, size))
     }
 
-    /// Detaches the view. Main thread only (callers on other threads leak it instead).
-    pub fn close(self, inst: &Instance) {
-        if !on_main_thread() {
-            log::warn!("vst3: editor still open while its plugin is closed off the main thread; leaking it");
+    /// Detaches the view. Returns `true` if it had to be leaked instead: off the main thread
+    /// (AppKit), or when the plugin had failed (it is not called again). Its owner must then not
+    /// terminate the plugin either, since the view's timers may still call into it.
+    pub fn close(self, inst: &Instance) -> bool {
+        if !on_main_thread() || inst.is_failed() {
+            log::warn!("vst3 {}: leaking an editor that cannot be closed here", inst.info.name);
             std::mem::forget(self);
             inst.mark_leaked();
-            return;
+            return true;
         }
         // SAFETY: valid, attached view; main thread. `removed` before the window goes, and the
         // frame is detached before it is released.
-        unsafe {
-            let _ = self.view.removed();
-            let _ = self.view.set_frame(std::ptr::null_mut());
+        let r = unsafe { (self.view.removed(), self.view.set_frame(std::ptr::null_mut())) };
+        if r.0.is_err() || r.1.is_err() {
+            inst.note_exception("IPlugView::removed", "the editor threw while closing");
+            std::mem::forget(self);
+            inst.mark_leaked();
+            return true;
         }
+        false
     }
 
     pub fn resizable(&self, _inst: &Instance) -> bool {

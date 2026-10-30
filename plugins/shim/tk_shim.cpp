@@ -16,8 +16,11 @@
 // function that returns bool uses `bool` as its return type (`tk_b_*`).
 //
 // On the normal path a call costs one indirect call and no allocation, lock or thread-local
-// access: the try block is free until something throws. Only the catch path touches the
-// thread-local message buffer.
+// access: the try block is free until something throws. The catch path writes the exception's
+// type (as the compiler names it, not demangled) and message into a thread-local buffer with
+// snprintf: no allocation or lock of ours, so it is fit for the audio thread. (The C++ runtime
+// itself allocates the exception object when the plugin throws; nothing can avoid that.)
+// tk_demangle makes the type readable later, off the audio thread.
 //
 // Not caught: a crash (SIGSEGV, abort in the plugin, std::terminate from a throwing destructor).
 // The scanner runs plugins in a child process for those.
@@ -47,20 +50,13 @@ void set_message(const char* type, const char* what) {
                   (what && *what) ? ": " : "", what ? what : "");
 }
 
-// Called only from a catch block. Records what was thrown; allocation here is fine.
+// Called only from a catch block, maybe on the audio thread: records what was thrown without
+// allocating.
 void record_current_exception() noexcept {
     try {
         throw;
     } catch (const std::exception& e) {
-        const char* type = typeid(e).name();
-#ifdef TK_HAVE_CXXABI
-        int status = 0;
-        char* demangled = abi::__cxa_demangle(type, nullptr, nullptr, &status);
-        set_message(status == 0 && demangled ? demangled : type, e.what());
-        std::free(demangled);
-#else
-        set_message(type, e.what());
-#endif
+        set_message(typeid(e).name(), e.what());
     } catch (const char* s) {
         set_message("const char*", s);
     } catch (int v) {
@@ -146,6 +142,26 @@ TK0(tk_p_, P)
 // What the last call that returned TK_EXCEPTION on this thread threw, as "type: message".
 // Valid until the next exception on the same thread; copy it straight away.
 extern "C" const char* tk_last_exception(void) { return g_message; }
+
+// Writes the readable form of a compiler type name ("St13runtime_error" -> "std::runtime_error")
+// into out, NUL-terminated. Returns 1 if it demangled, 0 if it copied the name as it was.
+// Allocates: not for the audio thread.
+extern "C" int tk_demangle(const char* name, char* out, size_t n) {
+    if (!out || n == 0) return 0;
+    const char* src = name ? name : "";
+    int done = 0;
+#ifdef TK_HAVE_CXXABI
+    int status = 0;
+    char* d = abi::__cxa_demangle(src, nullptr, nullptr, &status);
+    if (status == 0 && d) {
+        std::snprintf(out, n, "%s", d);
+        done = 1;
+    }
+    std::free(d);
+#endif
+    if (!done) std::snprintf(out, n, "%s", src);
+    return done;
+}
 
 // Functions the unit tests hand to the shim in place of a plugin method.
 extern "C" I tk_selftest_ok(P, P) { return 42; }

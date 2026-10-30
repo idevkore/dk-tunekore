@@ -1,14 +1,17 @@
 //! The host side of the VST3 conversation: the objects a plugin is handed or asks for.
 //!
 //! Derived from soundCraft's `vst3-host` (`ffi.rs`), MIT OR Apache-2.0; see
-//! `third_party/soundcraft/`. What changed: [`HostContext`] now forwards the plugin editor's
-//! edits to the processor through a lock-free queue as well as to the UI, and reports gestures
-//! and restart requests as [`ControllerEvent`]s.
+//! `third_party/soundcraft/`. What changed: [`HostContext`] forwards the plugin editor's edits to
+//! the processor through a per-parameter mailbox and reports gestures, restarts and edits as
+//! [`ControllerEvent`]s through a lock-free queue, so a plugin may call it from any thread,
+//! including from inside `process`.
 
+use super::mailbox::ParamMailbox;
 use super::util::{tuid_bytes, write_c16};
-use crate::plugin::{ControllerEvent, ParamChange};
+use crate::plugin::ControllerEvent;
+use crossbeam_queue::ArrayQueue;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 use vst3::Steinberg::Vst::{self as sv, IComponentHandlerTrait, IHostApplicationTrait};
 use vst3::Steinberg::{self as sb, FUnknown, IBStreamTrait};
@@ -16,53 +19,58 @@ use vst3::{Class, ComWrapper, Interface};
 
 /// Largest plugin state we buffer (component or controller state).
 pub(crate) const MAX_STATE_BYTES: usize = 64 << 20;
-/// Most events buffered between two `poll`s.
+/// Events buffered between two `poll`s.
 const EVENT_CAP: usize = 4096;
 
 /// The host context handed to `initialize` (`IHostApplication`) and to the controller
-/// (`IComponentHandler`). Plugins call it from whatever thread they like, so it only uses short
-/// locks; nothing here runs on the audio thread.
+/// (`IComponentHandler`). Plugins call it from whatever thread they like, the audio thread
+/// included, so nothing on the component-handler path locks or allocates.
 pub(crate) struct HostContext {
-    /// Edits made in the plugin's editor, on their way to the processor. Replaced at every
-    /// activation (a fresh queue for each audio-thread half).
-    pub to_processor: Mutex<Option<rtrb::Producer<ParamChange>>>,
+    /// Edits on their way to the processor: the latest value per parameter.
+    pub mailbox: ParamMailbox,
     /// What the controller reports from `poll`.
-    events: Mutex<Vec<ControllerEvent>>,
-    /// Set when the plugin asked for a reload, so a stale processor can notice.
-    pub reload_requested: AtomicBool,
+    events: ArrayQueue<ControllerEvent>,
+    /// Events that did not fit in `events`.
+    events_dropped: AtomicU32,
+    /// The plugin changed which parameter each MIDI controller drives.
+    pub midi_mapping_changed: AtomicBool,
 }
 
 impl HostContext {
-    pub fn new() -> HostContext {
-        HostContext { to_processor: Mutex::new(None), events: Mutex::new(Vec::with_capacity(256)), reload_requested: AtomicBool::new(false) }
-    }
-
-    /// Sends a value to the processor as a change at the start of its next block. Dropped if
-    /// there is no processor or its queue is full.
-    pub fn send_to_processor(&self, id: u32, value: f64) {
-        let mut g = self.to_processor.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(p) = g.as_mut() {
-            let _ = p.push(ParamChange { id, offset: 0, value });
+    /// A context whose mailbox has room for `params` parameters (0 for one that only names the
+    /// host, as the factory's does).
+    pub fn new(params: usize) -> HostContext {
+        HostContext {
+            mailbox: ParamMailbox::new(params.saturating_mul(2)),
+            events: ArrayQueue::new(EVENT_CAP),
+            events_dropped: AtomicU32::new(0),
+            midi_mapping_changed: AtomicBool::new(false),
         }
     }
 
     fn report(&self, e: ControllerEvent) {
-        let mut v = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        // A stream of edits to one control collapses into its latest value.
-        if let (ControllerEvent::ParamEdit { id, value }, Some(ControllerEvent::ParamEdit { id: last_id, value: last })) = (e, v.last_mut())
-            && id == *last_id
-        {
-            *last = value;
-            return;
-        }
-        if v.len() < EVENT_CAP {
-            v.push(e);
+        if self.events.push(e).is_err() {
+            self.events_dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Moves the reported events into `out`.
+    /// Moves the reported events into `out`. A run of edits to one control collapses into its
+    /// latest value. Main thread.
     pub fn take_events(&self, out: &mut Vec<ControllerEvent>) {
-        out.append(&mut self.events.lock().unwrap_or_else(PoisonError::into_inner));
+        while let Some(e) = self.events.pop() {
+            if let (ControllerEvent::ParamEdit { id, value }, Some(ControllerEvent::ParamEdit { id: last_id, value: last })) = (e, out.last_mut())
+                && id == *last_id
+            {
+                *last = value;
+                continue;
+            }
+            out.push(e);
+        }
+    }
+
+    /// Events that were dropped because nobody polled for a long time.
+    pub fn events_dropped(&self) -> u32 {
+        self.events_dropped.load(Ordering::Relaxed)
     }
 }
 
@@ -118,7 +126,7 @@ impl IComponentHandlerTrait for HostContext {
     unsafe fn performEdit(&self, id: sv::ParamID, value: sv::ParamValue) -> sb::tresult {
         if value.is_finite() {
             let v = value.clamp(0.0, 1.0);
-            self.send_to_processor(id, v);
+            self.mailbox.post(id, v);
             self.report(ControllerEvent::ParamEdit { id, value: v });
         }
         sb::kResultOk
@@ -138,8 +146,10 @@ impl IComponentHandlerTrait for HostContext {
             self.report(ControllerEvent::ParamsChanged);
         }
         if has(r::kReloadComponent as u32) || has(r::kIoChanged as u32) {
-            self.reload_requested.store(true, Ordering::Release);
             self.report(ControllerEvent::ReloadRequested);
+        }
+        if has(r::kMidiCCAssignmentChanged as u32) {
+            self.midi_mapping_changed.store(true, Ordering::Release);
         }
         sb::kResultOk
     }
