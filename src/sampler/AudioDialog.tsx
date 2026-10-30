@@ -1,8 +1,12 @@
-// Audio settings: which output device to play on, and a test tone to check it.
+// Audio settings: which output device to play on, and a test tone to check
+// it; the input to sample from; MIDI controllers and their mappings.
 import { useEffect, useState } from "react";
 import { engineVersion, getDisplayZoom, getMaster, listOutputs, setDisplayZoom, setMaster, ZOOM_LEVELS, startTone, stopTone, type OutputDevice } from "../engine";
-import { chooseInput, chosenInput, currentOutput, inputDevices, midiInputs, setOutput, type InputDevice, type MidiInputInfo } from "./api";
+import { chooseInput, chosenInput, currentOutput, inputDevices, midiInputs, setOutput, subscribe, type InputDevice, type MidiInputInfo } from "./api";
 import Dialog from "./Dialog";
+import { Learnable } from "../midi/learn";
+import MidiMappings from "../midi/MidiMappings";
+import { MASTER, onMoved } from "../midi/api";
 
 const DEFAULT = "";
 
@@ -27,8 +31,11 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
     const poll = () => midiInputs().then(setMidi).catch(() => {});
     poll();
     const every = setInterval(poll, 2000); // a controller plugged in while this is open shows up
+    // A knob mapped to the master level moves its slider here too.
+    const off = subscribe(onMoved((moved) => moved.forEach((m) => m.target === MASTER && setMasterDb(m.value))));
     return () => {
       clearInterval(every);
+      off();
       void stopTone().catch(() => {});
     };
   }, [onError]);
@@ -87,28 +94,30 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
         </select>
         <span className="dim small">Also View → Zoom In / Zoom Out / Actual Size (⌘+, ⌘−, ⌘0). Applies to every window and is remembered.</span>
       </label>
-      <label className="field">
-        <span>
-          Master level <span className="mono">{master <= -60 ? "off" : `${master > 0 ? "+" : ""}${master.toFixed(1)} dB`}</span>
-        </span>
-        <input
-          type="range"
-          min={-60}
-          max={6}
-          step={0.5}
-          value={master}
-          onChange={(e) => {
-            const db = Number(e.target.value);
-            setMasterDb(db);
-            setMaster(db).catch(onError);
-          }}
-          onDoubleClick={() => {
-            setMasterDb(0);
-            setMaster(0).catch(onError);
-          }}
-        />
-        <span className="dim small">A limiter after it keeps the output under -0.3 dBFS, so a full kit never clips. Double-click to reset.</span>
-      </label>
+      <Learnable target={MASTER} label="Master level">
+        <label className="field">
+          <span>
+            Master level <span className="mono">{master <= -60 ? "off" : `${master > 0 ? "+" : ""}${master.toFixed(1)} dB`}</span>
+          </span>
+          <input
+            type="range"
+            min={-60}
+            max={6}
+            step={0.5}
+            value={master}
+            onChange={(e) => {
+              const db = Number(e.target.value);
+              setMasterDb(db);
+              setMaster(db).catch(onError);
+            }}
+            onDoubleClick={() => {
+              setMasterDb(0);
+              setMaster(0).catch(onError);
+            }}
+          />
+          <span className="dim small">A limiter after it keeps the output under -0.3 dBFS, so a full kit never clips. Double-click to reset.</span>
+        </label>
+      </Learnable>
       <div className="field-row">
         <button className={`btn small${tone ? " primary" : ""}`} onClick={() => void toggleTone()}>
           {tone ? "Stop test tone" : "Play test tone"}
@@ -144,8 +153,9 @@ export default function AudioDialog({ onClose, onError }: { onClose: () => void;
         ) : (
           <span className="dim">None found: plug one in, it connects by itself.</span>
         )}
-        <p className="field-help">Notes C1 to D♯2 (36 to 51) play pads 1 to 16, on any channel.</p>
+        <p className="field-help">Notes C1 to D♯2 (36 to 51) play pads 1 to 16, on any channel. Knobs and faders control what they learn.</p>
       </div>
+      <MidiMappings onError={onError} />
       <div className="dialog-foot">
         <span className="dim small mono">engine {version}</span>
         <button className="btn small primary" onClick={onClose} autoFocus>

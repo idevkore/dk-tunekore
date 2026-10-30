@@ -22,6 +22,8 @@ import AudioDialog from "./AudioDialog";
 import MidiDot from "./MidiDot";
 import ExportDialog from "./ExportDialog";
 import StatusBar, { type Message } from "../StatusBar";
+import { Learnable, MidiLearn } from "../midi/learn";
+import { SWING, TEMPO } from "../midi/api";
 
 type Drag =
   | { kind: "sample"; item: LibraryItem; x0: number; y0: number; x: number; y: number; moving: boolean }
@@ -437,6 +439,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   const hasPattern = view.pads.some((p) => p.name && p.steps.some(Boolean));
 
   return (
+    <MidiLearn selected={selected} active={active} onSay={say}>
     <div className={`app${drag?.moving ? " dragging" : ""}`} hidden={!active}>
       <header className="bar">
         <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
@@ -495,7 +498,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
           >
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 2h4l2.5 12h-9zM8 11l4-6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" /></svg>
           </button>
-          <div className="tempo">
+          <Learnable target={TEMPO} label="Tempo" className="tempo">
             <button className="nudge wide-only" onClick={() => nudgeTempo(-1)} aria-label="Slower">−</button>
             <input
               aria-label="Tempo in BPM"
@@ -514,12 +517,14 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
             />
             <span className="unit">BPM</span>
             <button className="nudge wide-only" onClick={() => nudgeTempo(1)} aria-label="Faster">+</button>
-          </div>
-          <label className="swing" title="Swing: delays every other sixteenth">
-            <span>Swing</span>
-            <input type="range" min={0} max={1} step={0.01} value={view.swing} onChange={(e) => void setTransport(view.tempo, Number(e.target.value), view.steps)} />
-            <span className="mono">{Math.round(view.swing * 100)}%</span>
-          </label>
+          </Learnable>
+          <Learnable target={SWING} label="Swing">
+            <label className="swing" title="Swing: delays every other sixteenth">
+              <span>Swing</span>
+              <input type="range" min={0} max={1} step={0.01} value={view.swing} onChange={(e) => void setTransport(view.tempo, Number(e.target.value), view.steps)} />
+              <span className="mono">{Math.round(view.swing * 100)}%</span>
+            </label>
+          </Learnable>
         </div>
 
         <div className="grow" />
@@ -652,6 +657,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
         />
       )}
     </div>
+    </MidiLearn>
   );
 }
 

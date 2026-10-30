@@ -1,9 +1,13 @@
 // The selected pad's settings: trim, level, pan, pitch, gate, reverse, mute.
+// Every slider can learn a MIDI knob (src/midi/learn.tsx) for the selected
+// pad, or for this pad only.
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
 import SampleInput from "./SampleInput";
 import { AUDIO_EXTENSIONS, PAD_KEYS, type PadSettings, type PadView } from "./api";
+import { Learnable } from "../midi/learn";
+import { padLearn } from "../midi/api";
 
 interface Props {
   pad: PadView;
@@ -114,10 +118,10 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
           {tab === "shape" && (
             <div role="tabpanel" id="panel-shape" aria-labelledby="tab-shape" className="panel">
               <h3 className="panel-sub">Amp</h3>
-              <Curve label="Attack" value={s.attack} max={2} shown={fmtTime(s.attack)} onChange={(v) => change({ attack: v })} reset={0} />
-              <Curve label="Decay" value={s.decay} max={5} shown={s.decay === 0 ? "off" : fmtTime(s.decay)} onChange={(v) => change({ decay: v })} reset={0} />
-              <Slider label="Sustain" value={s.sustain} min={0} max={1} step={0.01} shown={`${Math.round(s.sustain * 100)}%`} onChange={(v) => change({ sustain: v })} reset={1} />
-              <Curve label="Release" value={s.release} min={0.001} max={5} shown={fmtTime(s.release)} onChange={(v) => change({ release: v })} reset={0.004} />
+              <Curve {...padLearn("attack")} label="Attack" value={s.attack} max={2} shown={fmtTime(s.attack)} onChange={(v) => change({ attack: v })} reset={0} />
+              <Curve {...padLearn("decay")} label="Decay" value={s.decay} max={5} shown={s.decay === 0 ? "off" : fmtTime(s.decay)} onChange={(v) => change({ decay: v })} reset={0} />
+              <Slider {...padLearn("sustain")} label="Sustain" value={s.sustain} min={0} max={1} step={0.01} shown={`${Math.round(s.sustain * 100)}%`} onChange={(v) => change({ sustain: v })} reset={1} />
+              <Curve {...padLearn("release")} label="Release" value={s.release} min={0.001} max={5} shown={fmtTime(s.release)} onChange={(v) => change({ release: v })} reset={0.004} />
               <h3 className="panel-sub">Filter</h3>
               <div className="slider">
                 <span className="lbl">Filter</span>
@@ -131,21 +135,21 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
                 </div>
                 <span />
               </div>
-              <Log label="Cutoff" value={s.cutoff} min={20} max={20000} shown={fmtHz(s.cutoff)} onChange={(v) => change({ cutoff: v })} disabled={s.filter === 0} reset={20000} />
-              <Slider label="Reso" value={s.resonance} min={0} max={1} step={0.01} shown={`${Math.round(s.resonance * 100)}%`} onChange={(v) => change({ resonance: v })} reset={0} />
+              <Log {...padLearn("cutoff")} label="Cutoff" value={s.cutoff} min={20} max={20000} shown={fmtHz(s.cutoff)} onChange={(v) => change({ cutoff: v })} disabled={s.filter === 0} reset={20000} />
+              <Slider {...padLearn("resonance")} label="Reso" value={s.resonance} min={0} max={1} step={0.01} shown={`${Math.round(s.resonance * 100)}%`} onChange={(v) => change({ resonance: v })} reset={0} />
               <div className={`panel${s.filter === 0 ? " dimmed" : ""}`} title={s.filter === 0 ? "Turn the filter on to use its envelope" : undefined}>
                 <h3 className="panel-sub">Filter envelope</h3>
-                <Slider id="fenv-amount" label="Amount" value={s.fenvAmount} min={-8} max={8} step={0.1} shown={fmtOct(s.fenvAmount)} onChange={(v) => change({ fenvAmount: v })} reset={0} />
-                <Curve id="fenv-attack" label="Attack" value={s.fenvAttack} max={2} shown={fmtTime(s.fenvAttack)} onChange={(v) => change({ fenvAttack: v })} reset={0} />
-                <Curve id="fenv-decay" label="Decay" value={s.fenvDecay} max={5} shown={s.fenvDecay === 0 ? "off" : fmtTime(s.fenvDecay)} onChange={(v) => change({ fenvDecay: v })} reset={0.3} />
-                <Slider id="fenv-sustain" label="Sustain" value={s.fenvSustain} min={0} max={1} step={0.01} shown={`${Math.round(s.fenvSustain * 100)}%`} onChange={(v) => change({ fenvSustain: v })} reset={0} />
-                <Curve id="fenv-release" label="Release" value={s.fenvRelease} min={0.001} max={5} shown={fmtTime(s.fenvRelease)} onChange={(v) => change({ fenvRelease: v })} reset={0.1} />
+                <Slider {...padLearn("fenvAmount")} id="fenv-amount" label="Amount" value={s.fenvAmount} min={-8} max={8} step={0.1} shown={fmtOct(s.fenvAmount)} onChange={(v) => change({ fenvAmount: v })} reset={0} />
+                <Curve {...padLearn("fenvAttack")} id="fenv-attack" label="Attack" value={s.fenvAttack} max={2} shown={fmtTime(s.fenvAttack)} onChange={(v) => change({ fenvAttack: v })} reset={0} />
+                <Curve {...padLearn("fenvDecay")} id="fenv-decay" label="Decay" value={s.fenvDecay} max={5} shown={s.fenvDecay === 0 ? "off" : fmtTime(s.fenvDecay)} onChange={(v) => change({ fenvDecay: v })} reset={0.3} />
+                <Slider {...padLearn("fenvSustain")} id="fenv-sustain" label="Sustain" value={s.fenvSustain} min={0} max={1} step={0.01} shown={`${Math.round(s.fenvSustain * 100)}%`} onChange={(v) => change({ fenvSustain: v })} reset={0} />
+                <Curve {...padLearn("fenvRelease")} id="fenv-release" label="Release" value={s.fenvRelease} min={0.001} max={5} shown={fmtTime(s.fenvRelease)} onChange={(v) => change({ fenvRelease: v })} reset={0.1} />
               </div>
               <h3 className="panel-sub">Velocity</h3>
               <div className={s.filter === 0 ? "dimmed" : ""}>
-                <Slider id="vel-cutoff" label="Cutoff" value={s.velCutoff} min={-8} max={8} step={0.1} shown={fmtOct(s.velCutoff)} onChange={(v) => change({ velCutoff: v })} reset={0} />
+                <Slider {...padLearn("velCutoff")} id="vel-cutoff" label="Cutoff" value={s.velCutoff} min={-8} max={8} step={0.1} shown={fmtOct(s.velCutoff)} onChange={(v) => change({ velCutoff: v })} reset={0} />
               </div>
-              <Slider id="vel-time" label="Time" value={s.velTime} min={-1} max={1} step={0.01} shown={fmtPct(s.velTime)} onChange={(v) => change({ velTime: v })} reset={0} />
+              <Slider {...padLearn("velTime")} id="vel-time" label="Time" value={s.velTime} min={-1} max={1} step={0.01} shown={fmtPct(s.velTime)} onChange={(v) => change({ velTime: v })} reset={0} />
               <p className="dim small hint">
                 Decay falls to the sustain level while the sound plays; release is how long it fades when let go (gate pads). The filter envelope moves the cutoff on every hit, up or down by its amount. Velocity Cutoff above zero makes soft hits darker; Time above zero makes their attack and decay shorter, below zero longer. Double-click a label to reset it.
               </p>
@@ -153,11 +157,11 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
           )}
           {tab === "sample" && (
           <div role="tabpanel" id="panel-sample" aria-labelledby="tab-sample" className="panel">
-          <Slider label="Start" value={s.start} min={0} max={1} step={0.001} shown={fmtTime(s.start * pad.seconds)} onChange={(v) => change({ start: v })} />
-          <Slider label="End" value={s.end} min={0} max={1} step={0.001} shown={fmtTime(s.end * pad.seconds)} onChange={(v) => change({ end: v })} />
-          <Slider label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
-          <Slider label="Pan" value={s.pan} min={-1} max={1} step={0.01} shown={fmtPan(s.pan)} onChange={(v) => change({ pan: v })} reset={0} />
-          <Slider label="Pitch" value={s.pitch} min={-24} max={24} step={1} shown={fmtPitch(s.pitch)} onChange={(v) => change({ pitch: v })} reset={0} />
+          <Slider {...padLearn("start")} label="Start" value={s.start} min={0} max={1} step={0.001} shown={fmtTime(s.start * pad.seconds)} onChange={(v) => change({ start: v })} />
+          <Slider {...padLearn("end")} label="End" value={s.end} min={0} max={1} step={0.001} shown={fmtTime(s.end * pad.seconds)} onChange={(v) => change({ end: v })} />
+          <Slider {...padLearn("gainDb")} label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
+          <Slider {...padLearn("pan")} label="Pan" value={s.pan} min={-1} max={1} step={0.01} shown={fmtPan(s.pan)} onChange={(v) => change({ pan: v })} reset={0} />
+          <Slider {...padLearn("pitch")} label="Pitch" value={s.pitch} min={-24} max={24} step={1} shown={fmtPitch(s.pitch)} onChange={(v) => change({ pitch: v })} reset={0} />
           <div className="slider">
             <label htmlFor="s-choke">Choke</label>
             <select id="s-choke" className="choke" value={s.choke} onChange={(e) => change({ choke: Number(e.target.value) })} title="Pads in the same group cut each other off, like an open and a closed hat">
@@ -260,12 +264,15 @@ interface SliderProps {
   onChange: (v: number) => void;
   /** Double-click the label to go back to this. */
   reset?: number;
+  /** The MIDI learn id for it (src/midi/api.ts), and its name there. */
+  target?: string;
+  learnAs?: string;
 }
 
-function Slider({ id: given, label, value, min, max, step, shown, onChange, reset }: SliderProps) {
+function Slider({ id: given, label, value, min, max, step, shown, onChange, reset, target, learnAs }: SliderProps) {
   const id = `s-${given ?? label.toLowerCase()}`;
-  return (
-    <div className="slider">
+  const row = (
+    <>
       <label htmlFor={id} onDoubleClick={() => reset !== undefined && onChange(reset)} title={reset !== undefined ? "Double-click to reset" : undefined}>
         {label}
       </label>
@@ -273,24 +280,33 @@ function Slider({ id: given, label, value, min, max, step, shown, onChange, rese
       <output htmlFor={id} className="mono">
         {shown}
       </output>
-    </div>
+    </>
+  );
+  return target ? (
+    <Learnable target={target} label={learnAs ?? label} className="slider">
+      {row}
+    </Learnable>
+  ) : (
+    <div className="slider">{row}</div>
   );
 }
 
+type Learn = { target?: string; learnAs?: string };
+
 /** A time slider with a squared scale, so short times get most of the travel. */
-function Curve({ id, label, value, min = 0, max, shown, onChange, reset }: { id?: string; label: string; value: number; min?: number; max: number; shown: string; onChange: (v: number) => void; reset?: number }) {
+function Curve({ id, label, value, min = 0, max, shown, onChange, reset, target, learnAs }: { id?: string; label: string; value: number; min?: number; max: number; shown: string; onChange: (v: number) => void; reset?: number } & Learn) {
   const pos = Math.sqrt(Math.max(0, (value - min) / (max - min)));
   return (
-    <Slider id={id} label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min + p * p * (max - min))} reset={reset === undefined ? undefined : Math.sqrt(Math.max(0, (reset - min) / (max - min)))} />
+    <Slider target={target} learnAs={learnAs} id={id} label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min + p * p * (max - min))} reset={reset === undefined ? undefined : Math.sqrt(Math.max(0, (reset - min) / (max - min)))} />
   );
 }
 
 /** A frequency slider on a log scale. */
-function Log({ label, value, min, max, shown, onChange, disabled, reset }: { label: string; value: number; min: number; max: number; shown: string; onChange: (v: number) => void; disabled?: boolean; reset?: number }) {
+function Log({ label, value, min, max, shown, onChange, disabled, reset, target, learnAs }: { label: string; value: number; min: number; max: number; shown: string; onChange: (v: number) => void; disabled?: boolean; reset?: number } & Learn) {
   const pos = Math.log(value / min) / Math.log(max / min);
   return (
     <div className={disabled ? "dimmed" : ""}>
-      <Slider label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min * Math.pow(max / min, p))} reset={reset === undefined ? undefined : Math.log(reset / min) / Math.log(max / min)} />
+      <Slider target={target} learnAs={learnAs} label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min * Math.pow(max / min, p))} reset={reset === undefined ? undefined : Math.log(reset / min) / Math.log(max / min)} />
     </div>
   );
 }
