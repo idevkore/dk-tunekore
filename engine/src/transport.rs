@@ -10,6 +10,12 @@
 //! Positions are in beats (quarter notes), as VST3 and CLAP count them. A
 //! tempo change takes effect at the next block, from the beat the clock has
 //! reached, so nothing jumps.
+//!
+//! Every conversion between beats and frames goes through [`TempoMap`]. It
+//! holds one tempo and time signature for now; the Timeline's tempo lane
+//! will make it a list of changes by beat without changing this file's
+//! API. The transport already asks it for the next change and splits a
+//! block there, so each [`ProcessContext`] keeps one tempo.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -140,6 +146,74 @@ fn beats_per_frame(tempo: f64, rate: u32) -> f64 {
     tempo / 60.0 / f64::from(rate.max(1))
 }
 
+/// Tempo and time signature along the song, and the one place beats turn
+/// into frames and back. Frames count from beat 0 at `sample_rate`.
+///
+/// Today it is one tempo and one signature for the whole song. A tempo map
+/// (a list of tempo and meter changes by beat) replaces the inside later;
+/// the methods stay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TempoMap {
+    tempo: f64,
+    signature: TimeSignature,
+    sample_rate: u32,
+}
+
+impl TempoMap {
+    /// One tempo (BPM) and signature for the whole song.
+    pub fn constant(tempo: f64, signature: TimeSignature, sample_rate: u32) -> Self {
+        Self { tempo: tempo.clamp(MIN_TEMPO, MAX_TEMPO), signature, sample_rate: sample_rate.max(1) }
+    }
+
+    pub fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+
+    /// BPM at `beat`.
+    pub fn tempo_at(&self, beat: f64) -> f64 {
+        let _ = beat;
+        self.tempo
+    }
+
+    pub fn signature_at(&self, beat: f64) -> TimeSignature {
+        let _ = beat;
+        self.signature
+    }
+
+    pub fn beats_per_frame_at(&self, beat: f64) -> f64 {
+        beats_per_frame(self.tempo_at(beat), self.sample_rate)
+    }
+
+    /// The first tempo or meter change after `beat`, if any. The transport
+    /// splits a block there.
+    pub fn next_change(&self, beat: f64) -> Option<f64> {
+        let _ = beat;
+        None
+    }
+
+    /// The beat `frames` frames after `beat`.
+    pub fn advance(&self, beat: f64, frames: f64) -> f64 {
+        beat + frames * self.beats_per_frame_at(beat)
+    }
+
+    /// Frames from `from` until the clock reaches `to`.
+    pub fn frames_between(&self, from: f64, to: f64) -> f64 {
+        (to - from) / self.beats_per_frame_at(from)
+    }
+
+    /// The song position of `beat`, in frames from beat 0.
+    pub fn frame_of_beat(&self, beat: f64) -> f64 {
+        self.frames_between(0.0, beat)
+    }
+
+    /// The bar `beat` is in, from 0, and the beat that bar starts on.
+    pub fn bar_at(&self, beat: f64) -> (i64, f64) {
+        let bar_beats = self.signature_at(beat).bar_beats();
+        let bar = (beat / bar_beats).floor();
+        (bar as i64, bar * bar_beats)
+    }
+}
+
 fn store_f64(a: &AtomicU64, v: f64) {
     a.store(v.to_bits(), Ordering::Relaxed);
 }
@@ -217,6 +291,11 @@ impl TransportShared {
 
     pub fn time_signature(&self) -> TimeSignature {
         TimeSignature::unpack(self.signature.load(Ordering::Relaxed))
+    }
+
+    /// Tempo and meter along the song, for frames at `sample_rate`.
+    pub fn tempo_map(&self, sample_rate: u32) -> TempoMap {
+        TempoMap::constant(self.tempo(), self.time_signature(), sample_rate)
     }
 
     /// Plays from the start position, or stops. Playing while already
@@ -322,13 +401,13 @@ pub struct Transport {
     rate: u32,
     playing: bool,
     starts: u32,
-    /// The position is `anchor_beat + (frames since the anchor) * bpf`, worked
-    /// out by multiplying rather than adding block after block, so it does
-    /// not drift. Re-anchored at every tempo change and jump.
+    /// The position is the tempo map's beat `since` frames after
+    /// `anchor_beat`, worked out in one step rather than adding block after
+    /// block, so it does not drift. Re-anchored at every tempo change and jump.
     anchor_beat: f64,
     anchor_frame: u64,
     since: u64,
-    bpf: f64,
+    map: TempoMap,
     continuous: u64,
     range: LoopRange,
 }
@@ -342,7 +421,7 @@ impl Transport {
             anchor_beat: 0.0,
             anchor_frame: 0,
             since: 0,
-            bpf: beats_per_frame(120.0, sample_rate),
+            map: TempoMap::constant(120.0, TimeSignature::default(), sample_rate),
             continuous: 0,
             range: LoopRange::default(),
         }
@@ -353,7 +432,7 @@ impl Transport {
     }
 
     fn beat(&self) -> f64 {
-        self.anchor_beat + self.since as f64 * self.bpf
+        self.map.advance(self.anchor_beat, self.since as f64)
     }
 
     fn frame(&self) -> u64 {
@@ -362,22 +441,22 @@ impl Transport {
 
     fn jump_to(&mut self, beat: f64) {
         self.anchor_beat = beat;
-        self.anchor_frame = (beat / self.bpf).round() as u64;
+        self.anchor_frame = self.map.frame_of_beat(beat).round() as u64;
         self.since = 0;
     }
 
     /// Runs one block of `frames` frames: reads the shared settings, moves the
     /// position, and calls `f(context, offset)` for each piece of the block in
     /// order (`offset` is the piece's first frame in the block). The block
-    /// splits only where the loop wraps. Real-time safe.
+    /// splits where the loop wraps and where the tempo map changes, so each
+    /// piece has one tempo. Real-time safe.
     pub fn run(&mut self, shared: &TransportShared, frames: usize, mut f: impl FnMut(&ProcessContext, usize)) {
-        let tempo = shared.tempo();
-        let bpf = beats_per_frame(tempo, self.rate);
-        if bpf != self.bpf {
+        let map = shared.tempo_map(self.rate);
+        if map != self.map {
             // A new tempo: carry on from the beat reached, at the new rate.
             let beat = self.beat();
             let frame = self.frame();
-            self.bpf = bpf;
+            self.map = map;
             self.anchor_beat = beat;
             self.anchor_frame = frame;
             self.since = 0;
@@ -385,9 +464,8 @@ impl Transport {
         if let Some((_, range)) = shared.read_loop() {
             self.range = range;
         }
-        let sig = shared.time_signature();
         // A loop shorter than a frame could never be played: treat it as off.
-        let looping = shared.looping() && (self.range.end - self.range.start) / bpf >= 1.0;
+        let looping = shared.looping() && map.frames_between(self.range.start, self.range.end) >= 1.0;
 
         let want = shared.is_playing();
         let starts = shared.starts.load(Ordering::Acquire);
@@ -409,22 +487,21 @@ impl Transport {
 
         let context = |t: &Self, frames: usize, started: bool, jumped: bool| {
             let beat = t.beat();
-            let bar_beats = sig.bar_beats();
-            let bar = (beat / bar_beats).floor();
+            let (bar, bar_start) = t.map.bar_at(beat);
             ProcessContext {
                 sample_rate: t.rate,
                 frames,
                 playing: t.playing,
                 started,
                 jumped,
-                tempo,
-                beats_per_frame: t.bpf,
+                tempo: t.map.tempo_at(beat),
+                beats_per_frame: t.map.beats_per_frame_at(beat),
                 beat,
                 frame: t.frame(),
                 continuous_frame: t.continuous,
-                time_signature: sig,
-                bar: bar as i64,
-                bar_start: bar * bar_beats,
+                time_signature: t.map.signature_at(beat),
+                bar,
+                bar_start,
                 looping,
                 loop_range: t.range,
             }
@@ -440,13 +517,22 @@ impl Transport {
                 let mut len = frames - offset;
                 let mut wrap = false;
                 let beat = self.beat();
+                let floor = if wrapped { 1.0 } else { 0.0 };
+                // The first frame at or after a boundary belongs to what comes after it.
+                let frames_to = |at: f64| (map.frames_between(beat, at) - EDGE_FRAMES).ceil().max(floor);
                 if looping && beat < self.range.end {
-                    // The first frame at or after the loop's end starts the loop again.
-                    let floor = if wrapped { 1.0 } else { 0.0 };
-                    let to_end = ((self.range.end - beat) / bpf - EDGE_FRAMES).ceil().max(floor);
+                    let to_end = frames_to(self.range.end);
                     if to_end < len as f64 {
                         len = to_end as usize;
                         wrap = true;
+                    }
+                }
+                if let Some(change) = map.next_change(beat) {
+                    let to_change = frames_to(change).max(1.0);
+                    if to_change < len as f64 {
+                        // A new tempo or meter: end the piece, re-anchor, carry on.
+                        len = to_change as usize;
+                        wrap = false;
                     }
                 }
                 if len > 0 {
@@ -640,5 +726,18 @@ mod tests {
         assert_eq!(c.frame_of(1.0 + 100.0 * c.beats_per_frame), Some(100));
         assert_eq!(c.frame_of(1.0 + 100.5 * c.beats_per_frame), Some(101));
         assert_eq!(c.frame_of(2.0), None);
+    }
+
+    #[test]
+    fn the_tempo_map_turns_beats_into_frames_and_back() {
+        let s = TransportShared::default();
+        s.set_tempo(90.0);
+        s.set_time_signature(3, 4);
+        let m = s.tempo_map(RATE);
+        assert_eq!(m.frame_of_beat(3.0), 96_000.0, "three beats at 90 BPM");
+        assert!((m.advance(1.0, 32_000.0) - 2.0).abs() < 1e-12);
+        assert_eq!(m.frames_between(2.0, 2.5), 16_000.0);
+        assert_eq!(m.bar_at(7.0), (2, 6.0), "3/4 bars");
+        assert_eq!(m.next_change(0.0), None, "one tempo for the whole song, for now");
     }
 }

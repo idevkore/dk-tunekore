@@ -46,7 +46,7 @@ pub use graph::Mixer;
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 pub use track::{TrackId, TrackInfo, TrackMeter, TrackMix};
-pub use transport::{LoopRange, ProcessContext, TimeSignature, Transport, TransportShared};
+pub use transport::{LoopRange, ProcessContext, TempoMap, TimeSignature, Transport, TransportShared};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::Serialize;

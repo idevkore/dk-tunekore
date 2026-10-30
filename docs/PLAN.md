@@ -167,7 +167,13 @@ rather than edit the same ones.
   it starts, the time signature, playing, started, jumped, and the loop. A
   block is split where the loop wraps, so time runs straight inside one
   context. A tempo change takes effect at the next block, from the beat
-  reached.
+  reached. Every beat-to-frame conversion goes through `TempoMap`, one tempo
+  and signature for now. The Timeline's tempo lane (every competitor has
+  tempo and meter changes along the song) makes it a list of changes by beat
+  without changing the transport's API: the transport already splits a
+  block at the map's next change, so each context keeps one tempo. Recording
+  (#38, #40) uses the loop range already there; its count-in belongs here
+  too, as a pre-roll before the start position.
 - **Tracks and the graph** (`engine/src/track.rs`, `engine/src/graph.rs`).
   A track has an id (saved in projects; the Sampler's is 1), a name, a
   source slot, a chain of devices after it, volume, pan, mute, solo and a
