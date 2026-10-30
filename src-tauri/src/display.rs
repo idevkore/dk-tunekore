@@ -69,9 +69,14 @@ pub fn apply<R: Runtime>(window: &tauri::WebviewWindow<R>) {
     }
 }
 
-/// The default menu, with Zoom In, Zoom Out and Actual Size added to View.
+/// The default menu, with the main window's views (Sampler ⌘1, Timeline ⌘2;
+/// ⌘3 is kept for the Clip Grid) at the top of View, and Zoom In, Zoom Out
+/// and Actual Size at its end.
 pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let menu = Menu::default(app)?;
+    let sampler = MenuItem::with_id(app, "view-sampler", "Sampler", true, Some("CmdOrCtrl+1"))?;
+    let timeline = MenuItem::with_id(app, "view-timeline", "Timeline", true, Some("CmdOrCtrl+2"))?;
+    let views_sep = PredefinedMenuItem::separator(app)?;
     let zoom_in = MenuItem::with_id(app, "zoom-in", "Zoom In", true, Some("CmdOrCtrl+="))?;
     let zoom_out = MenuItem::with_id(app, "zoom-out", "Zoom Out", true, Some("CmdOrCtrl+-"))?;
     let actual = MenuItem::with_id(app, "zoom-reset", "Actual Size", true, Some("CmdOrCtrl+0"))?;
@@ -82,14 +87,26 @@ pub fn menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .filter_map(|i| i.as_submenu().cloned())
         .find(|s| s.text().map(|t| t == "View").unwrap_or(false));
     match view {
-        Some(v) => v.append_items(&[&sep, &zoom_in, &zoom_out, &actual])?,
-        None => menu.append(&Submenu::with_items(app, "View", true, &[&zoom_in, &zoom_out, &actual])?)?,
+        Some(v) => {
+            v.insert_items(&[&sampler, &timeline, &views_sep], 0)?;
+            v.append_items(&[&sep, &zoom_in, &zoom_out, &actual])?;
+        }
+        None => menu.append(&Submenu::with_items(app, "View", true, &[&sampler, &timeline, &views_sep, &zoom_in, &zoom_out, &actual])?)?,
     }
     Ok(menu)
 }
 
-/// Handles the View menu's zoom items.
+/// Handles the View menu's items.
 pub fn on_menu<R: Runtime>(app: &AppHandle<R>, id: &str) {
+    if let Some(view) = id.strip_prefix("view-") {
+        // From any window: bring the main window up on that view.
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        let _ = app.emit_to("main", "view:show", view);
+        return;
+    }
     let z = *app.state::<Zoom>().0.lock().unwrap();
     match id {
         "zoom-in" => set(app, step(z, true)),

@@ -228,9 +228,9 @@ rather than edit the same ones.
   its `commands()` and its `setup`.
 - **The main window** (`src/App.tsx`) is a shell with the Sampler / Timeline
   switch and the window's status line. ⌘1 is the Sampler and ⌘2 the
-  Timeline; Tab flips between them only when it can't be moving focus
-  (nothing focused, or the switch the last flip focused). The key is one
-  constant, `SWITCH_KEY`, as the final choice is still open. The Sampler is
+  Timeline (Nate's decision, 2026-10-29), from the keyboard, the View menu
+  and the switch; ⌘3 is kept for the Clip Grid. Tab also flips between them,
+  but only while nothing has focus. The Sampler is
   `src/sampler/SamplerView.tsx` and stays mounted behind the Timeline;
   `src/timeline/Timeline.tsx` is the Timeline's.
 

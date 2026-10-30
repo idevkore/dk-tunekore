@@ -3,19 +3,20 @@
 // stays mounted while the Timeline shows, so its state and the prompts it
 // owns (unsaved changes on quit, crash recovery, the window title) carry on.
 //
-// Switching: ⌘1 is the Sampler and ⌘2 the Timeline (Ctrl elsewhere). The
-// SWITCH_KEY (Tab, as in other DAWs; not final) flips between them when it
-// can't be moving focus: nothing has focus, or the switch itself has it
-// because the last flip put it there. Anywhere else Tab moves focus as usual.
-import { useCallback, useEffect, useRef, useState } from "react";
+// Switching: ⌘1 is the Sampler and ⌘2 the Timeline (Ctrl elsewhere), from the
+// keyboard, the View menu or the switch buttons; ⌘3 is kept for the Clip
+// Grid. Tab also flips between them, but only while nothing has focus: on
+// any control it moves focus as usual.
+import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import SamplerView from "./sampler/SamplerView";
 import Timeline from "./timeline/Timeline";
 import type { Message } from "./StatusBar";
 
 type MainView = "sampler" | "timeline";
 
-/** The key that flips between the views. */
-const SWITCH_KEY = "Tab";
+/** The key that flips between the views while nothing has focus. */
+const FLIP_KEY = "Tab";
 /** How long a message that isn't an error stays up. */
 const MESSAGE_MS = 4000;
 
@@ -31,8 +32,7 @@ const mod = isMac ? "⌘" : "Ctrl+";
 export default function App() {
   const [view, setView] = useState<MainView>("sampler");
   const [message, setMessage] = useState<Message | null>(null);
-  // The switch button the last keyboard flip focused; Tab flips again from it.
-  const placed = useRef<HTMLElement | null>(null);
+  // Bumped by ⌘1, ⌘2 and the View menu: focus moves to the shown view's switch.
   const [focusSwitch, setFocusSwitch] = useState(0);
 
   const show = useCallback((v: MainView, byKey: boolean) => {
@@ -51,32 +51,38 @@ export default function App() {
         }
         return;
       }
-      if (e.key !== SWITCH_KEY || e.shiftKey || e.altKey || e.repeat) return;
+      if (e.key !== FLIP_KEY || e.shiftKey || e.altKey || e.repeat) return;
       const at = document.activeElement;
-      const free = !at || at === document.body || at === document.documentElement || at === placed.current;
-      if (!free) return;
+      if (at && at !== document.body && at !== document.documentElement) return;
+      // Nothing had focus, so nothing is left in the hidden view: focus stays free, and Tab can flip back.
       e.preventDefault();
       setView((v) => (v === "sampler" ? "timeline" : "sampler"));
-      setFocusSwitch((n) => n + 1);
-    };
-    // Focus moving anywhere else ends the run of flips.
-    const onFocus = (e: FocusEvent) => {
-      if (e.target !== placed.current) placed.current = null;
     };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("focusin", onFocus);
+    // The View menu's Sampler and Timeline items.
+    let off: (() => void) | undefined;
+    let gone = false;
+    try {
+      listen<string>("view:show", (e) => {
+        const v = VIEWS.find((x) => x.id === e.payload);
+        if (v) show(v.id, true);
+      })
+        .then((u) => (gone ? u() : (off = u)))
+        .catch(() => {});
+    } catch {
+      // not in Tauri (the dev mock): the keys still work
+    }
     return () => {
+      gone = true;
+      off?.();
       window.removeEventListener("keydown", onKey);
-      window.removeEventListener("focusin", onFocus);
     };
   }, [show]);
 
-  // After a keyboard flip, focus the shown view's switch, so focus isn't left in the hidden one.
+  // After ⌘1, ⌘2 or the menu, focus the shown view's switch, so focus isn't left in the hidden view.
   useEffect(() => {
     if (focusSwitch === 0) return;
-    const b = document.querySelector<HTMLElement>(".app:not([hidden]) .view-switch button[aria-pressed=true]");
-    placed.current = b;
-    b?.focus({ preventScroll: true });
+    document.querySelector<HTMLElement>(".app:not([hidden]) .view-switch button[aria-pressed=true]")?.focus({ preventScroll: true });
   }, [focusSwitch, view]);
 
   // A message that isn't an error goes away by itself.
