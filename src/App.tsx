@@ -1,47 +1,96 @@
 // The main window: a Sampler / Timeline switch over the two views, both on
-// the engine's one transport. Tab toggles between them, except while typing
-// in a field or with a dialog open. The Sampler stays mounted while the
-// Timeline shows, so its state and the prompts it owns (unsaved changes on
-// quit, crash recovery, the window title) carry on.
-import { useEffect, useState } from "react";
+// the engine's one transport, and the window's status line. The Sampler
+// stays mounted while the Timeline shows, so its state and the prompts it
+// owns (unsaved changes on quit, crash recovery, the window title) carry on.
+//
+// Switching: ⌘1 is the Sampler and ⌘2 the Timeline (Ctrl elsewhere). The
+// SWITCH_KEY (Tab, as in other DAWs; not final) flips between them when it
+// can't be moving focus: nothing has focus, or the switch itself has it
+// because the last flip put it there. Anywhere else Tab moves focus as usual.
+import { useCallback, useEffect, useRef, useState } from "react";
 import SamplerView from "./sampler/SamplerView";
 import Timeline from "./timeline/Timeline";
+import type { Message } from "./StatusBar";
 
 type MainView = "sampler" | "timeline";
 
-const VIEWS: { id: MainView; label: string; icon: string }[] = [
+/** The key that flips between the views. */
+const SWITCH_KEY = "Tab";
+/** How long a message that isn't an error stays up. */
+const MESSAGE_MS = 4000;
+
+const VIEWS: { id: MainView; label: string; key: string; icon: string }[] = [
   // A grid of pads, and lanes of clips.
-  { id: "sampler", label: "Sampler", icon: "M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z" },
-  { id: "timeline", label: "Timeline", icon: "M2 4h7M11 4h3M2 8h3M7 8h7M2 12h9M13 12h1" },
+  { id: "sampler", label: "Sampler", key: "1", icon: "M2.5 2.5h4.5v4.5H2.5zM9 2.5h4.5v4.5H9zM2.5 9h4.5v4.5H2.5zM9 9h4.5v4.5H9z" },
+  { id: "timeline", label: "Timeline", key: "2", icon: "M2 4h7M11 4h3M2 8h3M7 8h7M2 12h9M13 12h1" },
 ];
 
-/** Whether a key press goes to a field that takes text. */
-function typing(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el) return false;
-  if (el.tagName === "TEXTAREA" || el.tagName === "SELECT" || el.isContentEditable) return true;
-  return el.tagName === "INPUT" && !["range", "checkbox", "radio", "button"].includes((el as HTMLInputElement).type);
-}
+const isMac = navigator.platform.toLowerCase().includes("mac");
+const mod = isMac ? "⌘" : "Ctrl+";
 
 export default function App() {
   const [view, setView] = useState<MainView>("sampler");
+  const [message, setMessage] = useState<Message | null>(null);
+  // The switch button the last keyboard flip focused; Tab flips again from it.
+  const placed = useRef<HTMLElement | null>(null);
+  const [focusSwitch, setFocusSwitch] = useState(0);
+
+  const show = useCallback((v: MainView, byKey: boolean) => {
+    setView(v);
+    if (byKey) setFocusSwitch((n) => n + 1);
+  }, []);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== "Tab" || e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (document.querySelector("dialog[open]") || typing(e.target)) return;
+      if (document.querySelector("dialog[open]")) return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+        const v = VIEWS.find((x) => x.key === e.key);
+        if (v) {
+          e.preventDefault();
+          show(v.id, true);
+        }
+        return;
+      }
+      if (e.key !== SWITCH_KEY || e.shiftKey || e.altKey || e.repeat) return;
+      const at = document.activeElement;
+      const free = !at || at === document.body || at === document.documentElement || at === placed.current;
+      if (!free) return;
       e.preventDefault();
       setView((v) => (v === "sampler" ? "timeline" : "sampler"));
+      setFocusSwitch((n) => n + 1);
+    };
+    // Focus moving anywhere else ends the run of flips.
+    const onFocus = (e: FocusEvent) => {
+      if (e.target !== placed.current) placed.current = null;
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+    window.addEventListener("focusin", onFocus);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("focusin", onFocus);
+    };
+  }, [show]);
 
-  const switcher = <ViewSwitch view={view} onView={setView} />;
+  // After a keyboard flip, focus the shown view's switch, so focus isn't left in the hidden one.
+  useEffect(() => {
+    if (focusSwitch === 0) return;
+    const b = document.querySelector<HTMLElement>(".app:not([hidden]) .view-switch button[aria-pressed=true]");
+    placed.current = b;
+    b?.focus({ preventScroll: true });
+  }, [focusSwitch, view]);
+
+  // A message that isn't an error goes away by itself.
+  useEffect(() => {
+    if (!message || message.error) return;
+    const t = setTimeout(() => setMessage(null), MESSAGE_MS);
+    return () => clearTimeout(t);
+  }, [message]);
+
+  const switcher = <ViewSwitch view={view} onView={(v) => show(v, false)} />;
   return (
     <>
-      <SamplerView active={view === "sampler"} switcher={switcher} />
-      {view === "timeline" && <Timeline switcher={switcher} />}
+      <SamplerView active={view === "sampler"} switcher={switcher} message={message} onMessage={setMessage} />
+      {view === "timeline" && <Timeline switcher={switcher} message={message} onMessage={setMessage} />}
     </>
   );
 }
@@ -57,7 +106,8 @@ function ViewSwitch({ view, onView }: { view: MainView; onView: (v: MainView) =>
           aria-pressed={view === v.id}
           onClick={() => onView(v.id)}
           aria-label={v.label}
-          title={`${v.label} (Tab switches views)`}
+          aria-keyshortcuts={isMac ? `Meta+${v.key}` : `Control+${v.key}`}
+          title={`${v.label} (${mod}${v.key})`}
         >
           <svg className="vs-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
             <path d={v.icon} fill={v.id === "sampler" ? "currentColor" : "none"} stroke="currentColor" strokeWidth={v.id === "sampler" ? 0 : 1.6} strokeLinecap="round" />

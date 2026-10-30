@@ -1,10 +1,20 @@
 // The Timeline view: tracks and clips on the transport's beat grid. Until
-// idevkore/dk-tunekore#36 builds it, this is a placeholder with the view switch.
+// idevkore/dk-tunekore#36 builds it, this is a placeholder with the view
+// switch and the window's status line.
 import type { ReactNode } from "react";
 import logo from "../../brand/tunekore-logo-color.svg";
 import mark from "../../brand/tunekore-mark.svg";
+import StatusBar, { type Message } from "../StatusBar";
 
-export default function Timeline({ switcher }: { switcher: ReactNode }) {
+const mod = navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl+";
+
+type Props = {
+  switcher: ReactNode;
+  message: Message | null;
+  onMessage: (m: Message | null) => void;
+};
+
+export default function Timeline({ switcher, message, onMessage }: Props) {
   return (
     <div className="app timeline">
       <header className="bar">
@@ -16,9 +26,12 @@ export default function Timeline({ switcher }: { switcher: ReactNode }) {
         <h1>Timeline</h1>
         <p>The Timeline arrives in #36: tracks, audio and MIDI clips and recording, on the same beat clock as the Sampler.</p>
         <p className="dim">
-          <kbd>Tab</kbd> goes back to the Sampler.
+          <kbd>{mod}1</kbd> goes back to the Sampler.
         </p>
       </main>
+      <StatusBar message={message} onDismiss={() => onMessage(null)}>
+        <kbd>Space</kbd> play · <kbd>{mod}1</kbd> Sampler · <kbd>{mod}S</kbd> save
+      </StatusBar>
     </div>
   );
 }

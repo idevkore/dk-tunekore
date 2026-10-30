@@ -20,6 +20,7 @@ import Steps from "./Steps";
 import AudioDialog from "./AudioDialog";
 import MidiDot from "./MidiDot";
 import ExportDialog from "./ExportDialog";
+import StatusBar, { type Message } from "../StatusBar";
 
 type Drag =
   | { kind: "sample"; item: LibraryItem; x0: number; y0: number; x: number; y: number; moving: boolean }
@@ -42,13 +43,20 @@ function padAt(x: number, y: number): number | null {
 
 const isAudio = (p: string) => api.AUDIO_EXTENSIONS.includes(p.split(".").pop()?.toLowerCase() ?? "");
 
-export default function SamplerView({ active, switcher }: { active: boolean; switcher: ReactNode }) {
+type Props = {
+  active: boolean;
+  switcher: ReactNode;
+  /** The window's message line, shared with the other view. */
+  message: Message | null;
+  onMessage: (m: Message | null) => void;
+};
+
+export default function SamplerView({ active, switcher, message, onMessage: setMessage }: Props) {
   const [view, setView] = useState<View | null>(null);
   const [tick, setTick] = useState<Tick>({ playing: false, step: null, played: [], chainPosition: null, playingPattern: null });
   const [selected, setSelected] = useState(0);
   const [level, setLevel] = useState(0);
   const [limiting, setLimiting] = useState(false);
-  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   const [drag, setDrag] = useState<Drag | null>(null);
   const [dropPad, setDropPad] = useState<number | null>(null);
   const [libraryFolder, setLibraryFolder] = useState<string | null>(null);
@@ -63,7 +71,7 @@ export default function SamplerView({ active, switcher }: { active: boolean; swi
   activeRef.current = active;
   const libraryRoot = useRef<string | null>(null);
 
-  const say = useCallback((text: string, error = false) => setMessage({ text, error }), []);
+  const say = useCallback((text: string, error = false) => setMessage({ text, error }), [setMessage]);
   const fail = useCallback((e: unknown) => say(String(e), true), [say]);
   const take = useCallback((v: View) => setView(v), []);
 
@@ -73,7 +81,8 @@ export default function SamplerView({ active, switcher }: { active: boolean; swi
     const offs = [
       subscribe(api.onState(take)),
       subscribe(api.onTick(setTick)),
-      subscribe(onMeter((peak) => setLevel((prev) => Math.max(peak, prev * 0.8)))),
+      // Hidden behind the Timeline, the meter needn't redraw 30 times a second.
+      subscribe(onMeter((peak) => activeRef.current && setLevel((prev) => Math.max(peak, prev * 0.8)))),
       subscribe(onLimiter(() => setLimiting(true))),
     ];
     return () => offs.forEach((off) => off());
@@ -144,11 +153,6 @@ export default function SamplerView({ active, switcher }: { active: boolean; swi
     }
   }, [view?.projectName, view?.dirty]);
 
-  useEffect(() => {
-    if (!message || message.error) return;
-    const t = setTimeout(() => setMessage(null), 4000);
-    return () => clearTimeout(t);
-  }, [message]);
 
   const playing = tick.playing;
 
@@ -590,19 +594,9 @@ export default function SamplerView({ active, switcher }: { active: boolean; swi
         </div>
       </main>
 
-      <footer className="status" aria-live="polite">
-        {message ? (
-          <span className={`msg${message.error ? " error" : ""}`}>
-            {message.text}
-            {message.error && <button className="link" onClick={() => setMessage(null)}>Dismiss</button>}
-          </span>
-        ) : (
-          <span className="hints">
-            <kbd>Space</kbd> play · <kbd>1</kbd>–<kbd>V</kbd> pads · <kbd>↑</kbd><kbd>↓</kbd> browse · <kbd>Enter</kbd> load on pad {selected + 1} · <kbd>/</kbd> search · <kbd>Tab</kbd> Timeline
-          </span>
-        )}
-        <span className="ver mono" title="tuneKore version">v{__APP_VERSION__}</span>
-      </footer>
+      <StatusBar message={message} onDismiss={() => setMessage(null)}>
+        <kbd>Space</kbd> play · <kbd>1</kbd>–<kbd>V</kbd> pads · <kbd>↑</kbd><kbd>↓</kbd> browse · <kbd>Enter</kbd> load on pad {selected + 1} · <kbd>/</kbd> search · <kbd>{mod}2</kbd> Timeline
+      </StatusBar>
 
       {drag?.moving && (
         <div className="ghost" style={{ left: drag.x + 12, top: drag.y + 8 }} aria-hidden="true">
