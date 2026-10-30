@@ -573,6 +573,66 @@ pub fn publish_now(app: &AppHandle) -> View {
     publish(app, &doc)
 }
 
+// ---- What a MIDI knob can move (src-tauri/src/midi/targets.rs) ----
+
+/// The values a controller can move: every pad's settings, the tempo and the swing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Controls {
+    pub pads: [PadSettings; PADS],
+    pub tempo: f32,
+    pub swing: f32,
+}
+
+impl Controls {
+    fn of(doc: &Doc) -> Self {
+        Self { pads: std::array::from_fn(|i| doc.pads[i].settings), tempo: doc.tempo, swing: doc.swing }
+    }
+}
+
+/// The controls as they are now.
+pub fn controls(app: &AppHandle) -> Controls {
+    Controls::of(&state(app).doc.lock().unwrap())
+}
+
+/// Changes the controls as an undoable edit of kind `key`: a run of edits
+/// with one key undoes as one step, so a knob's gesture is one. Doesn't
+/// publish (the caller does, at its own pace, with [`publish_now`]).
+/// Returns whether anything changed.
+pub fn set_controls(app: &AppHandle, key: &str, f: impl FnOnce(&mut Controls)) -> Result<bool, String> {
+    let s = state(app);
+    let mut doc = s.doc.lock().unwrap();
+    Ok(change_controls(&s, &mut doc, key, f))
+}
+
+fn change_controls(s: &SamplerState, doc: &mut Doc, key: &str, f: impl FnOnce(&mut Controls)) -> bool {
+    let was = Controls::of(doc);
+    let mut c = was.clone();
+    f(&mut c);
+    c.tempo = c.tempo.clamp(40.0, 300.0);
+    c.swing = c.swing.clamp(0.0, 1.0);
+    if c == was {
+        return false;
+    }
+    let before = doc.snapshot();
+    for (pad, (now, then)) in c.pads.iter().zip(&was.pads).enumerate() {
+        if now != then {
+            doc.pads[pad].settings = *now;
+            s.handle.set_pad(pad, &now.params());
+        }
+    }
+    if c.tempo != was.tempo {
+        doc.tempo = c.tempo;
+        s.handle.set_tempo(doc.tempo);
+    }
+    if c.swing != was.swing {
+        doc.swing = c.swing;
+        s.handle.set_swing(doc.swing);
+    }
+    doc.checkpoint(key, before);
+    s.note_revision(doc);
+    true
+}
+
 /// The first pad with nothing on it.
 pub fn first_free_pad(app: &AppHandle) -> Option<usize> {
     let s = state(app);
@@ -1723,6 +1783,32 @@ mod tests {
         doc.swing = 0.5;
         doc.checkpoint("swing", before);
         assert!(doc.history.redo.is_empty(), "a new edit drops the redo steps");
+    }
+
+    #[test]
+    fn a_knob_gesture_on_the_controls_undoes_as_one_step() {
+        let s = SamplerState::new(tunekore_engine::Engine::new().sampler());
+        let mut doc = Doc::default();
+        // A knob sweeping pad 3's cutoff and the tempo: one key for the gesture.
+        for i in 1..=20 {
+            let changed = change_controls(&s, &mut doc, "midi:1", |c| {
+                c.pads[2].cutoff = 20_000.0 - i as f32 * 900.0;
+                c.tempo = 120.0 + i as f32;
+            });
+            assert!(changed);
+        }
+        assert_eq!(doc.history.undo.len(), 1, "the whole gesture is one undo step");
+        assert_eq!(doc.history.undo[0].pads[2].settings.cutoff, 20_000.0, "back to before the gesture");
+        assert_eq!(doc.history.undo[0].tempo, 120.0);
+        assert_eq!(s.handle.pad(2).cutoff, 2_000.0, "the engine has the new value");
+        assert_eq!(s.handle.tempo(), 140.0);
+        // Nothing to change: no step, no revision.
+        let rev = doc.revision;
+        assert!(!change_controls(&s, &mut doc, "midi:1", |c| c.tempo = 140.0));
+        assert_eq!(doc.revision, rev);
+        // The next gesture is a step of its own; out-of-range values are held to the range.
+        assert!(change_controls(&s, &mut doc, "midi:2", |c| c.tempo = 900.0));
+        assert_eq!((doc.history.undo.len(), doc.tempo), (2, 300.0));
     }
 
     #[test]
