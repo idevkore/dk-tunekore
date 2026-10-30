@@ -5,9 +5,9 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
-## 0.1.7: touch discovery
+## 0.1.10: touch discovery
 
-idevkore/dk-tunekore#30
+idevkore/dk-tunekore#30, PR #31
 
 - `docs/TOUCH.md`: what touch on the Mac means for tuneKore, written the day
   after Apple announced the touchscreen MacBook Pro. It covers what Apple
@@ -15,6 +15,44 @@ idevkore/dk-tunekore#30
   multi-touch, plugin touch pages, latency, design rules and a plan.
 
 Docs only; no app change.
+
+## 0.1.9: filter envelope and velocity
+
+idevkore/dk-tunekore#19, idevkore/dk-tunekore#18
+
+- A filter envelope on each pad: attack, decay, sustain, release and an
+  amount of up to 8 octaves either way, which sweeps the cutoff on every hit
+  and falls back when a gate pad is let go. Defaults to off.
+- Velocity reaches the sound, not just the level: Velocity Cutoff makes soft
+  hits darker (or brighter), and Velocity Time makes their attack and decay
+  shorter (or longer), each set per pad.
+- The Shape tab is grouped into Amp, Filter, Filter envelope and Velocity.
+  The new settings save with the project; older projects open with them off.
+
+## 0.1.8: pattern switches on the bar
+
+idevkore/dk-tunekore#17
+
+- Switching patterns A–D while playing now waits for the end of the pattern:
+  the pattern playing finishes and the new one starts exactly on the wrap.
+  The new pattern opens for editing at once; until it starts its button
+  blinks with a dashed outline, the playing one is underlined, and a note
+  says when it starts.
+- Song mode switched on or off while playing lands the same way: the song
+  starts, or its part plays to the end, at the wrap. The Song button blinks
+  while it waits, and the part playing stays lit until it ends.
+- A Switch option next to the patterns, At end or Now. Now lands pattern
+  switches, and song mode turned off, on the next step, as before; a song
+  still starts at the wrap, so its first part plays whole. The choice is
+  saved in the `.tunek` project; older projects open with At end.
+- Hits recorded while a switch waits go into the pattern you hear, not the
+  queued one.
+- Shortening the pattern while it plays keeps the playhead's place in the
+  bar, so a waiting switch or the next song part still lands on the bar.
+- Engine tests cover the timing: the wrap frame, swing and odd lengths,
+  changing a queued switch, switching now, song mode on and off, stopping
+  with a switch queued, a shorter pattern while a switch waits, and hits
+  recorded while a switch waits or at the end of a pass.
 
 ## 0.1.5: tracker links
 

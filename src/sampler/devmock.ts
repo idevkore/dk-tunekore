@@ -15,16 +15,19 @@ const LIB = [
 export function installMocks() {
   const pad = (index: number): PadView => ({
     index, name: null, path: null, missing: false, seconds: 0, channels: 0, rate: 0, peaks: [],
-    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0, attack: 0, decay: 0, sustain: 1, release: 0.004, filter: 0, cutoff: 20000, resonance: 0 },
+    settings: { gainDb: 0, pan: 0, pitch: 0, start: 0, end: 1, gate: false, reverse: false, mute: false, choke: 0, attack: 0, decay: 0, sustain: 1, release: 0.004, filter: 0, cutoff: 20000, resonance: 0, fenvAmount: 0, fenvAttack: 0, fenvDecay: 0.3, fenvSustain: 0, fenvRelease: 0.1, velCutoff: 0, velTime: 0 },
     steps: Array(16).fill(false),
     velocity: Array(16).fill(1),
     chance: Array(16).fill(1),
     ratchet: Array(16).fill(1),
   });
-  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false, chain: [], songMode: false, songLoop: true };
+  const v: SamplerView = { pads: Array.from({ length: 16 }, (_, i) => pad(i)), tempo: 120, swing: 0, steps: 16, projectName: "Untitled", projectPath: null, dirty: false, canUndo: false, canRedo: false, pattern: 0, patternsUsed: [false, false, false, false], metronome: false, recording: false, chain: [], songMode: false, songLoop: true, patternSwitch: "end" };
   const played = Array(16).fill(0);
   let playing = false;
   let step = 0;
+  // The pattern playing: like the engine, a switch waits for the wrap unless it's set to now.
+  let live = 0;
+  const tick = () => ({ playing, step: playing ? step : null, played: [...played], chainPosition: null, playingPattern: playing ? live : null });
   let sampling: { pad: number; started: number } | null = null;
   let sampler: ReturnType<typeof setInterval> | undefined;
   const calls: unknown[] = [];
@@ -45,8 +48,9 @@ export function installMocks() {
   setInterval(() => {
     if (!playing) return;
     step = (step + 1) % v.steps;
+    if (step === 0 || v.patternSwitch === "now") live = v.pattern;
     v.pads.forEach((p) => p.steps[step] && !p.settings.mute && played[p.index]++);
-    void emit("sampler:tick", { playing, step, played: [...played] });
+    void emit("sampler:tick", tick());
   }, 125);
 
   mockIPC(
@@ -90,12 +94,14 @@ export function installMocks() {
           return publish();
         case "sampler_play":
           playing = a.playing as boolean;
+          step = playing ? 0 : -1;
+          live = v.pattern;
+          void emit("sampler:tick", tick());
           step = -1;
-          void emit("sampler:tick", { playing, step: playing ? 0 : null, played: [...played] });
           return null;
         case "sampler_trigger":
           played[a.pad as number]++;
-          void emit("sampler:tick", { playing, step: playing ? step : null, played: [...played] });
+          void emit("sampler:tick", tick());
           return null;
         case "library_default":
           return "/Users/test/Splice/sounds";
@@ -162,6 +168,9 @@ export function installMocks() {
           return publish();
         case "sampler_pattern":
           v.pattern = a.index as number;
+          return publish();
+        case "sampler_switch":
+          v.patternSwitch = a.mode as SamplerView["patternSwitch"];
           return publish();
         case "sampler_copy_pattern":
           v.pattern = a.to as number;

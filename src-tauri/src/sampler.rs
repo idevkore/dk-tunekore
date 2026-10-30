@@ -39,6 +39,17 @@ pub const PROJECT_EXT: &str = "tunek";
 const FORMAT: &str = "tunekore-project";
 const VERSION: u32 = 1;
 
+/// When a switch of pattern, or of song mode, made while playing lands.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PatternSwitch {
+    /// At the end of the pattern: the next one starts exactly on the wrap.
+    #[default]
+    End,
+    /// On the next step.
+    Now,
+}
+
 /// A pad's settings as the UI and the project file see them.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", default)]
@@ -66,6 +77,16 @@ pub struct PadSettings {
     pub cutoff: f32,
     /// 0..1.
     pub resonance: f32,
+    /// Filter envelope: octaves (-8..8, 0 off), then seconds, seconds, level 0..1, seconds.
+    pub fenv_amount: f32,
+    pub fenv_attack: f32,
+    pub fenv_decay: f32,
+    pub fenv_sustain: f32,
+    pub fenv_release: f32,
+    /// Velocity to cutoff, octaves -8..8 (positive: soft hits darker).
+    pub vel_cutoff: f32,
+    /// Velocity to amp attack and decay time, -1..1 (positive: soft hits shorter).
+    pub vel_time: f32,
 }
 
 impl Default for PadSettings {
@@ -87,6 +108,13 @@ impl Default for PadSettings {
             filter: 0,
             cutoff: 20_000.0,
             resonance: 0.0,
+            fenv_amount: 0.0,
+            fenv_attack: 0.0,
+            fenv_decay: 0.3,
+            fenv_sustain: 0.0,
+            fenv_release: 0.1,
+            vel_cutoff: 0.0,
+            vel_time: 0.0,
         }
     }
 }
@@ -111,6 +139,13 @@ impl PadSettings {
             filter: self.filter,
             cutoff: self.cutoff,
             resonance: self.resonance,
+            fenv_amount: self.fenv_amount,
+            fenv_attack: self.fenv_attack,
+            fenv_decay: self.fenv_decay,
+            fenv_sustain: self.fenv_sustain,
+            fenv_release: self.fenv_release,
+            vel_cutoff: self.vel_cutoff,
+            vel_time: self.vel_time,
         }
     }
 }
@@ -187,6 +222,8 @@ struct Doc {
     chain: Vec<u8>,
     song_mode: bool,
     song_loop: bool,
+    /// When a switch made while playing lands.
+    switch: PatternSwitch,
     path: Option<PathBuf>,
     dirty: bool,
     history: History,
@@ -205,6 +242,7 @@ impl Default for Doc {
             chain: Vec::new(),
             song_mode: false,
             song_loop: true,
+            switch: PatternSwitch::End,
             path: None,
             dirty: false,
             history: History::default(),
@@ -225,6 +263,7 @@ struct Snapshot {
     chain: Vec<u8>,
     song_mode: bool,
     song_loop: bool,
+    switch: PatternSwitch,
 }
 
 #[derive(Default)]
@@ -246,6 +285,7 @@ impl Doc {
             chain: self.chain.clone(),
             song_mode: self.song_mode,
             song_loop: self.song_loop,
+            switch: self.switch,
         }
     }
 
@@ -312,6 +352,7 @@ impl SamplerState {
         self.handle.set_chain(&doc.chain);
         self.handle.set_song_mode(doc.song_mode);
         self.handle.set_song_loop(doc.song_loop);
+        self.handle.set_switch_now(doc.switch == PatternSwitch::Now);
     }
 
     /// Whether the document has changes that aren't saved.
@@ -342,6 +383,7 @@ impl SamplerState {
         doc.chain = snap.chain;
         doc.song_mode = snap.song_mode;
         doc.song_loop = snap.song_loop;
+        doc.switch = snap.switch;
         doc.dirty = true;
         doc.revision += 1;
         doc.history.last = None;
@@ -385,7 +427,9 @@ pub struct View {
     dirty: bool,
     can_undo: bool,
     can_redo: bool,
-    /// The pattern being played and edited, 0 = A.
+    /// The pattern being edited, 0 = A. Outside song mode it is also the one
+    /// that plays, from the next switch: a tick's `playing_pattern` says
+    /// which plays now.
     pattern: usize,
     /// Which patterns have any steps.
     patterns_used: Vec<bool>,
@@ -394,6 +438,7 @@ pub struct View {
     chain: Vec<u8>,
     song_mode: bool,
     song_loop: bool,
+    pattern_switch: PatternSwitch,
 }
 
 #[derive(Serialize, Clone)]
@@ -459,6 +504,7 @@ fn view(doc: &Doc, live: &SamplerHandle) -> View {
         chain: doc.chain.clone(),
         song_mode: doc.song_mode,
         song_loop: doc.song_loop,
+        pattern_switch: doc.switch,
     }
 }
 
@@ -679,19 +725,22 @@ fn sync_recorded(app: &AppHandle) {
     let s = state(app);
     let mut doc = s.doc.lock().unwrap();
     let before = doc.snapshot();
-    let cur = doc.current;
     let mut changed = false;
-    for pad in 0..PADS {
-        let live = s.handle.bank_pattern(cur, pad);
-        let added = live & !doc.pads[pad].patterns[cur];
-        if doc.pads[pad].patterns[cur] != live {
-            doc.pads[pad].patterns[cur] = live;
-            changed = true;
-        }
-        // Recorded hits carry how hard they were played.
-        for step in (0..MAX_STEPS).filter(|i| added & (1u64 << i) != 0) {
-            let v = (s.handle.bank_velocity(cur, pad, step) * 255.0).round() as u8;
-            doc.pads[pad].set_velocity(cur, step, v);
+    // Every pattern: while a switch waits, hits go into the one still playing,
+    // not the one being edited.
+    for bank in 0..BANK {
+        for pad in 0..PADS {
+            let live = s.handle.bank_pattern(bank, pad);
+            let added = live & !doc.pads[pad].patterns[bank];
+            if doc.pads[pad].patterns[bank] != live {
+                doc.pads[pad].patterns[bank] = live;
+                changed = true;
+            }
+            // Recorded hits carry how hard they were played.
+            for step in (0..MAX_STEPS).filter(|i| added & (1u64 << i) != 0) {
+                let v = (s.handle.bank_velocity(bank, pad, step) * 255.0).round() as u8;
+                doc.pads[pad].set_velocity(bank, step, v);
+            }
         }
     }
     if changed {
@@ -729,7 +778,9 @@ pub fn sampler_song(chain: Vec<u8>, song_mode: bool, song_loop: bool, app: AppHa
     })
 }
 
-/// Switches to pattern `index` (0 = A). While playing, the switch lands on the next step.
+/// Switches to pattern `index` (0 = A). It shows for editing at once; while
+/// playing, it starts at the end of the pattern playing, or on the next step
+/// with the switch set to now.
 #[tauri::command]
 pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
     if index >= BANK {
@@ -738,6 +789,17 @@ pub fn sampler_pattern(index: usize, app: AppHandle) -> Result<View, String> {
     edit(&app, "pattern", |s, doc| {
         doc.current = index;
         s.apply_all(doc);
+        Ok(())
+    })
+}
+
+/// When a pattern or song mode switch made while playing lands: at the end of
+/// the pattern, or on the next step. Saved with the project.
+#[tauri::command]
+pub fn sampler_switch(mode: PatternSwitch, app: AppHandle) -> Result<View, String> {
+    edit(&app, "switch", |s, doc| {
+        doc.switch = mode;
+        s.handle.set_switch_now(mode == PatternSwitch::Now);
         Ok(())
     })
 }
@@ -813,21 +875,26 @@ pub fn sampler_release(pad: usize, app: AppHandle) {
     }
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct Tick {
     playing: bool,
     step: Option<usize>,
     played: Vec<u32>,
-    /// Which chain entry the song is on, in song mode.
+    /// Which chain entry is playing. A song starts at the end of the
+    /// pattern, and after song mode is turned off its entry plays to the end,
+    /// so this can lag the view's song mode.
     chain_position: Option<usize>,
+    /// The pattern playing now. While a switch waits for the end of the
+    /// pattern it differs from the view's `pattern`.
+    playing_pattern: Option<usize>,
 }
 
 /// Sends the step and each pad's play count to the UI about 30 times a
 /// second while anything changes.
 pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
     std::thread::spawn(move || {
-        let mut last: Option<(bool, Option<usize>, Vec<u32>, Option<usize>)> = None;
+        let mut last: Option<Tick> = None;
         let mut recorded = handle.recorded();
         loop {
             std::thread::sleep(Duration::from_millis(33));
@@ -836,9 +903,15 @@ pub fn spawn_tick(app: AppHandle, handle: SamplerHandle) {
                 recorded = r;
                 sync_recorded(&app);
             }
-            let now = (handle.is_playing(), handle.current_step(), (0..PADS).map(|p| handle.played(p)).collect::<Vec<_>>(), handle.chain_position());
+            let now = Tick {
+                playing: handle.is_playing(),
+                step: handle.current_step(),
+                played: (0..PADS).map(|p| handle.played(p)).collect(),
+                chain_position: handle.chain_position(),
+                playing_pattern: handle.playing_bank(),
+            };
             if last.as_ref() != Some(&now) {
-                let _ = app.emit("sampler:tick", Tick { playing: now.0, step: now.1, played: now.2.clone(), chain_position: now.3 });
+                let _ = app.emit("sampler:tick", &now);
                 last = Some(now);
             }
         }
@@ -1004,6 +1077,10 @@ struct ProjectFile {
     song_mode: bool,
     #[serde(default = "yes")]
     song_loop: bool,
+    /// When a switch made while playing lands: "end" (of the pattern) or
+    /// "now" (the next step). Projects from before it open with "end".
+    #[serde(default)]
+    pattern_switch: PatternSwitch,
     pads: Vec<PadFile>,
 }
 
@@ -1084,6 +1161,7 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
         chain: doc.chain.clone(),
         song_mode: doc.song_mode,
         song_loop: doc.song_loop,
+        pattern_switch: doc.switch,
         pads,
     }
 }
@@ -1192,6 +1270,7 @@ fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: 
         chain: file.chain.iter().copied().filter(|&b| (b as usize) < BANK).take(CHAIN_MAX).collect(),
         song_mode: file.song_mode,
         song_loop: file.song_loop,
+        switch: file.pattern_switch,
         path: as_path,
         dirty,
         history: History::default(),
@@ -1660,6 +1739,22 @@ mod tests {
     }
 
     #[test]
+    fn the_pattern_switch_saves_and_older_projects_open_with_the_end() {
+        let mut doc = Doc::default();
+        assert_eq!(doc.switch, PatternSwitch::End);
+        doc.switch = PatternSwitch::Now;
+        let json = serde_json::to_string(&to_file(&doc, Path::new("/tmp/a.tunek"))).unwrap();
+        assert!(json.contains(r#""pattern_switch":"now""#), "{json}");
+        let back: ProjectFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pattern_switch, PatternSwitch::Now);
+
+        // A project saved before the switch existed has no such key.
+        let old = r#"{"format":"tunekore-project","version":1,"tempo":120,"swing":0,"steps":16,"pads":[]}"#;
+        let file: ProjectFile = serde_json::from_str(old).unwrap();
+        assert_eq!(file.pattern_switch, PatternSwitch::End);
+    }
+
+    #[test]
     fn velocities_are_saved_only_when_set() {
         let mut doc = Doc::default();
         let file = to_file(&doc, Path::new("/tmp/a.tunek"));
@@ -1688,6 +1783,19 @@ z Loaded user settings {"a":1,"splice_folder":"/Volumes/fitMusic/Splice","b":2}"
         assert_eq!(p(0.0), 1.0);
         assert!((p(-6.0) - 0.501).abs() < 0.001);
         assert_eq!(p(-60.0), 0.0);
+    }
+
+    #[test]
+    fn pad_settings_keep_the_filter_envelope_and_read_older_projects() {
+        let s = PadSettings { filter: 1, fenv_amount: 3.5, fenv_decay: 0.8, vel_cutoff: 2.0, vel_time: -0.5, ..Default::default() };
+        let back: PadSettings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+        let p = back.params();
+        assert_eq!((p.fenv_amount, p.fenv_decay, p.vel_cutoff, p.vel_time), (3.5, 0.8, 2.0, -0.5));
+        // A pad saved before 0.1.6 has none of these and loads with them off.
+        let old: PadSettings = serde_json::from_str(r#"{"gainDb":-3,"filter":1,"cutoff":800}"#).unwrap();
+        assert_eq!((old.fenv_amount, old.vel_cutoff, old.vel_time), (0.0, 0.0, 0.0));
+        assert_eq!(old.cutoff, 800.0);
     }
 
     #[test]

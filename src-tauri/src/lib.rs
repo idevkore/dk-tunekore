@@ -257,6 +257,7 @@ pub fn run() {
             sampler::sampler_chop,
             sampler::sampler_undo,
             sampler::sampler_pattern,
+            sampler::sampler_switch,
             sampler::sampler_velocity,
             sampler::sampler_step_extras,
             sampler::sampler_song,

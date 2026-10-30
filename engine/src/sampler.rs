@@ -10,6 +10,13 @@
 //! The sequencer holds [`BANKS`] patterns. Each step of each pad has a
 //! velocity, a chance (probability) and a ratchet count. In song mode a chain
 //! of banks plays one after the other.
+//!
+//! Switching banks, or song mode on or off, lands at the end of the pattern
+//! (the next wrap) by default, so the pattern playing finishes first; with
+//! [`SamplerShared::set_switch_now`] a bank switch or song mode turned off
+//! lands on the next step instead. A song always starts at the wrap, so its
+//! first entry plays a whole pass. The audio thread makes that call at each
+//! step, from atomics only.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 
@@ -41,9 +48,17 @@ pub const FILTER_OFF: u8 = 0;
 pub const FILTER_LOW_PASS: u8 = 1;
 pub const FILTER_HIGH_PASS: u8 = 2;
 pub const FILTER_BAND_PASS: u8 = 3;
+/// How far the filter envelope and velocity can move the cutoff, in octaves either way.
+const FENV_OCTAVES: f32 = 8.0;
+/// While a filter envelope moves the cutoff, the filter is retuned this often, in frames.
+const FENV_TICK: u32 = 16;
+/// Velocity to envelope time at full amount: a hit at velocity 0 is this many times shorter.
+const VEL_TIME_SPAN: f64 = 4.0;
 const NO_STEP: u32 = u32::MAX;
 /// The song position when no song is playing.
 const NO_POS: u32 = u32::MAX;
+/// The bank playing when the sequencer is stopped.
+const NO_BANK: u32 = u32::MAX;
 
 const GATE: u32 = 1;
 const REVERSE: u32 = 2;
@@ -113,6 +128,23 @@ pub struct PadParams {
     pub cutoff: f32,
     /// Filter resonance, 0..1.
     pub resonance: f32,
+    /// Filter envelope: moves the cutoff by `fenv_amount` octaves (-8..8, 0 is
+    /// off) times the envelope's level on every hit. Its attack (0..2 s), decay
+    /// (0..5 s, 0 holds at full), sustain (0..1) and release (0..5 s) work like
+    /// the amp envelope's. Does nothing while the filter is off.
+    pub fenv_amount: f32,
+    pub fenv_attack: f32,
+    pub fenv_decay: f32,
+    pub fenv_sustain: f32,
+    pub fenv_release: f32,
+    /// Velocity to cutoff, in octaves, -8..8. A hit at velocity `v` moves the
+    /// cutoff by `vel_cutoff * (v - 1)` octaves: with a positive amount a soft
+    /// hit is darker, and a full hit sounds as set.
+    pub vel_cutoff: f32,
+    /// Velocity to envelope time, -1..1. A hit at velocity `v` scales the amp
+    /// envelope's attack and decay by `4^(vel_time * (v - 1))`: positive makes
+    /// soft hits shorter (a quarter at velocity 0), negative makes them longer.
+    pub vel_time: f32,
 }
 
 impl Default for PadParams {
@@ -134,6 +166,13 @@ impl Default for PadParams {
             filter: FILTER_OFF,
             cutoff: CUTOFF_MAX,
             resonance: 0.0,
+            fenv_amount: 0.0,
+            fenv_attack: 0.0,
+            fenv_decay: 0.3,
+            fenv_sustain: 0.0,
+            fenv_release: 0.1,
+            vel_cutoff: 0.0,
+            vel_time: 0.0,
         }
     }
 }
@@ -169,6 +208,14 @@ struct PadCtl {
     resonance: AtomicU32, // f32 bits
     /// Velocity of the next hit, 0..1 as f32 bits. Written before `hits` is bumped.
     hit_vel: AtomicU32,
+    // Filter envelope and velocity, kept after the fields above. All f32 bits.
+    fenv_amount: AtomicU32,
+    fenv_attack: AtomicU32,
+    fenv_decay: AtomicU32,
+    fenv_sustain: AtomicU32,
+    fenv_release: AtomicU32,
+    vel_cutoff: AtomicU32,
+    vel_time: AtomicU32,
 }
 
 impl Default for PadCtl {
@@ -193,6 +240,13 @@ impl Default for PadCtl {
             cutoff: AtomicU32::new(p.cutoff.to_bits()),
             resonance: AtomicU32::new(p.resonance.to_bits()),
             hit_vel: AtomicU32::new(1.0f32.to_bits()),
+            fenv_amount: AtomicU32::new(p.fenv_amount.to_bits()),
+            fenv_attack: AtomicU32::new(p.fenv_attack.to_bits()),
+            fenv_decay: AtomicU32::new(p.fenv_decay.to_bits()),
+            fenv_sustain: AtomicU32::new(p.fenv_sustain.to_bits()),
+            fenv_release: AtomicU32::new(p.fenv_release.to_bits()),
+            vel_cutoff: AtomicU32::new(p.vel_cutoff.to_bits()),
+            vel_time: AtomicU32::new(p.vel_time.to_bits()),
         }
     }
 }
@@ -218,6 +272,13 @@ impl PadCtl {
             filter: self.filter.load(Ordering::Relaxed),
             cutoff: f(&self.cutoff),
             resonance: f(&self.resonance),
+            fenv_amount: f(&self.fenv_amount),
+            fenv_attack: f(&self.fenv_attack),
+            fenv_decay: f(&self.fenv_decay),
+            fenv_sustain: f(&self.fenv_sustain),
+            fenv_release: f(&self.fenv_release),
+            vel_cutoff: f(&self.vel_cutoff),
+            vel_time: f(&self.vel_time),
         }
     }
 }
@@ -320,7 +381,8 @@ pub struct SamplerShared {
     recorded: AtomicU32,
     /// The pattern banks: steps, velocity, chance and ratchet of every pad.
     banks: [Bank; BANKS],
-    /// The bank that plays (outside song mode) and that recording writes to.
+    /// The bank being edited and that recording writes to. Outside song mode
+    /// it plays from the next switch (see `switch_now`).
     bank: AtomicU32,
     /// The song: bank numbers, `chain_len` of them in use.
     chain: [AtomicU8; CHAIN_MAX],
@@ -329,6 +391,10 @@ pub struct SamplerShared {
     song_loop: AtomicBool,
     /// The chain entry playing, or NO_POS. Written by the audio thread.
     chain_pos: AtomicU32,
+    /// Switches land on the next step instead of the next wrap.
+    switch_now: AtomicBool,
+    /// The bank the sequencer read for its last step, or NO_BANK. Written by the audio thread.
+    play_bank: AtomicU32,
 }
 
 impl Default for SamplerShared {
@@ -350,6 +416,8 @@ impl Default for SamplerShared {
             song_mode: AtomicBool::new(false),
             song_loop: AtomicBool::new(false),
             chain_pos: AtomicU32::new(NO_POS),
+            switch_now: AtomicBool::new(false),
+            play_bank: AtomicU32::new(NO_BANK),
         }
     }
 }
@@ -376,6 +444,14 @@ impl SamplerShared {
         c.filter.store(p.filter.min(FILTER_BAND_PASS), Ordering::Relaxed);
         c.cutoff.store(sane(p.cutoff, CUTOFF_MIN, CUTOFF_MAX, d.cutoff).to_bits(), Ordering::Relaxed);
         c.resonance.store(sane(p.resonance, 0.0, 1.0, d.resonance).to_bits(), Ordering::Relaxed);
+        let octaves = FENV_OCTAVES;
+        c.fenv_amount.store(sane(p.fenv_amount, -octaves, octaves, d.fenv_amount).to_bits(), Ordering::Relaxed);
+        c.fenv_attack.store(sane(p.fenv_attack, 0.0, 2.0, d.fenv_attack).to_bits(), Ordering::Relaxed);
+        c.fenv_decay.store(sane(p.fenv_decay, 0.0, 5.0, d.fenv_decay).to_bits(), Ordering::Relaxed);
+        c.fenv_sustain.store(sane(p.fenv_sustain, 0.0, 1.0, d.fenv_sustain).to_bits(), Ordering::Relaxed);
+        c.fenv_release.store(sane(p.fenv_release, 0.0, 5.0, d.fenv_release).to_bits(), Ordering::Relaxed);
+        c.vel_cutoff.store(sane(p.vel_cutoff, -octaves, octaves, d.vel_cutoff).to_bits(), Ordering::Relaxed);
+        c.vel_time.store(sane(p.vel_time, -1.0, 1.0, d.vel_time).to_bits(), Ordering::Relaxed);
     }
 
     pub fn pad(&self, slot: usize) -> PadParams {
@@ -405,9 +481,12 @@ impl SamplerShared {
         self.bank_velocity(self.bank(), pad, step)
     }
 
-    /// Makes `bank` (0 = A) the one that plays and that recording writes to.
-    /// While playing, the switch lands on the next step; in song mode the
-    /// chain decides what plays, and this is only the bank being edited.
+    /// Makes `bank` (0 = A) the one being edited, that recording writes to and
+    /// that plays outside song mode. Edits apply at once; while playing, the
+    /// bank starts at the next wrap of the pattern, or on the next step with
+    /// [`set_switch_now`](Self::set_switch_now). Until then
+    /// [`playing_bank`](Self::playing_bank) is still the old one. In song mode
+    /// the chain decides what plays, and this is only the bank being edited.
     /// Ignores a bad index.
     pub fn set_bank(&self, bank: usize) {
         if bank < BANKS {
@@ -516,14 +595,39 @@ impl SamplerShared {
         self.song_loop.load(Ordering::Relaxed)
     }
 
-    /// The chain entry playing now, or `None` when stopped or not walking a song.
+    /// The chain entry playing now, or `None` when stopped or not walking a
+    /// song. Song mode turned on starts entry 0 at the next wrap; turned off,
+    /// the entry playing finishes its pass (or, switching now, stops on the
+    /// next step), so this can lag [`song_mode`](Self::song_mode).
     pub fn chain_position(&self) -> Option<usize> {
-        if !self.song_mode() {
-            return None;
-        }
         match self.chain_pos.load(Ordering::Relaxed) {
             NO_POS => None,
             p => Some(p as usize),
+        }
+    }
+
+    /// With `now` on, a bank switch, or song mode turned off, lands on the
+    /// next step, where the sequencer carries on from the same step of the new
+    /// bank. Song mode turned on still waits for the wrap, so the song's first
+    /// entry plays a whole pass. Off (the default), every switch lands at the
+    /// end of the pattern: the bank or song pass playing finishes, and the
+    /// next one starts exactly on the wrap. Turning it on while a bank switch
+    /// waits makes that switch on the next step.
+    pub fn set_switch_now(&self, now: bool) {
+        self.switch_now.store(now, Ordering::Relaxed);
+    }
+
+    pub fn switch_now(&self) -> bool {
+        self.switch_now.load(Ordering::Relaxed)
+    }
+
+    /// The bank the sequencer is playing, from its last step, or `None` when
+    /// stopped. While a switch waits for the wrap it differs from
+    /// [`bank`](Self::bank).
+    pub fn playing_bank(&self) -> Option<usize> {
+        match self.play_bank.load(Ordering::Relaxed) {
+            NO_BANK => None,
+            b => Some(b as usize),
         }
     }
 
@@ -735,6 +839,76 @@ impl VoiceFilter {
     }
 }
 
+/// Where a voice's filter envelope is.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum FenvStage {
+    Attack,
+    Decay,
+    #[default]
+    Hold,
+    Release,
+}
+
+/// A voice's filter envelope: a level, 0..1, that moves the cutoff. Linear
+/// attack and release, exponential decay, like the amp envelope.
+#[derive(Debug, Clone, Copy, Default)]
+struct FilterEnv {
+    level: f32,
+    stage: FenvStage,
+    atk_inc: f32,
+    dec_coef: f32,
+    sustain: f32,
+    rel_full: f32,
+    rel_step: f32,
+}
+
+impl FilterEnv {
+    fn new(p: &PadParams, rate: f64) -> Self {
+        let attack = f64::from(p.fenv_attack.max(0.0));
+        let decay = f64::from(p.fenv_decay.max(0.0));
+        let release = f64::from(p.fenv_release).max(MIN_RELEASE_SECONDS);
+        Self {
+            level: 0.0,
+            stage: FenvStage::Attack,
+            atk_inc: if attack > 0.0 { (1.0 / (rate * attack)).min(1.0) as f32 } else { 1.0 },
+            dec_coef: if decay > 0.0 { (0.001f64.powf(1.0 / (rate * decay)) as f32).max(1.0e-20) } else { 0.0 },
+            sustain: p.fenv_sustain.clamp(0.0, 1.0),
+            rel_full: (1.0 / (rate * release)).min(1.0) as f32,
+            rel_step: 0.0,
+        }
+    }
+
+    /// Starts the release from the level it is at, so it lasts `release` seconds.
+    fn release(&mut self) {
+        if self.stage != FenvStage::Release {
+            self.rel_step = self.level * self.rel_full;
+            self.stage = FenvStage::Release;
+        }
+    }
+
+    /// One frame on.
+    #[inline]
+    fn tick(&mut self) {
+        match self.stage {
+            FenvStage::Attack => {
+                self.level = (self.level + self.atk_inc).min(1.0);
+                if self.level >= 1.0 {
+                    self.stage = if self.dec_coef > 0.0 { FenvStage::Decay } else { FenvStage::Hold };
+                }
+            }
+            FenvStage::Decay => {
+                self.level = self.sustain + (self.level - self.sustain) * self.dec_coef;
+                if (self.level - self.sustain).abs() < DECAY_SNAP {
+                    self.level = self.sustain;
+                    self.stage = FenvStage::Hold;
+                }
+            }
+            FenvStage::Hold => {}
+            FenvStage::Release => self.level = (self.level - self.rel_step).max(0.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Voice {
     active: bool,
@@ -764,9 +938,27 @@ struct Voice {
     /// Released by a cut, choke or retrigger, so on the 4 ms fade.
     fast: bool,
     filter: VoiceFilter,
+    // Filter envelope and velocity, kept after the fields above.
+    fenv: FilterEnv,
+    /// The pad's cutoff (Hz), resonance and filter envelope amount (octaves),
+    /// read once per block so the knobs work while the voice rings.
+    cutoff: f32,
+    resonance: f32,
+    fenv_amount: f32,
+    /// The hit's velocity, 0..1, and how far it moves the cutoff, in octaves.
+    vel: f32,
+    vel_octaves: f32,
+    /// Frames until the envelope retunes the filter.
+    retune_in: u32,
 }
 
 impl Voice {
+    /// Tunes the filter to the pad's cutoff, moved by velocity and the filter envelope.
+    fn tune_filter(&mut self, mode: u8, rate: f64) {
+        let octaves = self.vel_octaves + self.fenv_amount * self.fenv.level;
+        self.filter.tune(mode, self.cutoff * octaves.exp2(), self.resonance, rate);
+    }
+
     /// Starts the release. `fast` is the step of a cut (4 ms from full level,
     /// whatever the pad's release is); `None` is the pad's own release, timed
     /// from the level the voice is at, so it lasts `release` seconds.
@@ -775,6 +967,7 @@ impl Voice {
         self.rel_step = if self.releasing { self.rel_step.max(step) } else { step };
         self.releasing = true;
         self.fast |= fast.is_some();
+        self.fenv.release();
     }
 }
 
@@ -802,6 +995,13 @@ impl Default for Voice {
             rel_step: 0.0,
             fast: false,
             filter: VoiceFilter::default(),
+            fenv: FilterEnv::default(),
+            cutoff: CUTOFF_MAX,
+            resonance: 0.0,
+            fenv_amount: 0.0,
+            vel: 1.0,
+            vel_octaves: 0.0,
+            retune_in: 0,
         }
     }
 }
@@ -840,9 +1040,8 @@ pub struct Sampler {
     click_fade_step: f32,
     /// The dice for step chance.
     rng: XorShift,
-    /// The chain entry playing (NO_POS when no song plays) and its bank.
-    chain_pos: u32,
-    song_bank: usize,
+    /// Where the sequencer is, as of the step that fired last.
+    pos: Position,
     /// The rest of a ratcheted step, per pad: hits left, frames until the next
     /// one, frames between hits and their velocity. `ratchet_active` has a bit
     /// for each pad with hits left.
@@ -851,6 +1050,21 @@ pub struct Sampler {
     ratchet_gap: [f64; PADS],
     ratchet_vel: [f32; PADS],
     ratchet_active: u32,
+}
+
+/// Which bank a step reads: the chain entry playing (NO_POS outside a song),
+/// its bank, and the bank that plays outside a song.
+#[derive(Clone, Copy)]
+struct Position {
+    chain_pos: u32,
+    song_bank: usize,
+    plain_bank: usize,
+}
+
+impl Position {
+    fn bank(&self) -> usize {
+        if self.chain_pos != NO_POS { self.song_bank } else { self.plain_bank }
+    }
 }
 
 /// What starts at the top of the pattern.
@@ -928,8 +1142,7 @@ impl Sampler {
             click_decay: (-1.0 / (rate * CLICK_DECAY_SECONDS)).exp() as f32,
             click_fade_step: (1.0 / (rate * CLICK_FADE_IN_SECONDS)).min(1.0) as f32,
             rng: XorShift::new(RNG_SEED),
-            chain_pos: NO_POS,
-            song_bank: 0,
+            pos: Position { chain_pos: NO_POS, song_bank: 0, plain_bank: 0 },
             ratchet_left: [0; PADS],
             ratchet_wait: [0.0; PADS],
             ratchet_gap: [0.0; PADS],
@@ -955,7 +1168,7 @@ impl Sampler {
         if playing && !self.was_playing {
             self.next_step = 0;
             self.countdown = 0.0;
-            self.chain_pos = NO_POS;
+            self.pos.chain_pos = NO_POS;
         } else if !playing && self.was_playing {
             self.stop_transport(shared);
             // Stopping silences the pads, as any transport stop does, instead of
@@ -966,9 +1179,10 @@ impl Sampler {
         }
         self.was_playing = playing;
         let steps = shared.steps().max(1);
-        if self.next_step >= steps {
-            self.next_step = 0;
-        }
+        // The pattern got shorter than where the sequencer is: carry on at the
+        // same place in the bar, so the wrap (and any switch waiting for it)
+        // still lands on a multiple of the new length.
+        self.next_step %= steps;
         let recording = playing && shared.recording.load(Ordering::Relaxed);
 
         for slot in 0..SLOTS {
@@ -1052,7 +1266,8 @@ impl Sampler {
     fn stop_transport(&mut self, shared: &SamplerShared) {
         shared.step.store(NO_STEP, Ordering::Relaxed);
         shared.chain_pos.store(NO_POS, Ordering::Relaxed);
-        self.chain_pos = NO_POS;
+        shared.play_bank.store(NO_BANK, Ordering::Relaxed);
+        self.pos.chain_pos = NO_POS;
         self.click_left = 0;
         self.skip_pads = 0;
         self.ratchet_active = 0;
@@ -1065,7 +1280,7 @@ impl Sampler {
         if !shared.song_mode.load(Ordering::Relaxed) || len == 0 {
             return Pass::Plain;
         }
-        let mut pos = if self.chain_pos == NO_POS { 0 } else { self.chain_pos as usize + 1 };
+        let mut pos = if self.pos.chain_pos == NO_POS { 0 } else { self.pos.chain_pos as usize + 1 };
         if pos >= len {
             if !shared.song_loop.load(Ordering::Relaxed) {
                 return Pass::End;
@@ -1076,13 +1291,29 @@ impl Sampler {
         Pass::Song(pos as u32, bank)
     }
 
-    /// The bank the sequencer reads on its next step.
-    fn playing_bank(&self, shared: &SamplerShared) -> usize {
-        if self.chain_pos != NO_POS && shared.song_mode.load(Ordering::Relaxed) {
-            self.song_bank
-        } else {
-            shared.bank()
+    /// Where the sequencer will be once `step` fires, or `None` when a song
+    /// that doesn't loop ends there. This is where every switch lands: at the
+    /// wrap (step 0) the next pass starts, from the current bank or the next
+    /// chain entry. Switching now, every step also picks up the current bank,
+    /// and song mode turned off. Otherwise a pass plays to its end, even a
+    /// song's pass after song mode is turned off. A song only starts at the
+    /// wrap, so its first entry is a whole pass. Changes nothing.
+    fn position_at(&self, shared: &SamplerShared, step: usize) -> Option<Position> {
+        let now = shared.switch_now.load(Ordering::Relaxed);
+        let mut p = self.pos;
+        if step == 0 || now {
+            p.plain_bank = shared.bank();
         }
+        if step == 0 {
+            match self.next_pass(shared) {
+                Pass::Plain => p.chain_pos = NO_POS,
+                Pass::Song(pos, bank) => (p.chain_pos, p.song_bank) = (pos, bank),
+                Pass::End => return None,
+            }
+        } else if now && !shared.song_mode.load(Ordering::Relaxed) {
+            p.chain_pos = NO_POS;
+        }
+        Some(p)
     }
 
     /// Plays one hit of a step. `frames` is how long a gate-mode pad holds it.
@@ -1094,18 +1325,12 @@ impl Sampler {
     /// that doesn't loop has played its last entry: the caller stops.
     fn fire_step(&mut self, shared: &SamplerShared, steps: usize) -> bool {
         let step = self.next_step;
-        if step == 0 {
-            match self.next_pass(shared) {
-                Pass::Plain => self.chain_pos = NO_POS,
-                Pass::Song(pos, bank) => {
-                    self.chain_pos = pos;
-                    self.song_bank = bank;
-                }
-                Pass::End => return false,
-            }
-            shared.chain_pos.store(self.chain_pos, Ordering::Relaxed);
-        }
-        let bank = &shared.banks[self.playing_bank(shared)];
+        let Some(p) = self.position_at(shared, step) else { return false };
+        self.pos = p;
+        let playing = p.bank();
+        shared.chain_pos.store(p.chain_pos, Ordering::Relaxed);
+        shared.play_bank.store(playing as u32, Ordering::Relaxed);
+        let bank = &shared.banks[playing];
         let length = shared.step_frames(step, self.rate);
         // Pads whose hit was recorded onto this step a moment ago already sounded.
         let skip = if step == self.skip_step { self.skip_pads } else { 0 };
@@ -1164,33 +1389,32 @@ impl Sampler {
         }
     }
 
-    /// Writes a hand-played hit on `pad` into the nearest step of the current
-    /// bank. Where the sequencer is comes from `countdown`, the frames left in
-    /// the step that fired last: in its first half the hit goes on that step,
-    /// in its second half on the next one, which the sequencer then skips for
-    /// this pad once (if it will play that bank there).
+    /// Writes a hand-played hit on `pad` into the nearest step. Where the
+    /// sequencer is comes from `countdown`, the frames left in the step that
+    /// fired last: in its first half the hit goes on that step, in its second
+    /// half on the next one, which the sequencer then skips for this pad once
+    /// (if it will play the bank written to there).
+    ///
+    /// Outside a song the hit goes into the bank heard on that step, so while
+    /// a switch waits for the wrap it lands in the pattern still playing. In a
+    /// song it goes into the bank being edited, as the chain decides what plays.
     fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize, vel: f32) {
         let current = (self.next_step + steps - 1) % steps;
         let length = shared.step_frames(current, self.rate);
-        let target = shared.bank();
-        let step = if self.countdown > length * 0.5 {
-            current
+        let ahead = self.countdown <= length * 0.5;
+        let (step, at) = if ahead {
+            (self.next_step, self.position_at(shared, self.next_step))
         } else {
-            let next_bank = if self.next_step == 0 {
-                match self.next_pass(shared) {
-                    Pass::Plain => Some(target),
-                    Pass::Song(_, bank) => Some(bank),
-                    Pass::End => None,
-                }
-            } else {
-                Some(self.playing_bank(shared))
-            };
-            if next_bank == Some(target) {
-                self.skip_step = self.next_step;
-                self.skip_pads |= 1 << pad;
-            }
-            self.next_step
+            (current, Some(self.pos))
         };
+        let target = match at {
+            Some(p) if p.chain_pos == NO_POS => p.plain_bank,
+            _ => shared.bank(),
+        };
+        if ahead && at.map(|p| p.bank()) == Some(target) {
+            self.skip_step = step;
+            self.skip_pads |= 1 << pad;
+        }
         shared.banks[target].patterns[pad].fetch_or(1u64 << step, Ordering::Relaxed);
         shared.set_bank_velocity(target, pad, step, vel);
         shared.recorded.fetch_add(1, Ordering::Release);
@@ -1241,7 +1465,11 @@ impl Sampler {
                 v.filter.reset(); // switched on while ringing: start from silence
             }
             let f = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
-            v.filter.tune(mode, f(&c.cutoff), f(&c.resonance), self.rate);
+            v.cutoff = f(&c.cutoff);
+            v.resonance = f(&c.resonance);
+            v.fenv_amount = f(&c.fenv_amount);
+            v.vel_octaves = f(&c.vel_cutoff) * (v.vel - 1.0);
+            v.tune_filter(mode, self.rate);
         }
     }
 
@@ -1272,18 +1500,18 @@ impl Sampler {
         };
         self.clock += 1;
         let rate = self.rate;
-        let attack_secs = ATTACK_SECONDS.max(f64::from(p.attack));
+        // Velocity to envelope time: soft hits shorter (or longer), full hits as set.
+        let time = VEL_TIME_SPAN.powf(f64::from(p.vel_time) * f64::from(vel - 1.0));
+        let attack_secs = ATTACK_SECONDS.max(f64::from(p.attack) * time);
         let release_secs = f64::from(p.release).max(MIN_RELEASE_SECONDS);
         // The default (0.004 as an f32) is the 4 ms fade exactly, as before.
         let release_secs = if (release_secs - RELEASE_SECONDS).abs() < 1e-6 { RELEASE_SECONDS } else { release_secs };
         let dec_coef = if p.decay > 0.0 {
             // Exponential, `decay` seconds to fall 60 dB of the way to sustain.
-            (0.001f64.powf(1.0 / (rate * f64::from(p.decay))) as f32).max(1.0e-20)
+            (0.001f64.powf(1.0 / (rate * f64::from(p.decay) * time)) as f32).max(1.0e-20)
         } else {
             0.0
         };
-        let mut filter = VoiceFilter::default();
-        filter.tune(p.filter, p.cutoff, p.resonance, rate);
         self.voices[i] = Voice {
             active: true,
             slot,
@@ -1306,8 +1534,16 @@ impl Sampler {
             rel_full: (1.0 / (rate * release_secs)).min(1.0) as f32,
             rel_step: 0.0,
             fast: false,
-            filter,
+            filter: VoiceFilter::default(),
+            fenv: FilterEnv::new(&p, rate),
+            cutoff: p.cutoff,
+            resonance: p.resonance,
+            fenv_amount: p.fenv_amount,
+            vel,
+            vel_octaves: p.vel_cutoff * (vel - 1.0),
+            retune_in: 0,
         };
+        self.voices[i].tune_filter(p.filter, rate);
         shared.pads[slot].played.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1319,6 +1555,7 @@ impl Sampler {
     }
 
     fn mix_frame(&mut self, shared: &SamplerShared) -> (f32, f32) {
+        let rate = self.rate;
         let mut left = 0.0f32;
         let mut right = 0.0f32;
         for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -1379,6 +1616,15 @@ impl Sampler {
             let read = |c: &[f32]| c[i] + (c[j] - c[i]) * frac;
             let mut l = read(&sample[0]);
             let mut r = if sample.len() > 1 { read(&sample[1]) } else { l };
+            v.fenv.tick();
+            if v.filter.mode != FILTER_OFF && v.fenv_amount != 0.0 {
+                // The envelope moves the cutoff: retune every few frames, not every one.
+                if v.retune_in == 0 {
+                    v.retune_in = FENV_TICK;
+                    v.tune_filter(v.filter.mode, rate);
+                }
+                v.retune_in -= 1;
+            }
             if v.filter.mode != FILTER_OFF {
                 l = v.filter.process(0, l);
                 r = v.filter.process(1, r);
@@ -2170,6 +2416,114 @@ mod tests {
         assert_eq!(a, b, "the same hit sounds the same twice");
     }
 
+    /// The left channel of one hit at `vel`, divided by `vel` so hits compare by tone.
+    fn hit(p: &PadParams, sample: Track, vel: f32, frames: usize) -> Vec<f32> {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sample));
+        shared.trigger_velocity(0, vel);
+        run(&mut s, &shared, frames).chunks(2).map(|f| f[0] / vel).collect()
+    }
+
+    #[test]
+    fn the_filter_envelope_sweeps_the_cutoff_down() {
+        // 200 Hz, opened 6 octaves (12.8 kHz) on the hit, closing over half a second.
+        let p = PadParams { fenv_amount: 6.0, fenv_attack: 0.0, fenv_decay: 0.5, fenv_sustain: 0.0, ..lp(200.0, 0.0) };
+        let out = play(&p, sine(4_000.0, 96_000), 48_000);
+        let early = rms(&out[100..300]);
+        let late = rms(&out[24_000..]);
+        assert!(early > 0.4, "open on the hit: {early}");
+        assert!(late < 0.01, "closed after the decay: {late}");
+        let flat = play(&lp(200.0, 0.0), sine(4_000.0, 96_000), 48_000);
+        assert!(rms(&flat[100..300]) < 0.1, "with no amount it stays closed");
+    }
+
+    #[test]
+    fn a_negative_amount_closes_the_filter_on_the_hit() {
+        // 8 kHz pulled down 6 octaves, to 125 Hz, and held there (no decay).
+        let p = PadParams { fenv_amount: -6.0, fenv_decay: 0.0, ..lp(8_000.0, 0.0) };
+        let out = play(&p, sine(2_000.0, 48_000), 24_000);
+        assert!(rms(&out[4_000..]) < 0.02, "{}", rms(&out[4_000..]));
+        assert!(through(&lp(8_000.0, 0.0), 2_000.0) > 0.6);
+    }
+
+    #[test]
+    fn the_filter_envelope_attack_opens_the_filter() {
+        let p = PadParams { fenv_amount: 7.0, fenv_attack: 0.5, fenv_decay: 0.0, ..lp(100.0, 0.0) };
+        let out = play(&p, sine(4_000.0, 96_000), 48_000);
+        assert!(rms(&out[1_000..3_000]) < 0.05, "still closed: {}", rms(&out[1_000..3_000]));
+        assert!(rms(&out[30_000..]) > 0.6, "open after the attack: {}", rms(&out[30_000..]));
+    }
+
+    #[test]
+    fn the_filter_envelope_releases_with_the_pad() {
+        // Held open; once let go the cutoff falls back in 50 ms while the long amp release still sounds.
+        let shared = SamplerShared::default();
+        let p = PadParams { gate: true, release: 2.0, fenv_amount: 6.0, fenv_decay: 0.0, fenv_release: 0.05, ..lp(200.0, 0.0) };
+        shared.set_pad(0, &p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(4_000.0, 96_000)));
+        shared.trigger(0);
+        let held: Vec<f32> = run(&mut s, &shared, 4_800).chunks(2).map(|f| f[0]).collect();
+        shared.release(0);
+        let after: Vec<f32> = run(&mut s, &shared, 9_600).chunks(2).map(|f| f[0]).collect();
+        assert!(rms(&held[1_000..]) > 0.6, "open while held: {}", rms(&held[1_000..]));
+        assert!(rms(&after[3_600..]) < 0.01, "closed after the release: {}", rms(&after[3_600..]));
+    }
+
+    #[test]
+    fn the_filter_envelope_needs_the_filter_on() {
+        let p = PadParams { fenv_amount: 6.0, vel_cutoff: 6.0, ..Default::default() };
+        assert_eq!(play(&p, sine(4_000.0, 9_600), 4_800), play(&PadParams::default(), sine(4_000.0, 9_600), 4_800));
+    }
+
+    #[test]
+    fn velocity_to_cutoff_makes_a_soft_hit_darker() {
+        // 8 kHz; a quarter-velocity hit is 4.5 octaves lower, about 350 Hz.
+        let p = PadParams { vel_cutoff: 6.0, ..lp(8_000.0, 0.0) };
+        let hard = hit(&p, sine(2_000.0, 48_000), 1.0, 24_000);
+        let soft = hit(&p, sine(2_000.0, 48_000), 0.25, 24_000);
+        assert!(rms(&hard[8_000..]) > 0.6, "a full hit sounds as set: {}", rms(&hard[8_000..]));
+        assert!(rms(&soft[8_000..]) < 0.1, "a soft hit is darker: {}", rms(&soft[8_000..]));
+        let plain = hit(&lp(8_000.0, 0.0), sine(2_000.0, 48_000), 0.25, 24_000);
+        assert!((rms(&plain[8_000..]) - rms(&hard[8_000..])).abs() < 0.01, "with no amount velocity is only level");
+    }
+
+    #[test]
+    fn velocity_to_time_shortens_or_lengthens_a_soft_hit() {
+        let p = PadParams { decay: 0.2, sustain: 0.0, vel_time: 1.0, ..Default::default() };
+        let hard = hit(&p, dc(48_000, 0.5), 1.0, 9_600);
+        let soft = hit(&p, dc(48_000, 0.5), 0.25, 9_600);
+        // 0.1 s in, a full hit has fallen 30 dB; a soft one, with a decay about a third as long, far more.
+        assert!((hard[4_800] - 0.5 * 0.001f32.powf(0.5)).abs() < 0.002, "a full hit is as set: {}", hard[4_800]);
+        assert!(soft[4_800] < hard[4_800] * 0.05, "shorter: {} vs {}", soft[4_800], hard[4_800]);
+        let long = hit(&PadParams { vel_time: -1.0, ..p }, dc(48_000, 0.5), 0.25, 9_600);
+        assert!(long[4_800] > hard[4_800] * 5.0, "longer: {} vs {}", long[4_800], hard[4_800]);
+    }
+
+    #[test]
+    fn filter_envelope_and_velocity_settings_stay_in_range() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams {
+            fenv_amount: 20.0,
+            fenv_attack: -1.0,
+            fenv_decay: 9.0,
+            fenv_sustain: 2.0,
+            fenv_release: f32::NAN,
+            vel_cutoff: -20.0,
+            vel_time: 3.0,
+            ..Default::default()
+        });
+        let p = shared.pad(0);
+        assert_eq!(
+            (p.fenv_amount, p.fenv_attack, p.fenv_decay, p.fenv_sustain, p.fenv_release, p.vel_cutoff, p.vel_time),
+            (8.0, 0.0, 5.0, 1.0, 0.1, -8.0, 1.0)
+        );
+        let d = PadParams::default();
+        assert_eq!((d.fenv_amount, d.vel_cutoff, d.vel_time), (0.0, 0.0, 0.0), "off by default");
+    }
+
     #[test]
     fn trigger_velocity_scales_the_hit() {
         let shared = SamplerShared::default();
@@ -2355,8 +2709,88 @@ mod tests {
     }
 
     #[test]
-    fn switching_bank_changes_what_plays_on_the_next_step() {
+    fn a_bank_switch_waits_for_the_wrap_and_lands_on_its_frame() {
         let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111); // A: the click, every step
+        shared.set_bank_pattern(1, 1, 0b1111); // B: the flat pad, every step
+        assert!(!shared.switch_now(), "switches wait for the wrap by default");
+        assert_eq!(shared.playing_bank(), None, "nothing plays yet");
+        shared.set_playing(true);
+        let mut left = play_blocks(&mut s, &shared, 10_000, 777); // inside step 1
+        assert_eq!(shared.playing_bank(), Some(0));
+        shared.set_bank(1);
+        assert_eq!(shared.bank(), 1, "the edit bank changes at once");
+        assert_eq!(shared.playing_bank(), Some(0), "A plays on, B is queued");
+
+        left.extend(play_blocks(&mut s, &shared, 14_000, 777)); // frames up to 23,999
+        assert_eq!(shared.playing_bank(), Some(0), "the last frame of A's pass");
+        assert_eq!(shared.current_step(), Some(3));
+        left.extend(play_blocks(&mut s, &shared, 1, 1));
+        assert_eq!(shared.playing_bank(), Some(1), "frame 24,000 starts B");
+        assert_eq!(shared.current_step(), Some(0));
+        left.extend(play_blocks(&mut s, &shared, 24_000 - 1, 777));
+
+        assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000, 24_000, 30_000, 36_000, 42_000]);
+        for at in [0, 6_000, 12_000, 18_000] {
+            assert_eq!(pad_at(&left, at), Some(0), "A's step at {at}, after the switch was made");
+        }
+        assert!(left[23_999] == 0.0 && left[24_000] > 0.01, "B sounds from the wrap's very first frame");
+        for at in [24_000, 30_000, 36_000, 42_000] {
+            assert_eq!(pad_at(&left, at), Some(1), "B's step at {at}");
+        }
+
+        shared.set_playing(false);
+        play_blocks(&mut s, &shared, 1, 1);
+        assert_eq!(shared.playing_bank(), None, "stopped");
+    }
+
+    #[test]
+    fn the_wrap_is_exact_with_swing_and_an_odd_length() {
+        let (mut s, shared) = song_rig();
+        shared.set_steps(7);
+        shared.set_swing(0.5);
+        shared.set_tempo(133.0);
+        shared.set_bank_pattern(0, 0, 0b111_1111);
+        shared.set_bank_pattern(1, 1, 0b000_0001);
+        shared.set_playing(true);
+        let pass = shared.pattern_frames(RATE, 1);
+        let mut left = play_blocks(&mut s, &shared, pass / 2, 333);
+        shared.set_bank(1);
+        left.extend(play_blocks(&mut s, &shared, pass, 333));
+        let on = onsets(&left);
+        assert_eq!(on.len(), 8, "A's seven steps, then B's one");
+        assert_eq!(pad_at(&left, on[6]), Some(0), "A's last step");
+        assert!((on[7] as i64 - pass as i64).abs() <= 1, "B starts on the wrap: {} vs {pass}", on[7]);
+        assert_eq!(pad_at(&left, on[7]), Some(1));
+    }
+
+    #[test]
+    fn a_queued_switch_can_be_changed_or_taken_back_before_the_wrap() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b0001);
+        shared.set_bank_pattern(1, 1, 0b0001);
+        shared.set_bank_pattern(2, 0, 0b0011);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 3_000, 500);
+        shared.set_bank(1);
+        shared.set_bank(2); // the last choice before the wrap wins
+        let left = play_blocks(&mut s, &shared, 21_000 + 12_000, 500);
+        assert_eq!(onsets(&left), vec![21_000, 27_000], "C's steps 0 and 1");
+        assert_eq!(shared.playing_bank(), Some(2));
+
+        play_blocks(&mut s, &shared, 15_000, 500); // 3,000 into C's second pass
+        shared.set_bank(1);
+        shared.set_bank(2); // back to the bank that plays: nothing waits
+        let left = play_blocks(&mut s, &shared, 21_000 + 1_000, 500);
+        assert_eq!(onsets(&left), vec![3_000, 21_000], "C's step 1, then its next pass");
+        assert_eq!(pad_at(&left, 21_000), Some(0), "C again, not B");
+    }
+
+    #[test]
+    fn switching_now_changes_what_plays_on_the_next_step() {
+        let (mut s, shared) = song_rig();
+        shared.set_switch_now(true);
+        assert!(shared.switch_now());
         shared.set_bank_pattern(0, 0, 0b1111); // bank A: every step
         shared.set_bank_pattern(1, 0, 0b0100); // bank B: step 2 only
         shared.set_playing(true);
@@ -2365,10 +2799,28 @@ mod tests {
         left.extend(play_blocks(&mut s, &shared, 21_000, 500));
         // Step 0 already played from A; step 1 reads B (nothing); step 2 plays from B.
         assert_eq!(onsets(&left), vec![0, 12_000]);
+        assert_eq!(shared.playing_bank(), Some(1));
 
         shared.set_bank(0);
         let left = play_blocks(&mut s, &shared, 24_000, 500);
         assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000], "and back to A");
+    }
+
+    #[test]
+    fn switching_now_while_a_switch_waits_lands_it_on_the_next_step() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111);
+        shared.set_bank_pattern(1, 1, 0b1111);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 3_000, 500); // inside step 0
+        shared.set_bank(1);
+        let left = play_blocks(&mut s, &shared, 6_000, 500); // step 1 at 6,000
+        assert_eq!(pad_at(&left, 3_000), Some(0), "queued: step 1 is still A");
+        shared.set_switch_now(true);
+        let left = play_blocks(&mut s, &shared, 6_000, 500); // step 2 at 12,000
+        assert_eq!(onsets(&left), vec![3_000]);
+        assert_eq!(pad_at(&left, 3_000), Some(1), "step 2 is B");
+        assert_eq!(shared.current_step(), Some(2));
     }
 
     #[test]
@@ -2533,38 +2985,115 @@ mod tests {
         assert!(!shared.is_playing());
     }
 
-    #[test]
-    fn song_mode_can_be_switched_while_playing() {
-        // On: the song starts at entry 0 on the next wrap.
-        let (mut s, shared) = song_rig();
+    /// A plays the click and B the flat pad, on every step; the song is B.
+    fn song_switch_rig(song: bool) -> (Sampler, SamplerShared) {
+        let (s, shared) = song_rig();
         shared.set_bank_pattern(0, 0, 0b1111);
         shared.set_bank_pattern(1, 1, 0b1111);
         shared.set_chain(&[1]);
+        shared.set_song_mode(song);
+        shared.set_song_loop(true);
         shared.set_playing(true);
+        (s, shared)
+    }
+
+    #[test]
+    fn song_mode_turned_on_or_off_waits_for_the_wrap() {
+        // On: the song starts at entry 0 on the next wrap.
+        let (mut s, shared) = song_switch_rig(false);
         play_blocks(&mut s, &shared, 10_000, 777);
         shared.set_song_mode(true);
+        assert_eq!(shared.chain_position(), None, "queued");
         let left = play_blocks(&mut s, &shared, 14_000, 777);
         assert_eq!(pad_at(&left, 2_000), Some(0), "bank A until the wrap (step 2)");
         assert_eq!(pad_at(&left, 8_000), Some(0), "and step 3");
+        assert_eq!(shared.chain_position(), None);
         let left = play_blocks(&mut s, &shared, 6_000, 777);
-        assert_eq!(pad_at(&left, 0), Some(1), "then the chain's bank B");
+        assert_eq!(pad_at(&left, 0), Some(1), "then the chain's bank B, on the wrap");
         assert_eq!(shared.chain_position(), Some(0));
 
-        // Off: the next step reads the current bank again.
-        let (mut s, shared) = song_rig();
-        shared.set_bank_pattern(0, 0, 0b1111);
-        shared.set_bank_pattern(1, 1, 0b1111);
-        shared.set_chain(&[1]);
-        shared.set_song_mode(true);
-        shared.set_song_loop(true);
-        shared.set_playing(true);
+        // Off: the song's pass plays to its end, then the current bank.
+        let (mut s, shared) = song_switch_rig(true);
         let left = play_blocks(&mut s, &shared, 7_000, 777); // steps 0 and 1
         assert_eq!(pad_at(&left, 0), Some(1));
         assert_eq!(pad_at(&left, 6_000), Some(1));
         shared.set_song_mode(false);
+        assert_eq!(shared.chain_position(), Some(0), "song mode is off, but its pass still plays");
+        let left = play_blocks(&mut s, &shared, 17_000, 777); // to 24,000
+        assert_eq!(pad_at(&left, 5_000), Some(1), "step 2 is still the song's B");
+        assert_eq!(pad_at(&left, 11_000), Some(1), "and step 3");
+        assert_eq!(shared.playing_bank(), Some(1));
+        let left = play_blocks(&mut s, &shared, 6_000, 777);
+        assert_eq!(pad_at(&left, 0), Some(0), "the wrap plays bank A (the current one)");
+        assert_eq!(shared.chain_position(), None);
+        assert_eq!(shared.playing_bank(), Some(0));
+    }
+
+    #[test]
+    fn switching_now_stops_a_song_on_the_next_step_but_starts_one_at_the_wrap() {
+        // On: entry 0 still waits for the wrap, so it plays a whole pass, even
+        // when the song doesn't loop and has only that entry.
+        let (mut s, shared) = song_switch_rig(false);
+        shared.set_switch_now(true);
+        shared.set_song_loop(false);
+        play_blocks(&mut s, &shared, 10_000, 777); // inside step 1
+        shared.set_song_mode(true);
+        let left = play_blocks(&mut s, &shared, 14_000, 777);
+        assert_eq!(pad_at(&left, 2_000), Some(0), "step 2 is still bank A");
+        assert_eq!(pad_at(&left, 8_000), Some(0), "and step 3");
+        assert_eq!(shared.chain_position(), None);
+        let left = play_blocks(&mut s, &shared, 24_000, 777);
+        assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000], "all four steps of entry 0");
+        assert_eq!(pad_at(&left, 0), Some(1), "the song's B from the wrap");
+        assert_eq!(shared.chain_position(), Some(0));
+        assert!(shared.is_playing());
+        play_blocks(&mut s, &shared, 1, 1);
+        assert!(!shared.is_playing(), "the song ends after its one whole pass");
+
+        // Off: the next step reads the current bank again.
+        let (mut s, shared) = song_switch_rig(true);
+        shared.set_switch_now(true);
+        play_blocks(&mut s, &shared, 7_000, 777); // steps 0 and 1
+        shared.set_song_mode(false);
         let left = play_blocks(&mut s, &shared, 17_000, 777);
         assert_eq!(pad_at(&left, 5_000), Some(0), "step 2 plays bank A (the current one)");
         assert_eq!(shared.chain_position(), None);
+    }
+
+    #[test]
+    fn stopping_with_a_switch_queued_plays_the_queued_bank_from_the_top() {
+        let (mut s, shared) = song_rig();
+        shared.set_bank_pattern(0, 0, 0b1111);
+        shared.set_bank_pattern(1, 1, 0b1111);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 10_000, 500);
+        shared.set_bank(1);
+        assert_eq!(shared.playing_bank(), Some(0), "B waits");
+        shared.set_playing(false);
+        play_blocks(&mut s, &shared, 500, 500);
+        assert_eq!(shared.playing_bank(), None);
+        shared.set_playing(true);
+        let left = play_blocks(&mut s, &shared, 24_000, 500);
+        assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000]);
+        assert_eq!(pad_at(&left, 0), Some(1), "play starts B on its first step");
+        assert_eq!(shared.playing_bank(), Some(1));
+    }
+
+    #[test]
+    fn a_shorter_pattern_keeps_a_waiting_switch_on_the_bar() {
+        let (mut s, shared) = song_rig();
+        shared.set_steps(8);
+        shared.set_bank_pattern(0, 0, 0xFF);
+        shared.set_bank_pattern(1, 1, 0xFF);
+        shared.set_playing(true);
+        play_blocks(&mut s, &shared, 40_000, 500); // inside step 6
+        shared.set_bank(1);
+        shared.set_steps(4); // step 7 is past the new end
+        let left = play_blocks(&mut s, &shared, 14_000, 500); // to 54,000
+        assert_eq!(onsets(&left), vec![2_000, 8_000], "steps at 42,000 and 48,000");
+        assert_eq!(pad_at(&left, 2_000), Some(0), "42,000 is step 3 of the new length, still A");
+        assert_eq!(pad_at(&left, 8_000), Some(1), "B starts on the bar, at 48,000");
+        assert_eq!(shared.current_step(), Some(0));
     }
 
     #[test]
@@ -2817,6 +3346,49 @@ mod tests {
         assert_eq!(shared.played(0), 1, "the sequencer skips it this pass");
         run(&mut s, &shared, 16 * 6_000 - 100);
         assert_eq!(shared.played(0), 2, "and plays it on the next");
+    }
+
+    #[test]
+    fn a_hit_at_the_end_of_a_pass_goes_to_the_queued_banks_first_step_once() {
+        let (mut s, shared) = recording_rig();
+        shared.set_bank_pattern(0, 0, 0xFFFF); // A plays pad 0 on every step
+        run(&mut s, &shared, 30_000);
+        shared.set_bank(1); // B, empty, waits for the wrap at 96,000
+        run(&mut s, &shared, 90_000 + 4_500 - 30_000); // late in A's last step
+        assert_eq!(shared.played(0), 16, "all of A's pass");
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.bank_pattern(1, 0), 1, "written to B's step 0, which plays next");
+        assert_eq!(shared.bank_pattern(0, 0), 0xFFFF, "A is untouched");
+        assert_eq!(shared.played(0), 17, "the hand hit");
+        run(&mut s, &shared, 2_000); // the wrap at 96,000 starts B
+        assert_eq!(shared.playing_bank(), Some(1));
+        assert_eq!(shared.played(0), 17, "B's step 0 is skipped this pass");
+        run(&mut s, &shared, 96_000);
+        assert_eq!(shared.played(0), 18, "and plays on the next");
+    }
+
+    #[test]
+    fn a_hit_while_a_switch_waits_goes_into_the_pattern_playing() {
+        let (mut s, shared) = recording_rig();
+        run(&mut s, &shared, 25_000); // 1,000 frames into step 4
+        shared.set_bank(1); // B waits for the wrap at 96,000
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.bank_pattern(0, 0), 1 << 4, "on A's step 4, which was playing");
+        assert_eq!(shared.bank_pattern(1, 0), 0, "not B");
+
+        run(&mut s, &shared, 34_500 - 25_100); // late in step 5
+        shared.trigger(0);
+        run(&mut s, &shared, 100);
+        assert_eq!(shared.bank_pattern(0, 0), 1 << 4 | 1 << 6, "on A's step 6, which plays next");
+        assert_eq!(shared.played(0), 2, "the two hand hits");
+        run(&mut s, &shared, 2_000); // step 6 fires at 36,000
+        assert_eq!(shared.played(0), 2, "A's step 6 is skipped this pass");
+        run(&mut s, &shared, 96_000 - 36_600 + 1); // through the wrap
+        assert_eq!(shared.playing_bank(), Some(1), "B from the wrap");
+        assert_eq!(shared.bank_pattern(1, 0), 0);
+        assert_eq!(shared.played(0), 2, "B is empty");
     }
 
     #[test]
