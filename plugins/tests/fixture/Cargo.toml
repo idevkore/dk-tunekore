@@ -1,0 +1,21 @@
+# A tiny VST3 plugin used only by soundcraft-vst3-host's integration tests. Not part of the
+# SoundCraft workspace (the empty [workspace] table makes it its own root); the test builds it
+# with `cargo build` and loads the resulting library. Never shipped.
+#
+# From soundCraft (MIT OR Apache-2.0), kept with its wording as attribution; tuneKore's tests use
+# it the same way. See ../../third_party/soundcraft/ for the licence and what changed.
+[package]
+name = "vst3-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+vst3 = "0.3"
+
+[workspace]
