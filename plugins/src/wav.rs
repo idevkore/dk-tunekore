@@ -36,7 +36,7 @@ pub fn write_f32(path: &Path, sample_rate: u32, channels: &[Vec<f32>]) -> io::Re
 pub fn read_f32(path: &Path) -> io::Result<(u32, Vec<Vec<f32>>)> {
     let bytes = std::fs::read(path)?;
     let bad = || io::Error::new(io::ErrorKind::InvalidData, "not a 32-bit float WAV file");
-    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..16] != b"WAVEfmt " || &bytes[20..22] != 3u16.to_le_bytes() {
+    if bytes.len() < 44 || &bytes[..4] != b"RIFF" || &bytes[8..16] != b"WAVEfmt " || bytes[20..22] != 3u16.to_le_bytes() {
         return Err(bad());
     }
     let n_ch = u16::from_le_bytes([bytes[22], bytes[23]]) as usize;
@@ -46,8 +46,8 @@ pub fn read_f32(path: &Path) -> io::Result<(u32, Vec<Vec<f32>>)> {
         return Err(bad());
     }
     let mut channels = vec![Vec::with_capacity(data.len() / 4 / n_ch); n_ch];
-    for (i, s) in data.chunks_exact(4).enumerate() {
-        channels[i % n_ch].push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+    for (i, s) in data.as_chunks::<4>().0.iter().enumerate() {
+        channels[i % n_ch].push(f32::from_le_bytes(*s));
     }
     Ok((rate, channels))
 }

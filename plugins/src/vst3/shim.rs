@@ -35,7 +35,6 @@ unsafe extern "C" {
     fn tk_i_pppp(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: *mut c_void, a3: *mut c_void, a4: *mut c_void) -> i32;
     fn tk_i_piip(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: i32, a3: i32, a4: *mut c_void) -> i32;
     fn tk_i_pudp(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: u32, a3: f64, a4: *mut c_void) -> i32;
-    fn tk_i_pupp(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: u32, a3: *mut c_void, a4: *mut c_void) -> i32;
     fn tk_i_piiip(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: i32, a3: i32, a4: i32, a5: *mut c_void) -> i32;
     fn tk_i_piiib(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: i32, a3: i32, a4: i32, a5: u8) -> i32;
     fn tk_i_ppipi(f: *const c_void, out: *mut i32, a1: *mut c_void, a2: *mut c_void, a3: i32, a4: *mut c_void, a5: i32) -> i32;
@@ -45,9 +44,13 @@ unsafe extern "C" {
     fn tk_p_(f: *const c_void, out: *mut *mut c_void) -> i32;
 
     // Test doubles with a plugin method's shape: fn(object, arg) -> tresult.
+    #[cfg(test)]
     fn tk_selftest_ok(a: *mut c_void, b: *mut c_void) -> i32;
+    #[cfg(test)]
     fn tk_selftest_throws_std(a: *mut c_void, b: *mut c_void) -> i32;
+    #[cfg(test)]
     fn tk_selftest_throws_int(a: *mut c_void, b: *mut c_void) -> i32;
+    #[cfg(test)]
     fn tk_selftest_throws_other(a: *mut c_void, b: *mut c_void) -> i32;
 }
 
@@ -181,17 +184,6 @@ pub unsafe fn i_pudp<T, A: RawPtr>(
 ) -> Guarded<i32> {
     let mut out = 0;
     finish(unsafe { tk_i_pudp(f as *const c_void, &mut out, this.cast(), id, v, p.raw()) }, out)
-}
-#[inline]
-pub unsafe fn i_pupp<T, A: RawPtr, B: RawPtr>(
-    f: unsafe extern "system" fn(*mut T, u32, A, B) -> i32,
-    this: *mut T,
-    id: u32,
-    a: A,
-    b: B,
-) -> Guarded<i32> {
-    let mut out = 0;
-    finish(unsafe { tk_i_pupp(f as *const c_void, &mut out, this.cast(), id, a.raw(), b.raw()) }, out)
 }
 #[inline]
 pub unsafe fn i_piiip<T, A: RawPtr>(

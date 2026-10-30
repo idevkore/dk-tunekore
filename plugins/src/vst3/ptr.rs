@@ -57,12 +57,6 @@ impl<I: Interface> PlugPtr<I> {
         }
     }
 
-    /// Gives the reference up without releasing it.
-    pub fn into_raw(self) -> *mut I {
-        let p = self.ptr.as_ptr();
-        std::mem::forget(self);
-        p
-    }
 }
 
 impl<I: Interface> Clone for PlugPtr<I> {
@@ -139,7 +133,6 @@ method!(sv::IEditController, get_parameter_count, i_p, [getParameterCount], () -
 method!(sv::IEditController, get_parameter_info, i_pip, [getParameterInfo], (index: i32, info: *mut sv::ParameterInfo) -> i32);
 method!(sv::IEditController, get_param_string_by_value, i_pudp, [getParamStringByValue], (id: u32, value: f64, out: *mut sv::String128) -> i32);
 method!(sv::IEditController, normalized_to_plain, d_pud, [normalizedParamToPlain], (id: u32, value: f64) -> f64);
-method!(sv::IEditController, plain_to_normalized, d_pud, [plainParamToNormalized], (id: u32, value: f64) -> f64);
 method!(sv::IEditController, get_param_normalized, d_pu, [getParamNormalized], (id: u32) -> f64);
 method!(sv::IEditController, set_param_normalized, i_pud, [setParamNormalized], (id: u32, value: f64) -> i32);
 method!(sv::IEditController, set_component_handler, i_pp, [setComponentHandler], (handler: *mut sv::IComponentHandler) -> i32);

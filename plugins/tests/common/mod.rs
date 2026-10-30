@@ -53,3 +53,40 @@ pub fn fixture_info(name: &str) -> PluginInfo {
 pub fn load_fixture(name: &str) -> Box<dyn PluginController> {
     tunekore_plugins::vst3::load(&fixture_info(name)).unwrap_or_else(|e| panic!("load {name}: {e}"))
 }
+
+/// The ways the C++ test plugin (`tests/bad_plugin`) misbehaves.
+#[derive(Clone, Copy)]
+pub enum Misbehaviour {
+    /// `initialize` throws a C++ exception.
+    ThrowsInInitialize = 0,
+    /// `GetPluginFactory` aborts the process.
+    AbortsOnLoad = 1,
+    /// `GetPluginFactory` never returns.
+    HangsOnLoad = 2,
+    /// `GetPluginFactory` throws a C++ exception.
+    ThrowsOnLoad = 3,
+}
+
+/// Compiles the misbehaving plugin and installs it as `<dir>/<name>.vst3`. `None` when there is no
+/// C++ compiler (the test then skips).
+pub fn bad_plugin(dir: &Path, name: &str, mode: Misbehaviour) -> Option<PathBuf> {
+    if cfg!(windows) {
+        return None;
+    }
+    let bundle = dir.join(format!("{name}.vst3"));
+    let (folder, exe) = if cfg!(target_os = "macos") { ("MacOS", name.to_string()) } else { (if cfg!(target_arch = "aarch64") { "aarch64-linux" } else { "x86_64-linux" }, format!("{name}.so")) };
+    let bin = bundle.join("Contents").join(folder);
+    std::fs::create_dir_all(&bin).ok()?;
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/bad_plugin/bad_plugin.cpp");
+    let shared = if cfg!(target_os = "macos") { "-dynamiclib" } else { "-shared" };
+    let st = Command::new("c++").args(["-std=c++17", shared, "-fPIC", "-fvisibility=hidden", &format!("-DMODE={}", mode as i32)]).arg(&src).arg("-o").arg(bin.join(exe)).status().ok()?;
+    st.success().then_some(bundle)
+}
+
+/// A fresh empty folder under the test target directory.
+pub fn scratch_dir(name: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}

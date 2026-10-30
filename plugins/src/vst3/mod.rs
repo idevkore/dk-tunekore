@@ -8,6 +8,9 @@
 //! plugin code goes through the exception-catching shim (`shim.rs`, `shim/tk_shim.cpp`).
 
 #![allow(unsafe_code)]
+// VST3's enum constants are `c_int` on Windows and `c_uint` elsewhere, so casts that are no-ops on
+// one platform are needed on another.
+#![allow(clippy::unnecessary_cast)]
 
 mod editor;
 mod events;

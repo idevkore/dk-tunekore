@@ -281,6 +281,7 @@ impl ParamChanges {
         }
     }
 
+    #[cfg(test)]
     pub fn queue_count(&self) -> usize {
         self.count.get()
     }
@@ -326,7 +327,6 @@ impl IParameterChangesTrait for ParamChanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vst3::Steinberg::Vst::IParameterChangesTrait as _;
 
     #[test]
     fn a_queue_collects_ramp_points_and_replaces_a_point_at_the_same_offset() {

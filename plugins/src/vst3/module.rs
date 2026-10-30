@@ -31,7 +31,6 @@ pub(crate) struct RawClass {
     pub name: String,
     pub vendor: String,
     pub version: String,
-    pub sdk_version: String,
     pub sub_categories: String,
 }
 
@@ -426,7 +425,6 @@ impl Bundle {
                         name: read_c8(&c.name),
                         vendor: if v.is_empty() { vendor.clone() } else { v },
                         version: read_c8(&c.version),
-                        sdk_version: read_c8(&c.sdkVersion),
                         sub_categories: read_c8(&c.subCategories),
                     });
                     continue;
@@ -442,7 +440,6 @@ impl Bundle {
                     name: read_c8(&c.name),
                     vendor: vendor.clone(),
                     version: String::new(),
-                    sdk_version: String::new(),
                     sub_categories: String::new(),
                 });
             }

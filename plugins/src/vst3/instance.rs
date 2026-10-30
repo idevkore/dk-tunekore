@@ -51,6 +51,9 @@ fn thrown(during: &'static str, e: Exception) -> PluginError {
     PluginError::Exception { during, message: e.0 }
 }
 
+/// The component's and the controller's connection points, linked to each other.
+type ConnectionPair = (ManuallyDrop<PlugPtr<sv::IConnectionPoint>>, ManuallyDrop<PlugPtr<sv::IConnectionPoint>>);
+
 /// The state both halves share.
 pub(crate) struct Instance {
     pub info: PluginInfo,
@@ -62,7 +65,7 @@ pub(crate) struct Instance {
     /// The controller is the component itself (single-component plugin).
     single: bool,
     controller_initialized: bool,
-    connections: Option<(ManuallyDrop<PlugPtr<sv::IConnectionPoint>>, ManuallyDrop<PlugPtr<sv::IConnectionPoint>>)>,
+    connections: Option<ConnectionPair>,
     pub host: ComWrapper<HostContext>,
     /// The plugin threw or returned a fatal error; it is never called again from `process`, and
     /// at drop its objects are leaked rather than touched.
