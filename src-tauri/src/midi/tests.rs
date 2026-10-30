@@ -57,6 +57,9 @@ struct Fake {
     values: Mutex<HashMap<String, f64>>,
     infos: Vec<TargetInfo>,
     sets: Mutex<Vec<(String, Vec<Move>)>>,
+    /// The mapper, to see whether its lock is held while the controls are used.
+    watch: Mutex<Option<Arc<Mutex<Mapper>>>>,
+    saw_lock: std::sync::atomic::AtomicBool,
 }
 
 fn linear(id: &str, min: f64, max: f64) -> TargetInfo {
@@ -69,7 +72,18 @@ impl Fake {
             values: Mutex::new(values.iter().map(|(k, v)| (k.to_string(), *v)).collect()),
             infos,
             sets: Mutex::default(),
+            watch: Mutex::default(),
+            saw_lock: Default::default(),
         })
+    }
+
+    /// Notes whether the mapper's lock is held right now.
+    fn check_lock(&self) {
+        if let Some(m) = self.watch.lock().unwrap().as_ref() {
+            if m.try_lock().is_err() {
+                self.saw_lock.store(true, Ordering::Relaxed);
+            }
+        }
     }
 
     fn value(&self, id: &str) -> f64 {
@@ -97,12 +111,15 @@ impl Targets<()> for Shared {
         self.0.infos.clone()
     }
     fn info(&self, _: &(), id: &str) -> Option<TargetInfo> {
+        self.0.check_lock();
         self.0.infos.iter().find(|i| i.id == id).cloned()
     }
     fn get(&self, _: &(), id: &str) -> Option<f64> {
+        self.0.check_lock();
         self.0.values.lock().unwrap().get(id).copied()
     }
     fn set(&self, _: &(), moves: &[Move], undo_key: &str) -> Result<(), String> {
+        self.0.check_lock();
         for m in moves {
             self.0.put(&m.target, m.value);
         }
@@ -112,7 +129,7 @@ impl Targets<()> for Shared {
 }
 
 struct Rig {
-    mapper: Mapper,
+    mapper: Arc<Mutex<Mapper>>,
     registry: Registry<()>,
     fake: Arc<Fake>,
     t0: Instant,
@@ -123,7 +140,13 @@ impl Rig {
         let fake = Fake::new(infos, values);
         let mut registry = Registry::default();
         registry.register(Arc::new(Shared(fake.clone())));
-        Self { mapper: Mapper::default(), registry, fake, t0: Instant::now() }
+        let mapper = Arc::new(Mutex::new(Mapper::default()));
+        *fake.watch.lock().unwrap() = Some(mapper.clone());
+        Self { mapper, registry, fake, t0: Instant::now() }
+    }
+
+    fn m(&self) -> std::sync::MutexGuard<'_, Mapper> {
+        self.mapper.lock().unwrap()
     }
 
     /// One level control, `test.level` 0..1, at 0.5.
@@ -139,17 +162,19 @@ impl Rig {
     fn send(&mut self, msgs: &[(u64, u8, u8, u8)]) -> Outcome {
         let batch: Vec<Arrived> = msgs.iter().map(|&(ms, channel, cc, value)| (self.at(ms), Cc { channel, cc, value })).collect();
         let now = batch.last().map_or(self.t0, |b| b.0);
-        run(&mut self.mapper, &self.registry, &(), &batch, now)
+        let out = run(&self.mapper, &self.registry, &(), &batch, now);
+        assert!(!self.fake.saw_lock.load(Ordering::Relaxed), "the mapper was locked while a control was looked up or set");
+        out
     }
 
     /// Lets time pass with nothing arriving.
     fn wait_until(&mut self, ms: u64) -> Outcome {
         let now = self.at(ms);
-        run(&mut self.mapper, &self.registry, &(), &[], now)
+        run(&self.mapper, &self.registry, &(), &[], now)
     }
 
     fn learn(&mut self, target: &str) {
-        self.mapper.learn(Some(target.into()));
+        self.m().learn(Some(target.into()));
     }
 }
 
@@ -162,13 +187,13 @@ fn close(a: f64, b: f64) -> bool {
 #[test]
 fn learning_takes_the_next_control_change_and_the_knob_then_moves_the_control() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
+    r.m().takeover = Takeover::Jump;
     r.learn("test.level");
     let out = r.send(&[(0, 1, 74, 10)]);
     assert_eq!(out.learned, vec![Mapping { source: Source::seven(1, 74), target: "test.level".into() }]);
     assert!(out.moves.is_empty(), "the learning message itself moves nothing");
     assert_eq!(r.fake.value("test.level"), 0.5);
-    assert_eq!(r.mapper.learning(), None, "learning stops once it has a controller");
+    assert_eq!(r.m().learning(), None, "learning stops once it has a controller");
 
     r.send(&[(10, 1, 74, 127)]);
     assert_eq!(r.fake.value("test.level"), 1.0);
@@ -181,8 +206,8 @@ fn learning_takes_the_next_control_change_and_the_knob_then_moves_the_control() 
 #[test]
 fn a_burst_sets_each_control_once_at_the_latest_value() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 74), "test.level".into());
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 74), "test.level".into());
     let out = r.send(&[(0, 1, 74, 20), (1, 1, 74, 30), (2, 1, 74, 127)]);
     assert_eq!(out.moves, vec![Move { target: "test.level".into(), value: 1.0 }]);
     assert_eq!(r.fake.sets.lock().unwrap().len(), 1);
@@ -191,7 +216,7 @@ fn a_burst_sets_each_control_once_at_the_latest_value() {
 #[test]
 fn learning_waits_a_moment_for_the_other_half_of_a_14_bit_pair() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
+    r.m().takeover = Takeover::Jump;
     r.learn("test.level");
     // CC 7 is below 32: it may be the coarse half of 7 + 39.
     assert!(r.send(&[(0, 1, 7, 64)]).learned.is_empty());
@@ -205,6 +230,83 @@ fn learning_waits_a_moment_for_the_other_half_of_a_14_bit_pair() {
 }
 
 #[test]
+fn a_new_coarse_half_starts_its_fine_half_from_zero() {
+    let mut r = Rig::level();
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::fourteen(1, 7), "test.level".into());
+    r.send(&[(0, 1, 7, 64), (0, 1, 39, 100)]);
+    assert!(close(r.fake.value("test.level"), (64.0 * 128.0 + 100.0) / 16383.0));
+    // The next coarse value comes in a batch of its own, its fine half not yet:
+    // it reads as 65 + 0, not 65 with the old fine half (a jump of most of a step).
+    r.send(&[(10, 1, 7, 65)]);
+    assert!(close(r.fake.value("test.level"), 65.0 * 128.0 / 16383.0), "{}", r.fake.value("test.level"));
+    r.send(&[(11, 1, 39, 3)]);
+    assert!(close(r.fake.value("test.level"), (65.0 * 128.0 + 3.0) / 16383.0));
+}
+
+#[test]
+fn the_mapper_isnt_locked_while_controls_are_looked_up_or_set() {
+    // Every `send` checks it; here a learn and a run of moves under each takeover.
+    for takeover in [Takeover::Pickup, Takeover::Jump, Takeover::Scale] {
+        let mut r = Rig::level();
+        r.m().takeover = takeover;
+        r.learn("test.level");
+        r.send(&[(0, 1, 74, 64)]);
+        for i in 0..20u8 {
+            r.send(&[(10 + u64::from(i) * 10, 1, 74, 64 + i)]);
+        }
+        assert!(!r.fake.sets.lock().unwrap().is_empty(), "{takeover:?} moved it");
+    }
+}
+
+#[test]
+fn a_learn_or_forget_between_lookup_and_decision_wins() {
+    // A pending knob whose mapping changed meanwhile moves nothing.
+    let mut m = Mapper::default();
+    m.takeover = Takeover::Jump;
+    m.assign(Source::seven(1, 74), "test.a".into());
+    m.feed(Instant::now(), Cc { channel: 1, cc: 74, value: 100 });
+    let pending = m.pending();
+    assert_eq!(pending.len(), 1);
+    m.forget("test.a");
+    let info = linear("test.a", 0.0, 1.0);
+    let moves = m.decide(pending.into_iter().map(|p| (p, Some(info.clone()), Some(0.0))).collect());
+    assert!(moves.is_empty());
+}
+
+// ---- Telling the windows ----
+
+fn outcome(touched: &[usize], moves: &[(&str, f64)]) -> Outcome {
+    Outcome { touched: touched.to_vec(), moves: moves.iter().map(|(t, v)| Move { target: t.to_string(), value: *v }).collect(), ..Default::default() }
+}
+
+#[test]
+fn the_windows_hear_at_most_30_times_a_second_and_get_the_full_state_when_the_gesture_ends() {
+    let t0 = Instant::now();
+    let ms = |n: u64| t0 + Duration::from_millis(n);
+    let mut t = Teller::default();
+    assert_eq!(t.wake_at(), None, "nothing waits");
+    t.note(&outcome(&[0], &[("test.a", 0.1)]), ms(0));
+    let due = t.take(ms(0));
+    assert_eq!((due.changed, due.moved.len(), due.settled.len()), (vec![0], 1, 0), "the first move goes out at once");
+    // Moves 10 ms apart: the next small update waits for 33 ms after the last.
+    t.note(&outcome(&[0], &[("test.a", 0.2)]), ms(10));
+    t.note(&outcome(&[1], &[("test.b", 0.5), ("test.a", 0.3)]), ms(20));
+    assert_eq!(t.take(ms(20)), Due::default());
+    assert_eq!(t.wake_at(), Some(ms(33)));
+    let due = t.take(ms(33));
+    assert_eq!(due.changed, vec![0, 1]);
+    assert_eq!(due.moved, vec![Moved { target: "test.b".into(), value: 0.5 }, Moved { target: "test.a".into(), value: 0.3 }], "each control's latest value, once");
+    // No move for the gesture gap: the full state, once, for everyone who moved in it.
+    assert_eq!(t.wake_at(), Some(ms(20) + GESTURE_GAP));
+    assert_eq!(t.take(ms(519)), Due::default());
+    let due = t.take(ms(520));
+    assert_eq!(due.settled, vec![0, 1]);
+    assert_eq!(t.wake_at(), None);
+    assert_eq!(t.take(ms(2_000)), Due::default());
+}
+
+#[test]
 fn a_controller_below_64_with_no_partner_learns_as_7_bit_after_the_wait() {
     let mut r = Rig::level();
     r.learn("test.level");
@@ -212,7 +314,7 @@ fn a_controller_below_64_with_no_partner_learns_as_7_bit_after_the_wait() {
     assert!(r.wait_until(20).learned.is_empty());
     let out = r.wait_until(41);
     assert_eq!(out.learned[0].source, Source::seven(1, 20));
-    assert_eq!(r.mapper.deadline(), None);
+    assert_eq!(r.m().deadline(), None);
 }
 
 #[test]
@@ -223,7 +325,7 @@ fn learning_skips_bank_select_and_data_entry() {
         assert!(r.send(&[(0, 1, cc, 1)]).learned.is_empty(), "CC {cc}");
     }
     r.wait_until(100);
-    assert_eq!(r.mapper.learning(), Some("test.level"), "still learning");
+    assert_eq!(r.m().learning(), Some("test.level"), "still learning");
     assert_eq!(r.send(&[(200, 1, 74, 1)]).learned.len(), 1);
 }
 
@@ -251,10 +353,10 @@ fn one_controller_moves_one_control_and_the_newest_learn_wins() {
 #[test]
 fn forgetting_a_mapping_stops_its_knob() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 74), "test.level".into());
-    assert!(r.mapper.forget("test.level"));
-    assert!(!r.mapper.forget("test.level"), "nothing left to forget");
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 74), "test.level".into());
+    assert!(r.m().forget("test.level"));
+    assert!(!r.m().forget("test.level"), "nothing left to forget");
     assert!(r.send(&[(0, 1, 74, 127)]).moves.is_empty());
     assert_eq!(r.fake.value("test.level"), 0.5);
 }
@@ -262,11 +364,11 @@ fn forgetting_a_mapping_stops_its_knob() {
 #[test]
 fn a_mapping_to_a_control_that_isnt_there_waits_and_is_kept() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 74), "test.gone".into());
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 74), "test.gone".into());
     assert!(r.send(&[(0, 1, 74, 127)]).moves.is_empty());
-    assert_eq!(r.mapper.mappings().len(), 1);
-    assert!(r.mapper.to_file()["mappings"][0]["target"] == "test.gone");
+    assert_eq!(r.m().mappings().len(), 1);
+    assert!(r.m().to_file()["mappings"][0]["target"] == "test.gone");
 }
 
 // ---- Gestures and undo ----
@@ -274,8 +376,8 @@ fn a_mapping_to_a_control_that_isnt_there_waits_and_is_kept() {
 #[test]
 fn a_knob_gesture_is_one_undo_step() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 74), "test.level".into());
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 74), "test.level".into());
     // A slow turn: a message every 100 ms for a second and a half.
     for (i, ms) in (0..1500).step_by(100).enumerate() {
         r.send(&[(ms, 1, 74, i as u8 * 8)]);
@@ -293,9 +395,9 @@ fn a_knob_gesture_is_one_undo_step() {
 #[test]
 fn two_knobs_turned_together_share_the_gesture() {
     let mut r = Rig::new(vec![linear("test.a", 0.0, 1.0), linear("test.b", 0.0, 1.0)], &[("test.a", 0.0), ("test.b", 0.0)]);
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 1), "test.a".into());
-    r.mapper.assign(Source::seven(1, 2), "test.b".into());
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 1), "test.a".into());
+    r.m().assign(Source::seven(1, 2), "test.b".into());
     for i in 0..10u64 {
         r.send(&[(i * 20, 1, 1, i as u8 * 10)]);
         r.send(&[(i * 20 + 10, 1, 2, i as u8 * 10)]);
@@ -328,7 +430,7 @@ fn pick_up_waits_until_the_knob_reaches_the_value() {
 #[test]
 fn pick_up_takes_over_at_once_when_the_knob_is_already_there() {
     let mut r = Rig::level();
-    r.mapper.assign(Source::seven(1, 74), "test.level".into());
+    r.m().assign(Source::seven(1, 74), "test.level".into());
     r.send(&[(0, 1, 74, 64)]);
     assert!(close(r.fake.value("test.level"), 64.0 / 127.0), "within two steps of the value");
 }
@@ -336,8 +438,8 @@ fn pick_up_takes_over_at_once_when_the_knob_is_already_there() {
 #[test]
 fn jump_sets_the_value_straight_away() {
     let mut r = Rig::level();
-    r.mapper.takeover = Takeover::Jump;
-    r.mapper.assign(Source::seven(1, 74), "test.level".into());
+    r.m().takeover = Takeover::Jump;
+    r.m().assign(Source::seven(1, 74), "test.level".into());
     r.send(&[(0, 1, 74, 0)]);
     assert_eq!(r.fake.value("test.level"), 0.0);
 }
@@ -345,7 +447,7 @@ fn jump_sets_the_value_straight_away() {
 #[test]
 fn scale_moves_the_value_in_proportion_until_the_knob_catches_it() {
     let mut r = Rig::new(vec![linear("test.level", 0.0, 1.0)], &[("test.level", 1.0)]);
-    r.mapper.takeover = Takeover::Scale;
+    r.m().takeover = Takeover::Scale;
     r.learn("test.level");
     r.send(&[(0, 1, 74, 64)]); // the knob is halfway, the value at the top
     r.send(&[(10, 1, 74, 32)]);
@@ -520,7 +622,28 @@ fn entries_this_build_cant_read_are_written_back_and_duplicates_resolve_to_the_l
     assert_eq!(m.mappings(), &[Mapping { source: Source::seven(1, 74), target: "test.b".into() }]);
     let out = m.to_file();
     assert_eq!(out["mappings"].as_array().unwrap().len(), 3, "test.b, and the two it can't read");
-    assert_eq!(out["mappings"][2]["nrpn"], 1234);
+    // Kept entries go first, so a newer build reading the file lets this one's learns win.
+    assert_eq!(out["mappings"][1]["nrpn"], 1234);
+    assert_eq!(out["mappings"][2]["target"], "test.b");
+}
+
+#[test]
+fn a_new_learn_replaces_kept_entries_on_its_controller_or_control() {
+    let file = json!({ "mappings": [
+        { "target": "test.a", "channel": 1, "cc": 74, "curve": "from a newer build" },
+        { "target": "test.b", "channel": 2, "cc": 10, "curve": "from a newer build" },
+        { "target": "test.c", "channel": 3, "cc": 39, "curve": "from a newer build" },
+        { "target": "test.d", "nrpn": 99, "channel": 1 },
+    ] });
+    let mut m = Mapper::default();
+    m.load(Mapper::read_file(Some(&file)).unwrap());
+    assert!(m.mappings().is_empty(), "none of them readable here");
+    m.assign(Source::seven(1, 74), "test.z".into()); // the same controller as test.a
+    m.assign(Source::seven(5, 1), "test.b".into()); // the same control as test.b
+    m.assign(Source::fourteen(3, 7), "test.y".into()); // CC 7 + 39: takes test.c's 39
+    let out = m.to_file();
+    let targets: Vec<&str> = out["mappings"].as_array().unwrap().iter().map(|e| e["target"].as_str().unwrap()).collect();
+    assert_eq!(targets, ["test.d", "test.z", "test.b", "test.y"]);
 }
 
 #[test]

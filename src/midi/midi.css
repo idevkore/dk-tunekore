@@ -2,11 +2,15 @@
 
 /* A mapped control: a small lime dot at its left edge. */
 .midi-learnable { position: relative; }
+/* The control inside the outline keeps its own layout (a grid row, a flex row). */
+.midi-learn-inner { display: contents; }
+/* Read by screen readers, not shown. */
+.midi-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .midi-mark { position: absolute; left: -9px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--lime); pointer-events: none; }
 
 /* Learn mode: every learnable control outlined, clicks learn instead of moving it. */
 .midi-learn-on .midi-learnable { outline: 1px dashed var(--violet-soft); outline-offset: 3px; border-radius: 6px; background: rgba(128, 81, 255, 0.08); cursor: pointer; }
-.midi-learn-on .midi-learnable > * { pointer-events: none; }
+.midi-learn-on .midi-learn-inner { pointer-events: none; } /* as well as inert, for any engine without it */
 .midi-learn-on .midi-learnable:hover,
 .midi-learn-on .midi-learnable:focus-visible { outline: 2px solid var(--lime); }
 /* In Learn mode the mark shows the controller's number. */

@@ -66,8 +66,10 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   const [libraryRefresh, setLibraryRefresh] = useState(0);
   const [audioOpen, setAudioOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
-  const [tempoText, setTempoText] = useState("120");
   const held = useRef(new Set<string>());
+  // What a MIDI knob has set since the last full view (`sampler:controls`):
+  // kept out of state, so a turn doesn't re-render the whole Sampler.
+  const live = useRef<api.Controls | null>(null);
   const viewRef = useRef(view);
   viewRef.current = view;
   const activeRef = useRef(active);
@@ -77,13 +79,17 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
 
   const say = useCallback((text: string, error = false) => setMessage({ text, error }), [setMessage]);
   const fail = useCallback((e: unknown) => say(String(e), true), [say]);
-  const take = useCallback((v: View) => setView(v), []);
+  const take = useCallback((v: View) => {
+    live.current = null;
+    setView(v);
+  }, []);
 
   // State, ticks and the meter.
   useEffect(() => {
     api.state().then(take).catch(fail);
     const offs = [
       subscribe(api.onState(take)),
+      subscribe(api.onControls((c) => (live.current = c))),
       // Hidden behind the Timeline it keeps only whether the transport plays;
       // the full tick comes back when it shows again.
       subscribe(
@@ -152,10 +158,6 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
     const t = setTimeout(() => setLevel((l) => (l < 0.0005 ? 0 : l * 0.8)), 60);
     return () => clearTimeout(t);
   }, [level]);
-
-  useEffect(() => {
-    if (view) setTempoText(String(Math.round(view.tempo * 10) / 10));
-  }, [view?.tempo]);
 
   // Window title follows the project.
   useEffect(() => {
@@ -430,12 +432,9 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
 
   const pad = view.pads[selected];
   const setTransport = (tempo: number, swing: number, steps: number) => api.setTransport(tempo, swing, steps).then(take).catch(fail);
-  const commitTempo = () => {
-    const t = Number(tempoText);
-    if (Number.isFinite(t) && t >= 40 && t <= 300) void setTransport(t, view.swing, view.steps);
-    else setTempoText(String(view.tempo));
-  };
-  const nudgeTempo = (d: number) => void setTransport(Math.min(300, Math.max(40, Math.round(view.tempo + d))), view.swing, view.steps);
+  // The tempo and swing now, a knob's if one is turning them.
+  const nowTempo = () => live.current?.tempo ?? view.tempo;
+  const nowSwing = () => live.current?.swing ?? view.swing;
   const hasPattern = view.pads.some((p) => p.name && p.steps.some(Boolean));
 
   return (
@@ -499,31 +498,10 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
             <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M6 2h4l2.5 12h-9zM8 11l4-6" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" strokeLinecap="round" /></svg>
           </button>
           <Learnable target={TEMPO} label="Tempo" className="tempo">
-            <button className="nudge wide-only" onClick={() => nudgeTempo(-1)} aria-label="Slower">−</button>
-            <input
-              aria-label="Tempo in BPM"
-              className="mono"
-              inputMode="decimal"
-              value={tempoText}
-              onChange={(e) => setTempoText(e.target.value)}
-              onBlur={commitTempo}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
-                if (e.key === "ArrowUp" || e.key === "ArrowDown") {
-                  e.preventDefault();
-                  nudgeTempo(e.key === "ArrowUp" ? 1 : -1);
-                }
-              }}
-            />
-            <span className="unit">BPM</span>
-            <button className="nudge wide-only" onClick={() => nudgeTempo(1)} aria-label="Faster">+</button>
+            <TempoBox tempo={view.tempo} onTempo={(t) => void setTransport(t, nowSwing(), view.steps)} />
           </Learnable>
           <Learnable target={SWING} label="Swing">
-            <label className="swing" title="Swing: delays every other sixteenth">
-              <span>Swing</span>
-              <input type="range" min={0} max={1} step={0.01} value={view.swing} onChange={(e) => void setTransport(view.tempo, Number(e.target.value), view.steps)} />
-              <span className="mono">{Math.round(view.swing * 100)}%</span>
-            </label>
+            <SwingSlider swing={view.swing} onSwing={(v) => void setTransport(nowTempo(), v, view.steps)} />
           </Learnable>
         </div>
 
@@ -593,7 +571,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
             dropTarget={dropPad}
             onVelocity={(p, s, vel) => void api.setVelocity(p, s, vel).then(take).catch(fail)}
             pattern={view.pattern}
-            onLength={(n) => void setTransport(view.tempo, view.swing, n)}
+            onLength={(n) => void setTransport(nowTempo(), nowSwing(), n)}
             onExtras={(p, s, c, r) => void api.setStepExtras(p, s, c, r).then(take).catch(fail)}
             chain={view.chain}
             songMode={view.songMode}
@@ -658,6 +636,80 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
       )}
     </div>
     </MidiLearn>
+  );
+}
+
+const bpm = (t: number) => String(Math.round(t * 10) / 10);
+
+/**
+ * The tempo box. A MIDI knob's moves show as they happen (`sampler:controls`)
+ * without re-rendering the Sampler; the full view catches up when the turn
+ * ends. While the field is being typed in, it keeps what was typed.
+ */
+function TempoBox({ tempo, onTempo }: { tempo: number; onTempo: (bpm: number) => void }) {
+  const [text, setText] = useState(bpm(tempo));
+  const now = useRef(tempo);
+  const typing = useRef(false);
+  const show = useCallback((t: number) => {
+    now.current = t;
+    if (!typing.current) setText(bpm(t));
+  }, []);
+  useEffect(() => show(tempo), [tempo, show]);
+  useEffect(() => subscribe(api.onControls((c) => show(c.tempo))), [show]);
+  const nudge = (d: number) => onTempo(Math.min(300, Math.max(40, Math.round(now.current + d))));
+  const commit = () => {
+    typing.current = false;
+    const t = Number(text);
+    if (Number.isFinite(t) && t >= 40 && t <= 300) onTempo(t);
+    else setText(bpm(now.current));
+  };
+  return (
+    <>
+      <button className="nudge wide-only" onClick={() => nudge(-1)} aria-label="Slower">−</button>
+      <input
+        aria-label="Tempo in BPM"
+        className="mono"
+        inputMode="decimal"
+        value={text}
+        onFocus={() => (typing.current = true)}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+          if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+            e.preventDefault();
+            nudge(e.key === "ArrowUp" ? 1 : -1);
+          }
+        }}
+      />
+      <span className="unit">BPM</span>
+      <button className="nudge wide-only" onClick={() => nudge(1)} aria-label="Faster">+</button>
+    </>
+  );
+}
+
+/** The swing slider, following a MIDI knob the same way. */
+function SwingSlider({ swing, onSwing }: { swing: number; onSwing: (v: number) => void }) {
+  const [shown, setShown] = useState(swing);
+  useEffect(() => setShown(swing), [swing]);
+  useEffect(() => subscribe(api.onControls((c) => setShown(c.swing))), []);
+  return (
+    <label className="swing" title="Swing: delays every other sixteenth">
+      <span>Swing</span>
+      <input
+        type="range"
+        min={0}
+        max={1}
+        step={0.01}
+        value={shown}
+        onChange={(e) => {
+          const v = Number(e.target.value);
+          setShown(v);
+          onSwing(v);
+        }}
+      />
+      <span className="mono">{Math.round(shown * 100)}%</span>
+    </label>
   );
 }
 

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use tunekore_engine::{TrackId, PADS};
 
-use super::map::{Curve, Lookup, Move, TargetInfo};
+use super::map::{Curve, Move, TargetInfo};
 use crate::sampler::{self, PadSettings};
 
 /// The controls one module offers, under its id prefixes. `C` is the
@@ -47,8 +47,12 @@ pub trait Targets<C>: Send + Sync + 'static {
     fn set(&self, ctx: &C, moves: &[Move], undo_key: &str) -> Result<(), String>;
 
     /// Called at most 30 times a second after `set` moved something, to
-    /// tell the UI.
+    /// tell the UI. Keep it small: it goes out while a knob turns.
     fn changed(&self, _ctx: &C) {}
+
+    /// Called once a gesture that moved something here has ended (no move
+    /// for [`super::map::GESTURE_GAP`]): the time to send the full state.
+    fn settled(&self, _ctx: &C) {}
 }
 
 /// Every module's targets.
@@ -96,6 +100,10 @@ impl<C: 'static> Registry<C> {
         self.provider(id)?.1.info(ctx, id)
     }
 
+    pub fn get(&self, ctx: &C, id: &str) -> Option<f64> {
+        self.provider(id)?.1.get(ctx, id)
+    }
+
     /// Hands each provider its share of `moves`. Returns the providers that
     /// moved something (to tell later through [`Registry::changed`]) and
     /// the errors.
@@ -123,25 +131,12 @@ impl<C: 'static> Registry<C> {
         }
     }
 
-    /// This registry seen from `ctx`, for the mapper.
-    pub fn with<'a>(&'a self, ctx: &'a C) -> Bound<'a, C> {
-        Bound { registry: self, ctx }
-    }
-}
-
-/// A registry and its context, as the mapper looks targets up.
-pub struct Bound<'a, C> {
-    registry: &'a Registry<C>,
-    ctx: &'a C,
-}
-
-impl<C: 'static> Lookup for Bound<'_, C> {
-    fn info(&self, target: &str) -> Option<TargetInfo> {
-        self.registry.info(self.ctx, target)
-    }
-
-    fn get(&self, target: &str) -> Option<f64> {
-        self.registry.provider(target)?.1.get(self.ctx, target)
+    pub fn settled(&self, ctx: &C, which: &[usize]) {
+        for &i in which {
+            if let Some(t) = self.providers.get(i) {
+                t.settled(ctx);
+            }
+        }
     }
 }
 
@@ -354,7 +349,15 @@ impl Targets<tauri::AppHandle> for SamplerTargets {
         .map(|_| ())
     }
 
+    /// While a knob turns: the settings, tempo and swing alone
+    /// (`sampler:controls`), which the Inspector and the transport follow.
     fn changed(&self, app: &tauri::AppHandle) {
+        use tauri::Emitter;
+        let _ = app.emit("sampler:controls", sampler::controls(app));
+    }
+
+    /// The turn is over: the whole view once (undo, unsaved, everything else).
+    fn settled(&self, app: &tauri::AppHandle) {
         sampler::publish_now(app);
     }
 }
@@ -469,5 +472,11 @@ impl Targets<tauri::AppHandle> for TrackTargets {
             mixer.set_mix(track, mix)?;
         }
         Ok(())
+    }
+
+    /// A track's mix is saved with the project: once the fader stops, the
+    /// view goes out again so the window's unsaved mark is right.
+    fn settled(&self, app: &tauri::AppHandle) {
+        sampler::publish_now(app);
     }
 }

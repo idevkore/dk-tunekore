@@ -257,12 +257,6 @@ struct Learning {
     first: Option<(Cc, Instant)>,
 }
 
-/// What a mapper needs from the controls: their ranges and their values now.
-pub trait Lookup {
-    fn info(&self, target: &str) -> Option<TargetInfo>;
-    fn get(&self, target: &str) -> Option<f64>;
-}
-
 /// The mappings and the state of every knob that moves them.
 #[derive(Default)]
 pub struct Mapper {
@@ -296,9 +290,11 @@ impl Mapper {
         self.learning = target.map(|target| Learning { target, first: None });
     }
 
-    /// Maps `source` to `target`, taking both from any mapping that had either.
+    /// Maps `source` to `target`, taking both from any mapping that had
+    /// either, including entries kept from a newer build.
     pub fn assign(&mut self, source: Source, target: String) -> Mapping {
         self.mappings.retain(|m| m.target != target && !m.source.overlaps(&source));
+        self.kept.retain(|e| !kept_overlaps(e, &source, &target));
         self.knobs.retain(|s, _| !s.overlaps(&source));
         let m = Mapping { source, target };
         self.mappings.push(m.clone());
@@ -340,6 +336,11 @@ impl Mapper {
             self.gesture += 1;
         }
         self.last_move = Some(at);
+        // A new coarse half starts its fine half from 0 again, as the MIDI spec
+        // has it, so it never pairs with a fine half sent for the old coarse value.
+        if cc.cc < 32 && self.mappings.iter().any(|m| m.source.bits == 14 && m.source.channel == cc.channel && m.source.cc == cc.cc) {
+            self.raw.insert((cc.channel, cc.cc + 32), 0);
+        }
         for m in &self.mappings {
             if m.source.listens(cc.channel, cc.cc) && !self.changed.contains(&m.source) {
                 self.changed.push(m.source);
@@ -408,23 +409,38 @@ impl Mapper {
         }
     }
 
-    /// The new values for every control whose knob moved since the last
-    /// call, after the takeover rule. Controls that don't exist now (a
-    /// plugin that was removed) are skipped; their mappings stay.
-    pub fn moves(&mut self, controls: &impl Lookup) -> Vec<Move> {
+    /// The knobs that moved since the last call, with their controls: what
+    /// [`Mapper::decide`] needs looked up. Taking them is quick, so the
+    /// mapper's lock needn't be held while the controls are looked up.
+    pub fn pending(&mut self) -> Vec<Pending> {
         let changed = std::mem::take(&mut self.changed);
+        changed
+            .into_iter()
+            .filter_map(|source| {
+                let m = self.mappings.iter().find(|m| m.source == source)?;
+                Some(Pending { source, target: m.target.clone(), raw: self.raw_value(&source)? })
+            })
+            .collect()
+    }
+
+    /// The new values for the pending knobs, given each control's range and
+    /// value now, after the takeover rule. Controls that don't exist now (a
+    /// plugin that was removed) are skipped; their mappings stay.
+    pub fn decide(&mut self, looked: Vec<Looked>) -> Vec<Move> {
         let mut out = Vec::new();
-        for source in changed {
-            let Some(m) = self.mappings.iter().find(|m| m.source == source) else { continue };
-            let (Some(info), Some(raw)) = (controls.info(&m.target), self.raw_value(&source)) else { continue };
-            let Some(now) = controls.get(&m.target) else { continue };
-            let k = knob_position(raw, source.bits, info.centered);
+        for (p, info, now) in looked {
+            // Learned again or forgotten since: this knob no longer moves that control.
+            if !self.mappings.iter().any(|m| m.source == p.source && m.target == p.target) {
+                continue;
+            }
+            let (Some(info), Some(now)) = (info, now) else { continue };
+            let k = knob_position(p.raw, p.source.bits, info.centered);
             let cur = info.position(now);
-            let knob = self.knobs.entry(source).or_default();
+            let knob = self.knobs.entry(p.source).or_default();
             // Still holding the value this knob last wrote: nothing else moved the control.
             let ours = knob.written == Some(now);
             let synced = ours && knob.synced;
-            let near = |p: f64| (p - cur).abs() <= PICKUP_RANGE;
+            let near = |x: f64| (x - cur).abs() <= PICKUP_RANGE;
             let to = match self.takeover {
                 Takeover::Jump => Some(k),
                 Takeover::Pickup => {
@@ -448,7 +464,7 @@ impl Mapper {
             knob.synced = (t - k).abs() <= PICKUP_RANGE;
             let value = info.value(t);
             if value != now {
-                out.push(Move { target: m.target.clone(), value });
+                out.push(Move { target: p.target, value });
             } else {
                 // Already there: the knob holds it now, with nothing to write.
                 knob.written = Some(now);
@@ -457,27 +473,26 @@ impl Mapper {
         out
     }
 
-    /// Notes what each moved control reads now that its moves were applied,
-    /// so the next move knows whether something else changed it since.
-    pub fn settle(&mut self, moves: &[Move], controls: &impl Lookup) {
-        for mv in moves {
-            let Some(m) = self.mappings.iter().find(|m| m.target == mv.target) else { continue };
+    /// Notes what each moved control reads now that its moves were applied
+    /// (control, value), so the next move knows whether something else
+    /// changed it since.
+    pub fn settle_values(&mut self, read: &[(String, Option<f64>)]) {
+        for (target, value) in read {
+            let Some(m) = self.mappings.iter().find(|m| &m.target == target) else { continue };
             if let Some(knob) = self.knobs.get_mut(&m.source) {
-                knob.written = controls.get(&mv.target);
+                knob.written = *value;
             }
         }
     }
 
     // ---- The `midi` section ----
 
-    /// The mappings as the project's `midi` section.
+    /// The mappings as the project's `midi` section. Entries kept from a
+    /// newer build go first: a reader takes the later of two entries on one
+    /// controller, so this build's own learns win in a newer build too.
     pub fn to_file(&self) -> Value {
-        let mut list: Vec<Value> = self
-            .mappings
-            .iter()
-            .map(|m| serde_json::to_value(MappingFile::from(m)).unwrap_or(Value::Null))
-            .collect();
-        list.extend(self.kept.iter().cloned());
+        let mut list: Vec<Value> = self.kept.clone();
+        list.extend(self.mappings.iter().map(|m| serde_json::to_value(MappingFile::from(m)).unwrap_or(Value::Null)));
         json!({ "mappings": list })
     }
 
@@ -509,6 +524,35 @@ impl Mapper {
             self.assign(m.source, m.target);
         }
         self.kept = file.kept;
+    }
+}
+
+/// A knob that moved: the control it moves and where the knob is now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub source: Source,
+    pub target: String,
+    raw: u16,
+}
+
+/// A pending knob with its control's range and value now (`None` when the
+/// control isn't there), for [`Mapper::decide`].
+pub type Looked = (Pending, Option<TargetInfo>, Option<f64>);
+
+/// Whether an entry kept from a newer build names `target`, or a controller
+/// `source` shares a number with: a new learn of either replaces it.
+fn kept_overlaps(entry: &Value, source: &Source, target: &str) -> bool {
+    if entry.get("target").and_then(Value::as_str) == Some(target) {
+        return true;
+    }
+    let num = |k: &str| entry.get(k).and_then(Value::as_u64);
+    match (num("channel"), num("cc")) {
+        (Some(channel @ 1..=16), Some(cc @ 0..=127)) => {
+            let bits = if num("bits") == Some(14) && cc < 32 { 14 } else { 7 };
+            let theirs = Source { channel: channel as u8, cc: cc as u8, bits };
+            theirs.overlaps(source) || source.overlaps(&theirs)
+        }
+        _ => false,
     }
 }
 

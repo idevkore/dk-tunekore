@@ -15,6 +15,8 @@ const RANGES: Record<string, [number, number]> = {
 export function installMidiMock(v: SamplerView, publish: () => unknown) {
   const view: MidiView = { mappings: [], learning: null, takeover: "pickup" };
   let focus = 0;
+  // Like the app: small updates while a knob turns, the full view once it stops.
+  let settle: ReturnType<typeof setTimeout> | undefined;
   const pads: [string, string][] = Object.entries(PAD_CONTROLS).map(([, c]) => [c!.name, c!.label]);
   const targets = (): TargetInfo[] => [
     { id: TEMPO, label: "Tempo", group: "Transport" },
@@ -64,8 +66,10 @@ export function installMidiMock(v: SamplerView, publish: () => unknown) {
       moved = t === 0 ? -60 : Math.max(-60, 20 * Math.log10(2 * t * t * t));
     }
     v.dirty = true;
-    publish();
+    void emit("sampler:controls", { pads: v.pads.map((p) => structuredClone(p.settings)), tempo: v.tempo, swing: v.swing });
     void emit("midi:moved", [{ target: m.target, value: moved }]);
+    clearTimeout(settle);
+    settle = setTimeout(publish, 500);
   };
 
   return (cmd: string, a: Record<string, unknown>): unknown => {

@@ -34,7 +34,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tunekore_engine::{SamplerHandle, PADS};
 
 use crate::project;
-use map::{Cc, Mapper, Mapping, Move, Source, TargetInfo, Takeover};
+use map::{Cc, Looked, Mapper, Mapping, Move, Source, TargetInfo, Takeover, GESTURE_GAP};
 use targets::{MasterTarget, Registry, SamplerTargets, TrackTargets};
 pub use targets::Targets;
 
@@ -254,44 +254,125 @@ struct Outcome {
 }
 
 /// Learns from and applies one batch of control changes. `now` completes a
-/// learn that waited for a 14-bit partner. Generic so tests can drive it
-/// with targets of their own.
-fn run<C: 'static>(mapper: &mut Mapper, registry: &Registry<C>, ctx: &C, batch: &[Arrived], now: Instant) -> Outcome {
+/// learn that waited for a 14-bit partner. The mapper's lock is held only
+/// for its own quick steps, never while a control is looked up or set: a
+/// busy Sampler or engine (a project opening, the output moving) then holds
+/// up the knobs, not the MIDI commands. Generic so tests can drive it with
+/// targets of their own.
+fn run<C: 'static>(mapper: &Mutex<Mapper>, registry: &Registry<C>, ctx: &C, batch: &[Arrived], now: Instant) -> Outcome {
     let mut out = Outcome::default();
-    for &(at, cc) in batch {
-        out.learned.extend(mapper.feed(at, cc));
+    let (pending, key) = {
+        let mut m = mapper.lock().unwrap();
+        for &(at, cc) in batch {
+            out.learned.extend(m.feed(at, cc));
+        }
+        out.learned.extend(m.tick(now));
+        (m.pending(), m.gesture_key())
+    };
+    if pending.is_empty() {
+        return out;
     }
-    out.learned.extend(mapper.tick(now));
-    let controls = registry.with(ctx);
-    let moves = mapper.moves(&controls);
-    if !moves.is_empty() {
-        let (touched, errors) = registry.apply(ctx, &moves, &mapper.gesture_key());
-        mapper.settle(&moves, &controls);
-        out.touched = touched;
-        out.errors = errors;
-        out.moves = moves;
+    let looked: Vec<Looked> = pending
+        .into_iter()
+        .map(|p| {
+            let (info, value) = (registry.info(ctx, &p.target), registry.get(ctx, &p.target));
+            (p, info, value)
+        })
+        .collect();
+    let moves = mapper.lock().unwrap().decide(looked);
+    if moves.is_empty() {
+        return out;
     }
+    let (touched, errors) = registry.apply(ctx, &moves, &key);
+    let read: Vec<(String, Option<f64>)> = moves.iter().map(|m| (m.target.clone(), registry.get(ctx, &m.target))).collect();
+    mapper.lock().unwrap().settle_values(&read);
+    out.touched = touched;
+    out.errors = errors;
+    out.moves = moves;
     out
 }
 
 /// A control moved by a knob, for the windows (`midi:moved`).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Moved {
     target: String,
     value: f64,
+}
+
+/// When the windows hear about knob moves: each provider's small update
+/// (`changed`) at most every [`TELL_EVERY`], with `midi:moved`, and its
+/// full state (`settled`) once a gesture has had no move for [`GESTURE_GAP`].
+#[derive(Debug, Default)]
+struct Teller {
+    /// Providers that moved something since the windows last heard, and the moves.
+    to_tell: Vec<usize>,
+    moved: Vec<Moved>,
+    told: Option<Instant>,
+    /// Providers that moved something in the gesture now going on.
+    in_gesture: Vec<usize>,
+    last_move: Option<Instant>,
+}
+
+/// What a [`Teller`] says is due now.
+#[derive(Debug, Default, PartialEq)]
+struct Due {
+    changed: Vec<usize>,
+    moved: Vec<Moved>,
+    settled: Vec<usize>,
+}
+
+impl Teller {
+    /// Notes what a batch moved, at `now`.
+    fn note(&mut self, out: &Outcome, now: Instant) {
+        for &t in &out.touched {
+            for list in [&mut self.to_tell, &mut self.in_gesture] {
+                if !list.contains(&t) {
+                    list.push(t);
+                }
+            }
+        }
+        for m in &out.moves {
+            self.moved.retain(|x| x.target != m.target);
+            self.moved.push(Moved { target: m.target.clone(), value: m.value });
+        }
+        if !out.moves.is_empty() {
+            self.last_move = Some(now);
+        }
+    }
+
+    /// When the thread should wake for the next of these, if anything waits.
+    fn wake_at(&self) -> Option<Instant> {
+        let tell = (!self.to_tell.is_empty() || !self.moved.is_empty()).then(|| self.told.map_or(self.last_move, |t| Some(t + TELL_EVERY))).flatten();
+        let settle = (!self.in_gesture.is_empty()).then(|| self.last_move.map(|t| t + GESTURE_GAP)).flatten();
+        [tell, settle].into_iter().flatten().min()
+    }
+
+    /// Takes what is due at `now`.
+    fn take(&mut self, now: Instant) -> Due {
+        let mut due = Due::default();
+        let ended = !self.in_gesture.is_empty() && self.last_move.is_some_and(|t| now >= t + GESTURE_GAP);
+        let waiting = !self.to_tell.is_empty() || !self.moved.is_empty();
+        if waiting && (ended || self.told.is_none_or(|t| now >= t + TELL_EVERY)) {
+            due.changed = std::mem::take(&mut self.to_tell);
+            due.moved = std::mem::take(&mut self.moved);
+            self.told = Some(now);
+        }
+        if ended {
+            due.settled = std::mem::take(&mut self.in_gesture);
+        }
+        due
+    }
 }
 
 /// Learns and applies control changes as they arrive; see the module docs.
 fn spawn_mapper(app: AppHandle, state: Arc<MidiState>) {
     let Some(rx) = state.receiver.lock().unwrap().take() else { return };
     std::thread::spawn(move || {
-        let mut told = Instant::now();
-        let mut to_tell: Vec<usize> = Vec::new();
-        let mut moved: Vec<Moved> = Vec::new();
+        let mut teller = Teller::default();
         loop {
-            // Wake for a control change, a learn's 14-bit wait, or the next time to tell the windows.
-            let tell_at = (!to_tell.is_empty() || !moved.is_empty()).then(|| told + TELL_EVERY);
-            let wake = [state.mapper.lock().unwrap().deadline(), tell_at].into_iter().flatten().min();
+            // Wake for a control change, a learn's 14-bit wait, the next time to
+            // tell the windows, or the end of a gesture.
+            let wake = [state.mapper.lock().unwrap().deadline(), teller.wake_at()].into_iter().flatten().min();
             let first = match wake {
                 Some(at) => match rx.recv_timeout(at.saturating_duration_since(Instant::now())) {
                     Ok(m) => Some(m),
@@ -311,10 +392,7 @@ fn spawn_mapper(app: AppHandle, state: Arc<MidiState>) {
                 }
             }
             let registry = state.registry();
-            let out = {
-                let mut mapper = state.mapper.lock().unwrap();
-                run(&mut mapper, &registry, &app, &batch, Instant::now())
-            };
+            let out = run(&state.mapper, &registry, &app, &batch, Instant::now());
             for e in &out.errors {
                 eprintln!("MIDI mapping: {e}");
             }
@@ -327,22 +405,13 @@ fn spawn_mapper(app: AppHandle, state: Arc<MidiState>) {
                 // The project has unsaved changes now: the title says so.
                 crate::sampler::publish_now(&app);
             }
-            for t in out.touched {
-                if !to_tell.contains(&t) {
-                    to_tell.push(t);
-                }
+            teller.note(&out, Instant::now());
+            let due = teller.take(Instant::now());
+            if !due.changed.is_empty() || !due.moved.is_empty() {
+                registry.changed(&app, &due.changed);
+                let _ = app.emit("midi:moved", &due.moved);
             }
-            for m in out.moves {
-                moved.retain(|x| x.target != m.target);
-                moved.push(Moved { target: m.target, value: m.value });
-            }
-            if (!to_tell.is_empty() || !moved.is_empty()) && told.elapsed() >= TELL_EVERY {
-                registry.changed(&app, &to_tell);
-                let _ = app.emit("midi:moved", &moved);
-                to_tell.clear();
-                moved.clear();
-                told = Instant::now();
-            }
+            registry.settled(&app, &due.settled);
         }
     });
 }
@@ -389,12 +458,12 @@ fn mapping_view<C: 'static>(registry: &Registry<C>, ctx: &C, m: &Mapping) -> Map
 fn view(app: &AppHandle) -> MidiView {
     let state = app.state::<Arc<MidiState>>();
     let registry = state.registry();
-    let mapper = state.mapper.lock().unwrap();
-    MidiView {
-        mappings: mapper.mappings().iter().map(|m| mapping_view(&registry, app, m)).collect(),
-        learning: mapper.learning().map(String::from),
-        takeover: mapper.takeover,
-    }
+    // Copied out first: naming the controls may wait on the Sampler or the engine.
+    let (mappings, learning, takeover) = {
+        let mapper = state.mapper.lock().unwrap();
+        (mapper.mappings().to_vec(), mapper.learning().map(String::from), mapper.takeover)
+    };
+    MidiView { mappings: mappings.iter().map(|m| mapping_view(&registry, app, m)).collect(), learning, takeover }
 }
 
 /// Sends the mappings to every window, and returns them.

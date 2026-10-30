@@ -5,6 +5,8 @@
 // - Right-click a control: Learn, Learn for this pad only, or Forget.
 // A mapped control carries a small mark (its controller's number in Learn
 // mode). The list of mappings is in the Audio dialog (MidiMappings.tsx).
+// In Learn mode the control inside each outline is inert, so a click, Tab or
+// Enter reaches the outline (which learns), never the slider or field in it.
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { subscribe } from "../sampler/api";
@@ -17,6 +19,8 @@ interface MenuAt {
   target: string;
   pinned: string | null;
   label: string;
+  /** Where focus goes back to when the menu closes from the keyboard or a choice. */
+  opener: HTMLElement | null;
 }
 
 interface Ctx {
@@ -128,8 +132,9 @@ export function MidiLearn({ selected, active, onSay, children }: Props) {
       pick(el);
     };
     const key = (e: KeyboardEvent) => {
+      // Only the outline itself: the control inside is inert in Learn mode.
       const el = at(e);
-      if (!el || (e.key !== "Enter" && e.key !== " ")) return;
+      if (!el || el !== e.target || (e.key !== "Enter" && e.key !== " ")) return;
       e.preventDefault();
       e.stopPropagation();
       pick(el);
@@ -197,6 +202,7 @@ export function Learnable({ target, label, className, children }: LearnableProps
   const waiting = !!c.view.learning && (c.view.learning === target || c.view.learning === pinned);
   const describe = (m: midi.MappingView) =>
     `${m.controller}${pinned ? (m.target === target ? ", follows the selected pad" : `, pad ${c.selected + 1} only`) : ""}`;
+  const mappedText = mapped.length ? `MIDI: ${mapped.map(describe).join("; ")}` : "";
   const cls = ["midi-learnable", className, mapped.length ? "midi-mapped" : "", waiting ? "midi-waiting" : ""].filter(Boolean).join(" ");
   return (
     <div
@@ -206,23 +212,41 @@ export function Learnable({ target, label, className, children }: LearnableProps
       tabIndex={c.mode ? 0 : undefined}
       role={c.mode ? "button" : undefined}
       aria-label={c.mode ? `Learn MIDI for ${label}${mapped.length ? ` (now ${mapped.map(describe).join("; ")})` : ""}` : undefined}
-      title={c.mode ? `Click, then move a knob or fader to map ${label}` : undefined}
+      title={c.mode ? `Click, then move a knob or fader to map ${label}` : mappedText || undefined}
       onContextMenu={(e) => {
+        // A text field keeps its own menu (copy, paste); the rest of the control has ours.
+        if ((e.target as HTMLElement).closest("input:not([type=range]):not([type=checkbox]), textarea")) return;
         e.preventDefault();
-        c.openMenu({ x: e.clientX, y: e.clientY, target, pinned, label });
+        const opener = document.activeElement instanceof HTMLElement && e.currentTarget.contains(document.activeElement) ? document.activeElement : e.currentTarget;
+        c.openMenu({ x: e.clientX, y: e.clientY, target, pinned, label, opener });
       }}
     >
-      {children}
+      {/* `display: contents`, so the control lays out as before; inert while Learn mode is on. */}
+      <div className="midi-learn-inner" inert={c.mode || undefined}>
+        {children}
+      </div>
       {mapped.length > 0 && (
-        <span className="midi-mark" title={`MIDI: ${mapped.map(describe).join("; ")}`} aria-label={`Mapped to MIDI ${mapped.map(describe).join("; ")}`}>
-          {c.mode ? mapped.map((m) => midi.shortController(m.source).replace("CC ", "")).join(" ") : null}
-        </span>
+        <>
+          <span className="midi-mark" role="img" aria-label="MIDI mapped">
+            {c.mode ? mapped.map((m) => midi.shortController(m.source).replace("CC ", "")).join(" ") : null}
+          </span>
+          <span className="midi-sr">{mappedText}</span>
+        </>
       )}
     </div>
   );
 }
 
-/** The right-click menu on a control. */
+/** Gives focus back to whatever opened the menu, or the first control in it. */
+function refocus(opener: HTMLElement | null) {
+  if (!opener?.isConnected) return;
+  const target = opener.matches("[data-midi-target]:not([tabindex])")
+    ? opener.querySelector<HTMLElement>("input, select, button, [tabindex]")
+    : opener;
+  target?.focus();
+}
+
+/** The right-click menu on a control: Arrow keys, Home and End move between its items. */
 function Menu({ at, onClose }: { at: MenuAt; onClose: () => void }) {
   const c = useMidi()!;
   const ref = useRef<HTMLDivElement>(null);
@@ -235,22 +259,34 @@ function Menu({ at, onClose }: { at: MenuAt; onClose: () => void }) {
       setPos({ left: Math.max(4, Math.min(at.x, window.innerWidth - r.width - 4)), top: Math.max(4, Math.min(at.y, window.innerHeight - r.height - 4)) });
       el.querySelector<HTMLButtonElement>("[role=menuitem]")?.focus();
     }
+    // A click elsewhere closes it and leaves focus where the click put it.
     const away = (e: PointerEvent) => ref.current?.contains(e.target as Node) || onClose();
-    const esc = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return;
+    const keys = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+        refocus(at.opener);
+        return;
+      }
+      const items = [...(ref.current?.querySelectorAll<HTMLButtonElement>("[role=menuitem]") ?? [])];
+      const i = items.indexOf(document.activeElement as HTMLButtonElement);
+      const to = { ArrowDown: (i + 1) % items.length, ArrowUp: (i - 1 + items.length) % items.length, Home: 0, End: items.length - 1 }[e.key];
+      if (to === undefined || !items.length) return;
       e.preventDefault();
       e.stopPropagation();
-      onClose();
+      items[to].focus();
     };
     window.addEventListener("pointerdown", away, true);
-    window.addEventListener("keydown", esc, true);
+    window.addEventListener("keydown", keys, true);
     return () => {
       window.removeEventListener("pointerdown", away, true);
-      window.removeEventListener("keydown", esc, true);
+      window.removeEventListener("keydown", keys, true);
     };
   }, [at, onClose]);
   const pick = (f: () => void) => () => {
     onClose();
+    refocus(at.opener);
     f();
   };
   const mapped = c.view.mappings.filter((m) => m.target === at.target || m.target === at.pinned);

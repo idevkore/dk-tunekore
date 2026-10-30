@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
 import SampleInput from "./SampleInput";
-import { AUDIO_EXTENSIONS, PAD_KEYS, type PadSettings, type PadView } from "./api";
+import { AUDIO_EXTENSIONS, PAD_KEYS, onControls, subscribe, type PadSettings, type PadView } from "./api";
 import { Learnable } from "../midi/learn";
 import { padLearn } from "../midi/api";
 
@@ -38,6 +38,17 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
   const [s, setS] = useState(pad.settings);
   const [tab, setTab] = useState<"sample" | "shape">("sample");
   useEffect(() => setS(pad.settings), [pad.settings, pad.index]);
+  // A MIDI knob turning this pad's settings: follow it without the full view.
+  useEffect(
+    () =>
+      subscribe(
+        onControls((c) => {
+          const p = c.pads[pad.index];
+          if (p) setS(p);
+        }),
+      ),
+    [pad.index],
+  );
 
   function change(patch: Partial<PadSettings>) {
     const next = { ...s, ...patch };
