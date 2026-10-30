@@ -1407,7 +1407,9 @@ impl Sampler {
         if let Some(b) = self.held_back.take() {
             self.give_back(b);
         }
-        loop {
+        // While a box waits to go back, leave new samples queued: taking one
+        // could need a second place to hold its old box.
+        while self.held_back.is_none() {
             let Some(Ok(mut b)) = self.incoming.as_mut().map(rtrb::Consumer::pop) else { return };
             if b.slot >= SLOTS {
                 self.give_back(b);
@@ -3771,5 +3773,23 @@ mod tests {
         }
         g.mixer.collect();
         assert_eq!(total, 0, "the audio thread allocated or freed {total} times");
+    }
+
+    #[test]
+    fn a_full_return_queue_holds_old_samples_back_and_frees_none() {
+        let shared = SamplerShared::default();
+        let (mut s, mut link) = sampler(RATE);
+        // Fill the return queue, as if the control side had stopped collecting.
+        while s.garbage.as_mut().unwrap().push(Box::default()).is_ok() {}
+        link.send.push(Box::new(SampleSlot { slot: 0, data: Some(click(10)) })).unwrap();
+        link.send.push(Box::new(SampleSlot { slot: 1, data: Some(click(10)) })).unwrap();
+        let mut out = vec![0.0; 128];
+        let (_, allocs) = realtime(|| s.render(&shared, &mut out, 2));
+        assert_eq!(allocs, 0, "nothing freed on the audio thread");
+        assert!(s.held_back.is_some(), "the first one's box waits");
+        assert_eq!(link.send.slots(), 31, "the second sample waits in its queue");
+        link.collect();
+        run(&mut s, &shared, 64);
+        assert!(s.held_back.is_none() && s.samples[1].is_some(), "both arrive once there is room");
     }
 }
