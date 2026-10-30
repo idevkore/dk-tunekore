@@ -29,3 +29,12 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [build-dependencies]
 cc = "1"
+
+# Examples and tests drive an AppKit event loop.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSEvent", "NSResponder", "NSRunningApplication", "NSView", "NSWindow", "NSGraphics"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSDate", "NSGeometry", "NSObjCRuntime", "NSRunLoop", "NSString"] }
+
+[[test]]
+name = "editor_main_thread"
+harness = false

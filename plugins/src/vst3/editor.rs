@@ -142,6 +142,13 @@ impl Editor {
             }
             Err(e) => return Err(throws("IPlugView::attached", e)),
         }
+        // Many editors only know their size once attached (Kontakt reports one then).
+        let mut after = rect;
+        // SAFETY: valid, attached view; `after` is writable.
+        let size = match unsafe { view.get_size(&mut after) } {
+            Ok(sb::kResultOk) => rect_size(&after),
+            _ => size,
+        };
         Ok((Editor { view, _frame: frame }, size))
     }
 
@@ -166,8 +173,15 @@ impl Editor {
         matches!(unsafe { self.view.can_resize() }, Ok(sb::kResultTrue))
     }
 
-    /// Offers the editor a new size (it may adjust it) and returns the size it took.
-    pub fn resize(&self, _inst: &Instance, size: EditorSize) -> EditorSize {
+    /// Offers the editor a new size (it may adjust it) and returns the size it took. An editor
+    /// that cannot be resized keeps its size.
+    pub fn resize(&self, inst: &Instance, size: EditorSize) -> EditorSize {
+        if !self.resizable(inst) {
+            let mut r = rect_of(size);
+            // SAFETY: valid view; `r` is writable. On failure the offered size is reported back.
+            let _ = unsafe { self.view.get_size(&mut r) };
+            return rect_size(&r);
+        }
         let mut rect = rect_of(size);
         // SAFETY: valid view; `rect` is writable.
         let _ = unsafe { self.view.check_size_constraint(&mut rect) };
