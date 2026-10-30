@@ -1,0 +1,228 @@
+/* The colour themes (theme/theme.ts lists them). The tuneKore theme is the
+   tokens on :root in App.css; each theme here sets the core tokens, and the
+   block after them works out the rest. A theme applies to the window
+   (data-theme on <html>) or to any element with the theme-scope class, such
+   as a swatch in the theme picker. Palettes are written out as hex, from the
+   themes' published colours. Canvas tokens (--lane-b, --clip, --clip-sel,
+   --grid-ink) stay hex: the Timeline reads them as numbers. */
+
+/* ---- Dark ---- */
+
+:is(:root, .theme-scope)[data-theme="dracula"] {
+  --ground: #282a36;
+  --deep: #1e1f29;
+  --side: #21222c;
+  --card: #2f3140;
+  --card-2: #363849;
+  --line: #393b4c;
+  --line-2: #44475a;
+  --text: #f8f8f2;
+  --soft: #e2e2dc;
+  --dim: #c3c7da;
+  --faint: #a9b2d8;
+  --violet: #bd93f9;
+  --violet-soft: #d6bcfc;
+  --lime: #50fa7b;
+  --warn: #ffb86c;
+  --on-accent: #1e1f29;
+  --on-lime: #1e1f29;
+  --danger: #ff5555;
+  --danger-text: #ff9e9e;
+  --lane-b: #252733;
+  --clip: #302f44;
+  --clip-sel: #46405f;
+  --grid-ink: #f8f8f2;
+}
+
+:is(:root, .theme-scope)[data-theme="nord"] {
+  --ground: #2e3440;
+  --deep: #272c36;
+  --side: #2b303b;
+  --card: #343a47;
+  --card-2: #3b4252;
+  --line: #3b4252;
+  --line-2: #4c566a;
+  --text: #eceff4;
+  --soft: #e5e9f0;
+  --dim: #d8dee9;
+  --faint: #b6c0d2;
+  --violet: #88c0d0;
+  --violet-soft: #a3d4e0;
+  --lime: #a3be8c;
+  --warn: #ebcb8b;
+  --on-accent: #2e3440;
+  --on-lime: #2e3440;
+  --danger: #bf616a;
+  --danger-text: #efb4b9;
+  --lane-b: #2a2f3a;
+  --clip: #353d4b;
+  --clip-sel: #3f5262;
+  --grid-ink: #eceff4;
+}
+
+:is(:root, .theme-scope)[data-theme="gruvbox-dark"] {
+  --ground: #282828;
+  --deep: #1d2021;
+  --side: #242424;
+  --card: #32302f;
+  --card-2: #3c3836;
+  --line: #3c3836;
+  --line-2: #504945;
+  --text: #fbf1c7;
+  --soft: #ebdbb2;
+  --dim: #d5c4a1;
+  --faint: #b3a590;
+  --violet: #fe8019;
+  --violet-soft: #feab6a;
+  --lime: #b8bb26;
+  --warn: #fabd2f;
+  --on-accent: #1d2021;
+  --on-lime: #1d2021;
+  --danger: #fb4934;
+  --danger-text: #fc9a8e;
+  --lane-b: #212121;
+  --clip: #36302a;
+  --clip-sel: #4b3a2a;
+  --grid-ink: #fbf1c7;
+}
+
+:is(:root, .theme-scope)[data-theme="tokyo-night"] {
+  --ground: #1a1b26;
+  --deep: #16161e;
+  --side: #1c1e2b;
+  --card: #1f2335;
+  --card-2: #24283b;
+  --line: #292e42;
+  --line-2: #3b4261;
+  --text: #c0caf5;
+  --soft: #a9b1d6;
+  --dim: #9aa5ce;
+  --faint: #959ec8;
+  --violet: #7aa2f7;
+  --violet-soft: #a4c0fa;
+  --lime: #9ece6a;
+  --warn: #e0af68;
+  --on-accent: #16161e;
+  --on-lime: #16161e;
+  --danger: #f7768e;
+  --danger-text: #fbaebb;
+  --lane-b: #181924;
+  --clip: #22263a;
+  --clip-sel: #2e3a5c;
+  --grid-ink: #c0caf5;
+}
+
+/* ---- Light ---- */
+
+:is(:root, .theme-scope)[data-theme="solarized-light"] {
+  --ground: #fdf6e3;
+  --deep: #eee8d5;
+  --side: #f7f0dc;
+  --card: #fffbef;
+  --card-2: #f4eedb;
+  --line: #e6dfc9;
+  --line-2: #d3cbb3;
+  --text: #073642;
+  --soft: #1f4550;
+  --dim: #4a5f66;
+  --faint: #526569;
+  --violet: #5f64bb;
+  --violet-soft: #4b50a3;
+  --lime: #6a7a00;
+  --warn: #b0410f;
+  --on-accent: #ffffff;
+  --on-lime: #ffffff;
+  --danger: #dc322f;
+  --danger-text: #b52624;
+  --lane-b: #f4edd8;
+  --clip: #fffcf3;
+  --clip-sel: #e9e8f6;
+  --grid-ink: #073642;
+}
+
+:is(:root, .theme-scope)[data-theme="github-light"] {
+  --ground: #f6f8fa;
+  --deep: #ffffff;
+  --side: #ffffff;
+  --card: #ffffff;
+  --card-2: #f6f8fa;
+  --line: #d8dee4;
+  --line-2: #d0d7de;
+  --text: #1f2328;
+  --soft: #31363c;
+  --dim: #59636e;
+  --faint: #5c646e;
+  --violet: #0969da;
+  --violet-soft: #0757b8;
+  --lime: #1a7f37;
+  --warn: #875a00;
+  --on-accent: #ffffff;
+  --on-lime: #ffffff;
+  --danger: #d1242f;
+  --danger-text: #b91c26;
+  --lane-b: #f6f8fa;
+  --clip: #ffffff;
+  --clip-sel: #ddf4ff;
+  --grid-ink: #1f2328;
+}
+
+:is(:root, .theme-scope)[data-theme="gruvbox-light"] {
+  --ground: #fbf1c7;
+  --deep: #f2e5bc;
+  --side: #f6ecc4;
+  --card: #f9f5d7;
+  --card-2: #f2e5bc;
+  --line: #e8d9ae;
+  --line-2: #d5c4a1;
+  --text: #282828;
+  --soft: #3c3836;
+  --dim: #504945;
+  --faint: #665c54;
+  --violet: #af3a03;
+  --violet-soft: #9a3303;
+  --lime: #6e6a0c;
+  --warn: #8a4f08;
+  --on-accent: #fbf1c7;
+  --on-lime: #fbf1c7;
+  --danger: #9d0006;
+  --danger-text: #9d0006;
+  --lane-b: #f4e8bd;
+  --clip: #fbf6dd;
+  --clip-sel: #f3dcc2;
+  --grid-ink: #282828;
+}
+
+/* Every theme but tuneKore also gets the tokens worked out from these
+   (--select, --well, --pad-loaded and the rest): theme.ts sets them when it
+   applies the theme, as plain colours that any WebKit draws. */
+
+/* Light themes: softer shadows, native controls drawn light, clips tinted
+   with their track's colour, and the logo with TUNE in ink. */
+:is(:root, .theme-scope)[data-tone="light"] {
+  --shadow: rgba(40, 40, 60, 0.18);
+  --backdrop: rgba(20, 20, 30, 0.35);
+  --clip-tint: 0.16;
+  --wave-shade: 0.5;
+  color-scheme: light;
+}
+:root[data-tone="light"] :is(.bar-logo, .boot-logo) { content: url("../../brand/tunekore-logo-color-on-light.svg"); }
+
+/* ---- The theme picker (ThemePicker.tsx) ---- */
+.theme-picker { position: relative; flex-shrink: 0; }
+.theme-btn { width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--panel-line); background: var(--card); color: var(--dim); display: grid; place-items: center; padding: 0; }
+.theme-btn:hover, .theme-btn[aria-expanded="true"] { color: var(--text); border-color: var(--line-2); }
+.theme-menu { min-width: 210px; gap: 1px; }
+.theme-group { font-size: 10.5px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); padding: 6px 10px 4px; }
+.theme-menu [role=menuitemradio] { width: 100%; display: flex; align-items: center; gap: 10px; text-align: left; border: 0; background: transparent; padding: 6px 10px; border-radius: 6px; font-size: 12.5px; color: var(--text); }
+.theme-menu [role=menuitemradio]:hover, .theme-menu [role=menuitemradio]:focus-visible { background: var(--select); outline: none; }
+.theme-name { flex: 1; }
+.theme-check { color: var(--violet-soft); visibility: hidden; }
+.theme-menu [aria-checked="true"] .theme-check { visibility: visible; }
+/* The theme's own ground, with its accent and highlight. */
+.theme-swatch { width: 30px; height: 18px; flex-shrink: 0; border-radius: 5px; background: var(--ground); box-shadow: inset 0 0 0 1px var(--line-2); display: flex; align-items: center; justify-content: center; gap: 4px; }
+.theme-swatch i { width: 7px; height: 7px; border-radius: 50%; background: var(--violet); }
+.theme-swatch i + i { background: var(--lime); }
+/* The compact top bar (App.css, under 1220 px) has no room for a framed button. */
+@media (max-width: 1219px) {
+  .theme-btn { width: 24px; border-color: transparent; background: transparent; }
+}

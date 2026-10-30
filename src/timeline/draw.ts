@@ -5,6 +5,10 @@
 import { COLOURS, type ClipView, type SourceView, type TrackView } from "./api";
 import { barBeats, clipEnd, isLooped, secondsPerBeat, sourceAt } from "./edits";
 import { getPeaks, levelFor } from "./peaks";
+import { alpha, mix, palette } from "../theme/theme";
+
+/** A clip's name, on its track's colour (bright in every theme). */
+const NAME_INK = "#0c0c10";
 
 export const RULER_HEIGHT = 34;
 /** The top strip of the ruler sets the loop; the rest seeks. */
@@ -138,9 +142,10 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   const src = s.sources.get(c.path);
   const missing = !src || src.missing;
   const selected = s.selected.has(c.id);
+  const p = palette();
   ctx.save();
   roundRect(ctx, x0, y, w, h, 4);
-  ctx.fillStyle = selected ? "#2c2546" : "#1d1b27";
+  ctx.fillStyle = mix(selected ? p.clipSel : p.clip, colour, p.clipTint);
   ctx.fill();
   ctx.clip();
   // The name strip.
@@ -151,7 +156,7 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   const body = y + head;
   const bodyH = h - head;
   if (bodyH > 4 && !missing && src) {
-    ctx.fillStyle = colour;
+    ctx.fillStyle = mix(colour, p.text, p.waveShade);
     ctx.globalAlpha = 0.85;
     drawWave(ctx, c, src, x0, x1, body + 1, bodyH - 2, s);
     ctx.globalAlpha = 1;
@@ -159,7 +164,7 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   // Where a looped clip starts its content again.
   if (isLooped(c) && c.content > 0) {
     const spb = secondsPerBeat(s.tempo);
-    ctx.fillStyle = "rgba(255,255,255,0.35)";
+    ctx.fillStyle = alpha(p.ink, 0.35);
     for (let t = c.content - c.phase; t < c.length; t += c.content) {
       const x = Math.round(x0 + (t / spb) * s.zoom);
       if (x > s.width) break;
@@ -175,8 +180,8 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   const spb = secondsPerBeat(s.tempo);
   const fin = (c.fadeIn / spb) * s.zoom;
   const fout = (c.fadeOut / spb) * s.zoom;
-  ctx.strokeStyle = "rgba(255,255,255,0.7)";
-  ctx.fillStyle = "rgba(12,12,16,0.45)";
+  ctx.strokeStyle = alpha(p.ink, 0.7);
+  ctx.fillStyle = alpha(p.deep, 0.45);
   ctx.lineWidth = 1;
   if (fin > 1) {
     ctx.beginPath();
@@ -204,7 +209,7 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   }
   // The name.
   if (w > 24 && h > 12) {
-    ctx.fillStyle = "#0c0c10";
+    ctx.fillStyle = NAME_INK;
     ctx.font = "600 10.5px Geist, -apple-system, sans-serif";
     ctx.textBaseline = "middle";
     const label = missing ? `${c.name} (missing)` : c.name;
@@ -213,30 +218,31 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   ctx.restore();
   // Outline, and the handles when it is under the pointer or selected.
   roundRect(ctx, x0 + 0.5, y + 0.5, w - 1, h - 1, 4);
-  ctx.strokeStyle = selected ? "#f7f7f8" : missing ? "#ffb36b" : "rgba(255,255,255,0.12)";
+  ctx.strokeStyle = selected ? p.text : missing ? p.warn : alpha(p.ink, 0.12);
   ctx.setLineDash(missing ? [4, 3] : []);
   ctx.stroke();
   ctx.setLineDash([]);
   if ((s.hover === c.id || selected) && h - head >= 9 && w >= 36) {
-    ctx.fillStyle = "#f7f7f8";
+    ctx.fillStyle = p.text;
     ctx.fillRect(Math.round(x0 + fin) - 3, body - 3, 6, 6);
     ctx.fillRect(Math.round(x1 - fout) - 3, body - 3, 6, 6);
     // The loop handle: the top of the right edge.
-    ctx.fillStyle = "#b7ff00";
+    ctx.fillStyle = p.highlight;
     ctx.fillRect(Math.round(x1) - 3, y + 1, 2, head - 2);
   }
 }
 
 export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
   prepare(ctx, s.width, s.height, s.dpr);
+  const p = palette();
   const bar = barBeats(s.signature);
   // Lane backgrounds.
   for (const [i, lane] of s.lanes.entries()) {
     const y = lane.top - s.scrollTop;
     if (y > s.height || y + lane.height < 0) continue;
-    ctx.fillStyle = i % 2 ? "#141419" : "#16161c";
+    ctx.fillStyle = i % 2 ? p.laneB : p.side;
     ctx.fillRect(0, y, s.width, lane.height);
-    ctx.fillStyle = "#24242d";
+    ctx.fillStyle = p.line;
     ctx.fillRect(0, y + lane.height - 1, s.width, 1);
   }
   const bottom = Math.min(s.height, s.end - s.scrollTop);
@@ -244,20 +250,20 @@ export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
   if (s.loop.on) {
     const a = beatToX(s.loop.start, s.scroll, s.zoom);
     const b = beatToX(s.loop.end, s.scroll, s.zoom);
-    ctx.fillStyle = "rgba(128,81,255,0.08)";
+    ctx.fillStyle = alpha(p.accent, 0.08);
     ctx.fillRect(a, 0, b - a, bottom);
   }
   // The grid.
   const g = gridSteps(s.zoom, bar);
-  if (g.fine) verticals(ctx, g.fine, s, 0, bottom, "rgba(255,255,255,0.025)");
-  if (g.beat) verticals(ctx, g.beat, s, 0, bottom, "rgba(255,255,255,0.05)");
-  verticals(ctx, g.bar, s, 0, bottom, "rgba(255,255,255,0.11)");
+  if (g.fine) verticals(ctx, g.fine, s, 0, bottom, alpha(p.ink, 0.025));
+  if (g.beat) verticals(ctx, g.beat, s, 0, bottom, alpha(p.ink, 0.05));
+  verticals(ctx, g.bar, s, 0, bottom, alpha(p.ink, 0.11));
   // Clips.
   for (const lane of s.lanes) {
     const y = lane.top - s.scrollTop;
     if (y > s.height || y + lane.height < 0) continue;
     if (lane.track.kind !== "audio") {
-      ctx.fillStyle = "#8a8a98";
+      ctx.fillStyle = p.faint;
       ctx.font = "11.5px Geist, -apple-system, sans-serif";
       ctx.textBaseline = "middle";
       const hint = lane.track.kind === "sampler" ? "The Sampler's pattern plays on this track, from bar 1." : "An instrument track: its notes come with MIDI clips.";
@@ -274,12 +280,12 @@ export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
     const h = lane ? lane.height : 56;
     const x = beatToX(s.ghost.start, s.scroll, s.zoom);
     const w = Math.max(6, s.ghost.length * s.zoom);
-    ctx.fillStyle = "rgba(183,255,0,0.14)";
+    ctx.fillStyle = alpha(p.highlight, 0.14);
     roundRect(ctx, x, top + 1, w, h - 2, 4);
     ctx.fill();
-    ctx.strokeStyle = "#b7ff00";
+    ctx.strokeStyle = p.highlight;
     ctx.stroke();
-    ctx.fillStyle = "#b7ff00";
+    ctx.fillStyle = p.highlight;
     ctx.font = "600 10.5px Geist, -apple-system, sans-serif";
     ctx.textBaseline = "top";
     ctx.fillText(lane ? s.ghost.label : `${s.ghost.label} → new track`, x + 5, top + 4, Math.max(40, w - 10));
@@ -298,27 +304,28 @@ export interface RulerScene {
 export function drawRuler(ctx: CanvasRenderingContext2D, s: RulerScene) {
   const h = RULER_HEIGHT;
   prepare(ctx, s.width, h, s.dpr);
-  ctx.fillStyle = "#0c0c10";
+  const p = palette();
+  ctx.fillStyle = p.deep;
   ctx.fillRect(0, 0, s.width, h);
-  ctx.fillStyle = "#121217";
+  ctx.fillStyle = p.ground;
   ctx.fillRect(0, 0, s.width, LOOP_STRIP);
   const bar = barBeats(s.signature);
   // The loop brace.
   const a = beatToX(s.loop.start, s.scroll, s.zoom);
   const b = beatToX(s.loop.end, s.scroll, s.zoom);
-  ctx.fillStyle = s.loop.on ? "#8051ff" : "#3a3a46";
+  ctx.fillStyle = s.loop.on ? p.accent : mix(p.deep, p.text, 0.18);
   roundRect(ctx, a, 2, b - a, LOOP_STRIP - 4, 3);
   ctx.fill();
-  ctx.fillStyle = s.loop.on ? "#c9b8ff" : "#6a6a78";
+  ctx.fillStyle = s.loop.on ? p.accentSoft : mix(p.deep, p.text, 0.38);
   ctx.fillRect(a, 2, 2, LOOP_STRIP - 4);
   ctx.fillRect(b - 2, 2, 2, LOOP_STRIP - 4);
   // Ticks and bar numbers.
   const g = gridSteps(s.zoom, bar);
   let labelEvery = g.bar;
   while (labelEvery * s.zoom < 36) labelEvery *= 2;
-  if (g.beat) verticals(ctx, g.beat, s, h - 5, h, "#3a3a46");
-  verticals(ctx, g.bar, s, h - 10, h, "#5a5a68");
-  ctx.fillStyle = "#a6a6b3";
+  if (g.beat) verticals(ctx, g.beat, s, h - 5, h, mix(p.deep, p.text, 0.18));
+  verticals(ctx, g.bar, s, h - 10, h, mix(p.deep, p.text, 0.32));
+  ctx.fillStyle = p.dim;
   ctx.font = "10.5px 'Geist Mono', ui-monospace, Menlo, monospace";
   ctx.textBaseline = "middle";
   const first = Math.ceil(s.scroll / labelEvery) * labelEvery;
@@ -327,6 +334,6 @@ export function drawRuler(ctx: CanvasRenderingContext2D, s: RulerScene) {
     if (x > s.width) break;
     ctx.fillText(String(Math.round(beat / bar) + 1), x + 3, LOOP_STRIP + (h - LOOP_STRIP) / 2 - 2);
   }
-  ctx.fillStyle = "#24242d";
+  ctx.fillStyle = p.line;
   ctx.fillRect(0, h - 1, s.width, 1);
 }

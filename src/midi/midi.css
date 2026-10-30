@@ -9,25 +9,25 @@
 .midi-mark { position: absolute; left: -9px; top: 50%; width: 5px; height: 5px; margin-top: -2.5px; border-radius: 50%; background: var(--lime); pointer-events: none; }
 
 /* Learn mode: every learnable control outlined, clicks learn instead of moving it. */
-.midi-learn-on .midi-learnable { outline: 1px dashed var(--violet-soft); outline-offset: 3px; border-radius: 6px; background: rgba(128, 81, 255, 0.08); cursor: pointer; }
+.midi-learn-on .midi-learnable { outline: 1px dashed var(--violet-soft); outline-offset: 3px; border-radius: 6px; background: var(--accent-wash); cursor: pointer; }
 .midi-learn-on .midi-learn-inner { pointer-events: none; } /* as well as inert, for any engine without it */
 .midi-learn-on .midi-learnable:hover,
 .midi-learn-on .midi-learnable:focus-visible { outline: 2px solid var(--lime); }
 /* In Learn mode the mark shows the controller's number. */
-.midi-learn-on .midi-mark { left: auto; right: -6px; top: -9px; margin: 0; width: auto; height: 15px; min-width: 15px; padding: 0 4px; border-radius: 8px; color: var(--ground); font: 600 9.5px/15px "Geist Mono", ui-monospace, Menlo, monospace; text-align: center; z-index: 2; }
+.midi-learn-on .midi-mark { left: auto; right: -6px; top: -9px; margin: 0; width: auto; height: 15px; min-width: 15px; padding: 0 4px; border-radius: 8px; color: var(--on-lime); font: 600 9.5px/15px "Geist Mono", ui-monospace, Menlo, monospace; text-align: center; z-index: 2; }
 /* Waiting for a knob. */
 .midi-learnable.midi-waiting { outline: 2px solid var(--lime); outline-offset: 3px; border-radius: 6px; animation: midi-wait 0.8s ease-in-out infinite alternate; }
-@keyframes midi-wait { from { outline-color: var(--lime); } to { outline-color: rgba(183, 255, 0, 0.3); } }
+@keyframes midi-wait { from { outline-color: var(--lime); } to { outline-color: var(--lime-fade); } }
 @media (prefers-reduced-motion: reduce) { .midi-learnable.midi-waiting { animation: none; } }
 
 /* The top bar's MIDI light is the Learn toggle: a button in the light's own footprint. */
 button.midi-dot { border: 0; background: transparent; padding: 4px; margin: 0 -4px; border-radius: 6px; font-size: 10.5px; color: var(--faint); }
 button.midi-dot:hover { background: var(--card-2); color: var(--text); }
-button.midi-dot.learn { background: var(--lime); color: var(--ground); }
-button.midi-dot.learn i { background: var(--ground); box-shadow: none; }
+button.midi-dot.learn { background: var(--lime); color: var(--on-lime); }
+button.midi-dot.learn i { background: var(--on-lime); box-shadow: none; }
 
 /* What Learn mode waits for, just above the status bar (over the steps, not the pads or the Inspector). */
-.midi-bar { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--lime); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); font-size: 12.5px; color: var(--text); max-width: calc(100vw - 32px); white-space: nowrap; }
+.midi-bar { position: fixed; bottom: 36px; left: 50%; transform: translateX(-50%); z-index: 30; display: flex; align-items: center; gap: 10px; padding: 6px 8px 6px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--lime); box-shadow: 0 10px 30px var(--shadow); font-size: 12.5px; color: var(--text); max-width: calc(100vw - 32px); white-space: nowrap; }
 .midi-bar > span:not(.midi-bar-dot) { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .midi-bar-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--lime); flex-shrink: 0; }
 .midi-bar-pad { display: flex; align-items: center; gap: 5px; color: var(--soft); font-size: 12px; }
