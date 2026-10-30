@@ -1394,7 +1394,12 @@ pub fn setup(app: &AppHandle) {
     }
     app.manage(Timeline(state.clone()));
     let a = app.clone();
-    project::register(app, TimelineSection { state: state.clone(), notify: Arc::new(move |v: &View| drop(a.emit("timeline:state", v))) });
+    // After an open or a new project, the windows take the view's zoom and scroll too.
+    let notify = move |v: &View| {
+        let _ = a.emit("timeline:state", v);
+        let _ = a.emit("timeline:opened", v);
+    };
+    project::register(app, TimelineSection { state: state.clone(), notify: Arc::new(notify) });
     spawn_tick(app.clone(), state);
 }
 
