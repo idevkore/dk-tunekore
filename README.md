@@ -38,7 +38,13 @@ tracks and audio clips, with MIDI clips and plugins on tracks next.
     trimmed and saved in `Music/tuneKore/Samples/Recordings`; macOS asks for
     microphone access the first time.
   - **MIDI:** plug in a controller and notes C1 to D♯2 (36 to 51) play pads 1
-    to 16 at the velocity you play; it connects by itself.
+    to 16 at the velocity you play; it connects by itself. MIDI learn maps
+    knobs and faders (7-bit, or 14-bit pairs) to the pad settings (for the
+    selected pad, or one pad), tempo, swing, the master level and the Sampler
+    track's volume and pan: click the MIDI light in the top bar, click a
+    control and move a knob, or right-click a control. One turn of a knob is
+    one undo step. The mappings are saved with the project and listed in
+    Audio settings.
   - **Display:** the layout scales to big screens; View → Zoom In / Zoom Out
     (⌘+, ⌘−, ⌘0) sizes the whole interface; windows reopen where you left them.
   - **Output:** a master level, and a limiter that keeps the output under

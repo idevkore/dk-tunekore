@@ -62,6 +62,12 @@ pub const FILTER_BAND_PASS: u8 = 3;
 const FENV_OCTAVES: f32 = 8.0;
 /// While a filter envelope moves the cutoff, the filter is retuned this often, in frames.
 const FENV_TICK: u32 = 16;
+/// Turning the cutoff (or the velocity or envelope amount) while a pad rings
+/// glides the filter there with this time constant, so a knob's steps (a
+/// 7-bit controller's are most of a semitone apart) don't zipper.
+const GLIDE_SECONDS: f64 = 0.010;
+/// A glide ends, exactly on the new cutoff, once it is this close, in octaves.
+const GLIDE_SNAP: f32 = 1.0e-3;
 /// Velocity to envelope time at full amount: a hit at velocity 0 is this many times shorter.
 const VEL_TIME_SPAN: f64 = 4.0;
 const NO_STEP: u32 = u32::MAX;
@@ -992,14 +998,18 @@ struct Voice {
     /// The hit's velocity, 0..1, and how far it moves the cutoff, in octaves.
     vel: f32,
     vel_octaves: f32,
-    /// Frames until the envelope retunes the filter.
+    /// Frames until the envelope or a glide retunes the filter.
     retune_in: u32,
+    /// How far the filter still is from where the pad's settings put it, in
+    /// octaves, while it glides there after a knob moved; 0 when it's there.
+    glide: f32,
 }
 
 impl Voice {
     /// Tunes the filter to the pad's cutoff, moved by velocity and the filter envelope.
     fn tune_filter(&mut self, mode: u8, rate: f64) {
-        let octaves = self.vel_octaves + self.fenv_amount * self.fenv.level;
+        // While nothing glides, `glide` is 0 and the sum is what it always was.
+        let octaves = self.vel_octaves + self.fenv_amount * self.fenv.level + self.glide;
         self.filter.tune(mode, self.cutoff * octaves.exp2(), self.resonance, rate);
     }
 
@@ -1046,6 +1056,7 @@ impl Default for Voice {
             vel: 1.0,
             vel_octaves: 0.0,
             retune_in: 0,
+            glide: 0.0,
         }
     }
 }
@@ -1063,6 +1074,8 @@ pub struct Sampler {
     rate: f64,
     release: f32,
     edge: f64,
+    /// What a glide keeps of its distance each retune ([`GLIDE_SECONDS`]).
+    glide_keep: f32,
     clock: u64,
     /// Drives [`render`](Self::render) when the Sampler runs on its own (an
     /// offline render, a test), reading `SamplerShared`'s clock. In the
@@ -1223,6 +1236,7 @@ impl Sampler {
             rate,
             release: (1.0 / (rate * RELEASE_SECONDS)).min(1.0) as f32,
             edge: rate * RELEASE_SECONDS,
+            glide_keep: (-f64::from(FENV_TICK) / (rate * GLIDE_SECONDS)).exp() as f32,
             clock: 0,
             own_clock: Transport::new(sample_rate),
             bpf: 0.0,
@@ -1698,19 +1712,31 @@ impl Sampler {
     }
 
     /// Retunes every sounding voice's filter from its pad, once per block, so
-    /// turning the cutoff while a pad rings needs no per-sample trig.
+    /// turning the cutoff while a pad rings needs no per-sample trig. A change
+    /// that moves the cutoff glides there (see [`GLIDE_SECONDS`]) instead of
+    /// jumping; with nothing changed, nothing glides.
     fn tune_filters(&mut self, shared: &SamplerShared) {
         for v in self.voices.iter_mut().filter(|v| v.active) {
             let c = &shared.pads[v.slot];
             let mode = c.filter.load(Ordering::Relaxed);
-            if v.filter.mode == FILTER_OFF && mode != FILTER_OFF {
+            let was_on = v.filter.mode != FILTER_OFF;
+            if !was_on && mode != FILTER_OFF {
                 v.filter.reset(); // switched on while ringing: start from silence
             }
             let f = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
-            v.cutoff = f(&c.cutoff);
+            let (cutoff, fenv_amount, vel_octaves) = (f(&c.cutoff), f(&c.fenv_amount), f(&c.vel_cutoff) * (v.vel - 1.0));
+            if mode == FILTER_OFF || !was_on {
+                v.glide = 0.0; // nothing was sounding through the filter to glide from
+            } else if cutoff != v.cutoff || fenv_amount != v.fenv_amount || vel_octaves != v.vel_octaves {
+                // Start from where the filter is: the old settings' octaves less the new ones'.
+                let octaves = (v.cutoff / cutoff).log2() + (v.fenv_amount - fenv_amount) * v.fenv.level + (v.vel_octaves - vel_octaves);
+                let reach = 2.0 * FENV_OCTAVES + 10.0;
+                v.glide = sane(v.glide + octaves, -reach, reach, 0.0);
+            }
+            v.cutoff = cutoff;
             v.resonance = f(&c.resonance);
-            v.fenv_amount = f(&c.fenv_amount);
-            v.vel_octaves = f(&c.vel_cutoff) * (v.vel - 1.0);
+            v.fenv_amount = fenv_amount;
+            v.vel_octaves = vel_octaves;
             v.tune_filter(mode, self.rate);
         }
     }
@@ -1784,6 +1810,7 @@ impl Sampler {
             vel,
             vel_octaves: p.vel_cutoff * (vel - 1.0),
             retune_in: 0,
+            glide: 0.0,
         };
         self.voices[i].tune_filter(p.filter, rate);
         shared.pads[slot].played.fetch_add(1, Ordering::Relaxed);
@@ -1798,6 +1825,7 @@ impl Sampler {
 
     fn mix_frame(&mut self, shared: &SamplerShared) -> (f32, f32) {
         let rate = self.rate;
+        let glide_keep = self.glide_keep;
         let mut left = 0.0f32;
         let mut right = 0.0f32;
         for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -1859,10 +1887,16 @@ impl Sampler {
             let mut l = read(&sample[0]);
             let mut r = if sample.len() > 1 { read(&sample[1]) } else { l };
             v.fenv.tick();
-            if v.filter.mode != FILTER_OFF && v.fenv_amount != 0.0 {
-                // The envelope moves the cutoff: retune every few frames, not every one.
+            if v.filter.mode != FILTER_OFF && (v.fenv_amount != 0.0 || v.glide != 0.0) {
+                // The envelope or a glide moves the cutoff: retune every few frames, not every one.
                 if v.retune_in == 0 {
                     v.retune_in = FENV_TICK;
+                    if v.glide != 0.0 {
+                        v.glide *= glide_keep;
+                        if v.glide.abs() < GLIDE_SNAP {
+                            v.glide = 0.0;
+                        }
+                    }
                     v.tune_filter(v.filter.mode, rate);
                 }
                 v.retune_in -= 1;
@@ -2627,6 +2661,93 @@ mod tests {
         assert!(rms(&first[1_000..]) > 0.65, "open: {}", rms(&first[1_000..]));
         assert!(rms(&second[2_400..]) < 0.01, "closed: {}", rms(&second[2_400..]));
         assert!(second.iter().all(|x| x.is_finite()));
+    }
+
+    /// The sounding voice's cutoff in Hz, before the filter envelope.
+    fn heard_cutoff(s: &Sampler) -> f32 {
+        let v = s.voices.iter().find(|v| v.active).expect("a voice rings");
+        v.cutoff * (v.vel_octaves + v.glide).exp2()
+    }
+
+    #[test]
+    fn turning_the_cutoff_while_a_pad_rings_glides_there() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &lp(20_000.0, 0.0));
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(4_000.0, 96_000)));
+        shared.trigger(0);
+        run(&mut s, &shared, 480);
+        assert_eq!(heard_cutoff(&s), 20_000.0);
+        // A knob drops it to 200 Hz in one move.
+        shared.set_pad(0, &lp(200.0, 0.0));
+        run(&mut s, &shared, 64);
+        let early = heard_cutoff(&s);
+        assert!(early > 5_000.0, "a block later it has only begun to fall: {early}");
+        run(&mut s, &shared, 480);
+        let later = heard_cutoff(&s);
+        assert!(later < early && later > 300.0, "10 ms on, most of the way down: {later}");
+        run(&mut s, &shared, 4_800);
+        assert_eq!(heard_cutoff(&s), 200.0, "within 100 ms it is exactly there");
+        assert_eq!(s.voices.iter().find(|v| v.active).unwrap().glide, 0.0);
+    }
+
+    #[test]
+    fn nothing_glides_while_nothing_moves() {
+        // Filter, envelope and velocity all moving the cutoff, settings held:
+        // the glide stays exactly 0, so the filter is tuned as it always was.
+        let p = PadParams { fenv_amount: 3.0, fenv_decay: 0.05, vel_cutoff: 2.0, ..lp(800.0, 0.5) };
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(1_000.0, 48_000)));
+        shared.trigger_velocity(0, 0.5);
+        for _ in 0..40 {
+            run(&mut s, &shared, 333);
+            assert!(s.voices.iter().all(|v| v.glide == 0.0));
+        }
+        // The same settings sent again (a knob that didn't move) don't start one.
+        shared.set_pad(0, &p);
+        run(&mut s, &shared, 333);
+        assert!(s.voices.iter().all(|v| v.glide == 0.0));
+    }
+
+    #[test]
+    fn the_envelope_amount_glides_too() {
+        // A sustained filter envelope holds the cutoff 4 octaves up; turning
+        // the amount to 0 brings it down gradually, not at once.
+        let p = PadParams { fenv_amount: 4.0, fenv_sustain: 1.0, ..lp(250.0, 0.0) };
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(1_000.0, 96_000)));
+        shared.trigger(0);
+        run(&mut s, &shared, 2_400);
+        shared.set_pad(0, &PadParams { fenv_amount: 0.0, ..p });
+        run(&mut s, &shared, 16);
+        let v = *s.voices.iter().find(|v| v.active).unwrap();
+        assert!(v.glide > 3.5 && v.glide < 4.0, "still almost 4 octaves up: {}", v.glide);
+        run(&mut s, &shared, 4_800);
+        assert_eq!(s.voices.iter().find(|v| v.active).unwrap().glide, 0.0);
+    }
+
+    #[test]
+    fn a_glide_runs_on_the_audio_thread_without_allocating() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &lp(20_000.0, 0.7));
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(4_000.0, 96_000)));
+        shared.trigger(0);
+        let mut out = vec![0.0f32; 512 * 2];
+        s.render(&shared, &mut out, 2);
+        let mut total = 0;
+        for i in 0..40 {
+            // A knob sweeping down, a step every block.
+            shared.set_pad(0, &lp(20_000.0 * 0.9f32.powi(i), 0.7));
+            let (_, n) = crate::testing::realtime(|| s.render(&shared, &mut out, 2));
+            total += n;
+        }
+        assert_eq!(total, 0, "the glide allocated or freed {total} times");
+        assert!(out.iter().all(|x| x.is_finite()));
     }
 
     #[test]

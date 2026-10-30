@@ -290,7 +290,7 @@ Where the next pieces go:
 | --- | --- | --- |
 | Plugins in the app (#37) | `engine/src/plugin_device.rs`: a `Device` around the `plugins/` host. `prepare` sets up processing at the output's rate; `process` maps `ProcessContext` to the plugin's transport and `Events` to its notes; `latency` reports the plugin's. Put it in a track's source slot or chain through `Mixer`. | Its own module with `commands()` and a `plugins` section |
 | Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
-| MIDI learn (#20) | none needed | `midi.rs` (its `commands()` and `setup()` are there already) registers a `midi` section |
+| MIDI learn (#20, built) | none needed | `midi.rs` and `midi/`: the mappings are the `midi` section. Targets are ids such as `sampler.pad.selected.cutoff`, `sampler.pad.3.level`, `transport.tempo`, `master.level` and `track.1.volume`. A module adds its own by implementing `midi::Targets` for its prefix (`plugin.<id>.<param>` for #37) and calling `midi::register_targets` from its setup. |
 
 ### Plugin hosting
 
@@ -449,7 +449,15 @@ Until then, this is what any host needs:
   Windows, and ALSA, JACK and PipeWire on Linux.
 - **MIDI keyboards and controllers:** class-compliant USB MIDI through CoreMIDI
   (and the Windows and Linux equivalents), plus MIDI learn to map any knob or
-  fader to a parameter.
+  fader to a parameter (#20). Learning takes the next control change, or a
+  14-bit pair (CC n and n + 32) when its other half follows within 40 ms. One
+  controller moves one control: the newest learn wins on both sides. Each
+  target maps the knob onto its range with its own curve: levels like a
+  mixer's fader, the cutoff on a log scale, times squared, tempo linear in
+  whole BPM, and bipolar controls centred on the knob's middle. A turn is one
+  undo step. When the knob and the value disagree it picks up by default
+  (jump and catch-up are the other choices, a setting of this Mac). Not yet:
+  NRPN, relative (endless) encoders, and mappings per controller port.
 - **MIDI out and clock:** send notes and MIDI clock to external synths and
   drum machines, and compensate for their latency.
 - **Control surfaces:** devices with their own protocol (for example Komplete
