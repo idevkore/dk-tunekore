@@ -3,6 +3,10 @@
   <img alt="tuneKore" src="brand/tunekore-logo-color-on-light.svg" width="420">
 </picture>
 
+[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
+
+CI: whether `main` builds and passes its tests on macOS, Windows and Linux.
+
 tuneKore is a lightweight DAW in the style of Ableton Live, built by devKore to
 host our own instruments, effects and tools alongside the plugins we already
 use (Serum, Arturia, Native Instruments). It is sampling first, and new tech
@@ -12,9 +16,9 @@ Analyzer splits a song into stems and sends them to the Sampler's pads.
 
 CI (`.github/workflows/ci.yml`) builds and tests the engine, the Analyzer, the
 stem worker and the app on macOS, and compiles and links them on Windows and
-Linux. It is manual-only for now, since GitHub Actions minutes on idevkore
-aren't paid for: nothing checks pushes or pull requests there. Run its steps
-locally before pushing, or start it by hand.
+Linux, for every push to `main` and every pull request. A pull request into
+`main` needs CI to pass and a code owner's approval (`.github/CODEOWNERS`);
+report security problems privately, as `SECURITY.md` says.
 
 Status: the Sampler (Phase 2, the MVP) is in; the Timeline (Phase 4) has
 tracks and audio clips, with MIDI clips and plugins on tracks next.

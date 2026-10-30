@@ -1,13 +1,16 @@
 name: CI
 
-# Manual only for now: GitHub Actions minutes on idevkore aren't paid for, so
-# runs on pushes and pull requests fail before they start. Run the same steps
-# locally before pushing. To turn this back on, restore the triggers below.
+# Runs on every push to main and every pull request; free now that the repo is
+# public. Pull requests from forks run only after Nate approves them, and get
+# a read-only token with no secrets. Never switch this to pull_request_target.
 on:
   workflow_dispatch:
-  # push:
-  #   branches: [main, develop]
-  # pull_request:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
