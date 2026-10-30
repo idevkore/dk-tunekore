@@ -494,11 +494,17 @@ pub struct TimelineState {
     generation: AtomicU64,
     audio: &'static Mutex<Audio>,
     transport: Arc<TransportShared>,
+    /// The mixer's revision, read without the engine's lock: a fader moved
+    /// outside the Timeline (MIDI learn's track targets) shows when it changes.
+    mixer_revision: Arc<AtomicU64>,
 }
 
 impl TimelineState {
     pub fn new(audio: &'static Mutex<Audio>) -> Self {
-        let transport = lock(audio).engine.transport();
+        let (transport, mixer_revision) = {
+            let mut a = lock(audio);
+            (a.engine.transport(), a.engine.mixer().revision_handle())
+        };
         Self {
             doc: Mutex::default(),
             sources: Mutex::default(),
@@ -510,6 +516,7 @@ impl TimelineState {
             generation: AtomicU64::new(0),
             audio,
             transport,
+            mixer_revision,
         }
     }
 
@@ -1618,6 +1625,7 @@ struct Tick {
 fn spawn_tick(app: AppHandle, s: Arc<TimelineState>) {
     std::thread::spawn(move || {
         let mut last: Option<Tick> = None;
+        let mut mixed = s.mixer_revision.load(Ordering::Relaxed);
         loop {
             std::thread::sleep(TICK);
             // Busy, then the document, then the engine, as everywhere.
@@ -1631,6 +1639,12 @@ fn spawn_tick(app: AppHandle, s: Arc<TimelineState>) {
             let now = Tick { playing, beat: if playing { t.position_beats() } else { t.start() }, tempo: t.tempo(), signature: [sig.numerator, sig.denominator], levels };
             if last.as_ref() != Some(&now) {
                 let _ = app.emit("timeline:tick", &now);
+            }
+            // A track's name or mix changed elsewhere (a fader on MIDI): the windows show it.
+            let r = s.mixer_revision.load(Ordering::Relaxed);
+            if r != mixed {
+                mixed = r;
+                let _ = app.emit("timeline:state", s.current());
             }
             last = Some(now);
         }
