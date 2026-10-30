@@ -266,12 +266,15 @@ impl<C: 'static> Project<C> {
         if file.extension().and_then(|e| e.to_str()) != Some(PROJECT_EXT) {
             file.set_extension(PROJECT_EXT);
         }
+        // The revisions before the file is written: an edit that lands while
+        // it is written (a recorded hit, say) isn't in it, so it stays unsaved.
+        let now = self.revisions(ctx);
         let text = self.serialize(ctx, &file)?;
         let tmp = file.with_extension(format!("{PROJECT_EXT}.part"));
         std::fs::write(&tmp, text).map_err(|e| format!("can't write {}: {e}", file.display()))?;
         std::fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
         *lock(&self.path) = Some(file.clone());
-        self.mark_saved(ctx);
+        *lock(&self.saved) = Some(now);
         Ok(file)
     }
 
@@ -606,10 +609,25 @@ pub fn autosave_discard(app: AppHandle) {
 }
 
 /// The question about the last session's work couldn't be asked: keep its
-/// files, but let autosave carry on for this session.
+/// files, moved aside to `recovery-<unix seconds>.tunek` (and `.json`) so
+/// this session's autosave can't write over them, and let autosave carry on.
 #[tauri::command]
 pub fn autosave_resume(app: AppHandle) {
+    if let Some(dir) = autosave_dir(&app) {
+        set_aside(&dir, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()));
+    }
     project(&app).recovery_pending.store(false, Ordering::Release);
+}
+
+/// Renames the recovery files in `dir` to `recovery-<stamp>.*`, keeping them
+/// out of autosave's way. Leaves them where they are if the rename fails.
+fn set_aside(dir: &Path, stamp: u64) {
+    for ext in ["tunek", "json"] {
+        let from = dir.join(format!("recovery.{ext}"));
+        if from.exists() {
+            let _ = std::fs::rename(&from, dir.join(format!("recovery-{stamp}.{ext}")));
+        }
+    }
 }
 
 /// This file's commands. The Sampler answers new, open, save and recover,
@@ -915,5 +933,48 @@ mod tests {
         for key in HOOKS {
             assert!(!["transport", "tracks", "sampler", "format", "version"].contains(&key));
         }
+    }
+
+    /// A section whose save is slow enough for an edit to land while it runs.
+    struct EditedWhileSaving(Arc<AtomicU64>);
+
+    impl Section<()> for EditedWhileSaving {
+        fn key(&self) -> &'static str {
+            "timeline"
+        }
+        fn save(&self, _: &(), _: &Path) -> Result<Value, String> {
+            // The value written is the state before this edit.
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(Value::Null)
+        }
+        fn read(&self, _: &(), _: Option<&Value>, _: &Path) -> Result<Apply<()>, String> {
+            Ok(Box::new(|_| Ok(())))
+        }
+        fn clear(&self, _: &()) -> Result<(), String> {
+            Ok(())
+        }
+        fn revision(&self, _: &()) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    #[test]
+    fn an_edit_that_lands_during_a_save_stays_unsaved() {
+        let (p, _, _, _) = rig();
+        p.register(EditedWhileSaving(Arc::default()));
+        let dir = tempfile::tempdir().unwrap();
+        p.save(&(), Some(dir.path().join("a"))).unwrap();
+        assert!(p.is_dirty(&()), "the edit isn't in the file, so the project isn't saved");
+    }
+
+    #[test]
+    fn resuming_without_an_answer_keeps_the_last_sessions_work() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("recovery.tunek"), "last session").unwrap();
+        std::fs::write(dir.path().join("recovery.json"), "{}").unwrap();
+        set_aside(dir.path(), 1_793_000_000);
+        assert!(!dir.path().join("recovery.tunek").exists(), "autosave can write here now");
+        assert_eq!(std::fs::read_to_string(dir.path().join("recovery-1793000000.tunek")).unwrap(), "last session");
+        assert!(dir.path().join("recovery-1793000000.json").exists());
     }
 }
