@@ -1,13 +1,13 @@
 // The tracks' lanes, on one canvas: clips to select, move (⌥ copies),
 // trim at either edge, loop by the top of the right edge, and fade by the
 // handles at their top corners; a click on empty space moves the playhead.
-// Drags snap to the grid unless ⌘ is held. While a drag runs, the canvas
+// Drags snap to the grid unless ⌘ (Ctrl on Windows and Linux) is held. While a drag runs, the canvas
 // shows the edit as it will be; on release it goes to the Rust side as one
 // undoable edit, and the preview stays until the new state arrives.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipView, Edit, SourceView } from "./api";
 import { beatToX, CLIP_HEAD, drawLanes, xToBeat, type Ghost, type Lane } from "./draw";
-import { clipEnd, loopEnd, secondsPerBeat, setFade, snapBeat, toInput, trimEnd, trimStart } from "./edits";
+import { clipEnd, ignoresGrid, loopEnd, secondsPerBeat, setFade, snapBeat, toInput, trimEnd, trimStart } from "./edits";
 import { onPeaks } from "./peaks";
 
 /** Keeps the pointer's events coming here through a drag (a pointer that can't be captured just isn't). */
@@ -141,15 +141,20 @@ export default function Lanes(props: Props) {
       const x1 = beatToX(clipEnd(c, tempo), scroll, zoom);
       if (x < x0 - 2 || x > x1 + 2) continue;
       const top = l.top - scrollTop + 1;
-      const body = top + CLIP_HEAD;
+      const h = l.height - 2;
+      const head = Math.min(CLIP_HEAD, h / 2);
+      const body = top + head;
       const w = x1 - x0;
+      // Narrow clips and short tracks keep their middle third for moving.
+      const edge = Math.min(EDGE, w / 3);
+      const tall = Math.min(EDGE, (h - head) / 3);
       const fin = x0 + (c.fadeIn / spb) * zoom;
       const fout = x1 - (c.fadeOut / spb) * zoom;
       let zone: Zone = "move";
-      if (w > 3 * EDGE && Math.abs(y - body) <= EDGE && Math.abs(x - fin) <= EDGE) zone = "fadeIn";
-      else if (w > 3 * EDGE && Math.abs(y - body) <= EDGE && Math.abs(x - fout) <= EDGE) zone = "fadeOut";
-      else if (x - x0 <= EDGE && w > EDGE) zone = "start";
-      else if (x1 - x <= EDGE) zone = y < body ? "loop" : "end";
+      if (w >= 6 * EDGE && tall >= 3 && Math.abs(y - body) <= tall && Math.abs(x - fin) <= edge) zone = "fadeIn";
+      else if (w >= 6 * EDGE && tall >= 3 && Math.abs(y - body) <= tall && Math.abs(x - fout) <= edge) zone = "fadeOut";
+      else if (x - x0 <= edge) zone = "start";
+      else if (x1 - x <= edge) zone = y < body ? "loop" : "end";
       return { lane, clip: c, zone };
     }
     return { lane };
@@ -215,7 +220,7 @@ export default function Lanes(props: Props) {
     if (lane) props.onTrack(lane.track.id);
     if (!h.clip) {
       props.onSelect([]);
-      if (h.lane >= 0) props.onSeek(Math.max(0, snapBeat(xToBeat(x, scroll, zoom), step, e.metaKey)));
+      if (h.lane >= 0) props.onSeek(Math.max(0, snapBeat(xToBeat(x, scroll, zoom), step, ignoresGrid(e))));
       return;
     }
     capture(e);
@@ -249,7 +254,7 @@ export default function Lanes(props: Props) {
     }
     if (!o.moved && Math.hypot(x - o.x0, y - o.y0) < DRAG_PX) return;
     o.moved = true;
-    setPreview(shape(o, x, y, e.metaKey, e.altKey));
+    setPreview(shape(o, x, y, ignoresGrid(e), e.altKey));
   };
 
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -261,7 +266,7 @@ export default function Lanes(props: Props) {
       return;
     }
     const { x, y } = local(e);
-    const p = shape(o, x, y, e.metaKey, e.altKey);
+    const p = shape(o, x, y, ignoresGrid(e), e.altKey);
     setPreview(p);
     if (p.edit) props.onEdit(p.edit).catch(() => setPreview(null));
   };

@@ -133,6 +133,8 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   const y = lane.top - s.scrollTop + 1;
   const h = lane.height - 2;
   const w = Math.max(2, x1 - x0);
+  // The name strip; on short tracks, half the clip (as the Lanes' hit zones assume).
+  const head = Math.min(CLIP_HEAD, h / 2);
   const src = s.sources.get(c.path);
   const missing = !src || src.missing;
   const selected = s.selected.has(c.id);
@@ -144,10 +146,10 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   // The name strip.
   ctx.fillStyle = colour;
   ctx.globalAlpha = selected ? 0.95 : 0.7;
-  ctx.fillRect(x0, y, w, Math.min(CLIP_HEAD, h));
+  ctx.fillRect(x0, y, w, head);
   ctx.globalAlpha = 1;
-  const body = y + CLIP_HEAD;
-  const bodyH = h - CLIP_HEAD;
+  const body = y + head;
+  const bodyH = h - head;
   if (bodyH > 4 && !missing && src) {
     ctx.fillStyle = colour;
     ctx.globalAlpha = 0.85;
@@ -206,7 +208,7 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
     ctx.font = "600 10.5px Geist, -apple-system, sans-serif";
     ctx.textBaseline = "middle";
     const label = missing ? `${c.name} (missing)` : c.name;
-    ctx.fillText(label, Math.max(x0, 0) + 5, y + Math.min(CLIP_HEAD, h) / 2 + 0.5, Math.max(0, w - 10));
+    ctx.fillText(label, Math.max(x0, 0) + 5, y + head / 2 + 0.5, Math.max(0, w - 10));
   }
   ctx.restore();
   // Outline, and the handles when it is under the pointer or selected.
@@ -215,13 +217,13 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   ctx.setLineDash(missing ? [4, 3] : []);
   ctx.stroke();
   ctx.setLineDash([]);
-  if ((s.hover === c.id || selected) && h > CLIP_HEAD + 6 && w > 16) {
+  if ((s.hover === c.id || selected) && h - head >= 9 && w >= 36) {
     ctx.fillStyle = "#f7f7f8";
     ctx.fillRect(Math.round(x0 + fin) - 3, body - 3, 6, 6);
     ctx.fillRect(Math.round(x1 - fout) - 3, body - 3, 6, 6);
     // The loop handle: the top of the right edge.
     ctx.fillStyle = "#b7ff00";
-    ctx.fillRect(Math.round(x1) - 3, y + 1, 2, Math.min(CLIP_HEAD, h) - 2);
+    ctx.fillRect(Math.round(x1) - 3, y + 1, 2, head - 2);
   }
 }
 
@@ -254,11 +256,12 @@ export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
   for (const lane of s.lanes) {
     const y = lane.top - s.scrollTop;
     if (y > s.height || y + lane.height < 0) continue;
-    if (lane.track.kind === "sampler") {
+    if (lane.track.kind !== "audio") {
       ctx.fillStyle = "#8a8a98";
       ctx.font = "11.5px Geist, -apple-system, sans-serif";
       ctx.textBaseline = "middle";
-      ctx.fillText("The Sampler's pattern plays on this track, from bar 1.", 12, y + lane.height / 2);
+      const hint = lane.track.kind === "sampler" ? "The Sampler's pattern plays on this track, from bar 1." : "An instrument track: its notes come with MIDI clips.";
+      ctx.fillText(hint, 12, y + lane.height / 2);
       continue;
     }
     const colour = COLOURS[lane.track.colour % COLOURS.length];

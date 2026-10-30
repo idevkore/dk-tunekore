@@ -2,10 +2,10 @@
 // brace: drag across the strip for a new loop range, drag the brace to move
 // it or its ends to resize it, click it to turn the loop on or off. Below
 // the strip, a click or a drag moves the playhead. Both snap to the grid
-// unless ⌘ is held.
+// unless ⌘ (Ctrl on Windows and Linux) is held.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { beatToX, drawRuler, LOOP_STRIP, RULER_HEIGHT, xToBeat } from "./draw";
-import { snapBeat } from "./edits";
+import { ignoresGrid, snapBeat } from "./edits";
 
 /** Keeps the pointer's events coming here through a drag (a pointer that can't be captured just isn't). */
 function capture(e: React.PointerEvent<Element>) {
@@ -91,7 +91,7 @@ export default function Ruler({ width, scroll, zoom, signature, loop, step, onLo
     const x = xOf(e);
     if (yOf(e) > LOOP_STRIP) {
       drag.current = { kind: "seek" };
-      onSeek(at(x, e.metaKey));
+      onSeek(at(x, ignoresGrid(e)));
       return;
     }
     const a = beatToX(loop.start, scroll, zoom);
@@ -110,12 +110,12 @@ export default function Ruler({ width, scroll, zoom, signature, loop, step, onLo
       return;
     }
     if (d.kind === "seek") {
-      onSeek(at(x, e.metaKey));
+      onSeek(at(x, ignoresGrid(e)));
       return;
     }
     if (!d.moved && Math.abs(x - d.x0) < 3) return;
     d.moved = true;
-    setShown(loopFor(d, x, e.metaKey));
+    setShown(loopFor(d, x, ignoresGrid(e)));
   };
 
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -128,7 +128,7 @@ export default function Ruler({ width, scroll, zoom, signature, loop, step, onLo
       setShown(null);
       return;
     }
-    const next = loopFor(d, xOf(e), e.metaKey);
+    const next = loopFor(d, xOf(e), ignoresGrid(e));
     setShown(next);
     onLoop(next);
   };

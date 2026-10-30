@@ -1,6 +1,7 @@
 // One track's header beside its lane: colour, name, mute, solo, arm (a
 // placeholder until recording, #40), volume, pan and a meter, and a handle
-// at the foot to change the track's height.
+// at the foot to change the track's height. It takes focus (Tab), which
+// selects the track; F2 or Enter there renames it.
 import { useEffect, useRef, useState } from "react";
 import { COLOURS, type TrackMix, type TrackView } from "./api";
 
@@ -23,15 +24,12 @@ export const dbToGain = (db: number) => (db <= MIN_DB ? 0 : Math.pow(10, db / 20
 const dbText = (db: number) => (db <= MIN_DB ? "-∞" : `${db > 0 ? "+" : ""}${db.toFixed(1)}`);
 const panText = (p: number) => (Math.abs(p) < 0.005 ? "C" : `${Math.round(Math.abs(p) * 100)}${p < 0 ? "L" : "R"}`);
 
-/** Peak 0..1 to a 0..1 position on a -60..0 dB scale. */
-const meterPosition = (peak: number) => (peak <= 0 ? 0 : Math.min(1, Math.max(0, (20 * Math.log10(peak) + 60) / 60)));
-
 type Props = {
   track: TrackView;
   height: number;
   selected: boolean;
-  /** Latest peak, 0..1. */
-  level: number;
+  /** Receives the meter's bar, which the Timeline moves without a render. */
+  meter: (el: HTMLDivElement | null) => void;
   onSelect: () => void;
   onMix: (mix: TrackMix) => void;
   onRename: (name: string) => void;
@@ -41,13 +39,13 @@ type Props = {
   onHeight: (height: number, done: boolean) => void;
 };
 
-export default function TrackHeader({ track, height, selected, level, onSelect, onMix, onRename, onColour, onRemove, onHeight }: Props) {
+export default function TrackHeader({ track, height, selected, meter, onSelect, onMix, onRename, onColour, onRemove, onHeight }: Props) {
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(track.name);
   const resize = useRef<{ y0: number; h0: number } | null>(null);
   const mix = track.mix;
   const db = gainToDb(mix.volume);
-  const sampler = track.kind === "sampler";
+  const renamable = track.kind !== "sampler";
   const compact = height < 56;
 
   useEffect(() => setName(track.name), [track.name]);
@@ -63,6 +61,17 @@ export default function TrackHeader({ track, height, selected, level, onSelect, 
       className={`tl-head${selected ? " on" : ""}${mix.mute ? " muted" : ""}`}
       style={{ height }}
       data-track={track.id}
+      tabIndex={0}
+      role="group"
+      aria-label={`Track ${track.name}${renamable ? ": F2 or Enter renames it" : ""}`}
+      onFocus={(e) => e.target === e.currentTarget && onSelect()}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget || !renamable) return;
+        if (e.key === "F2" || e.key === "Enter") {
+          e.preventDefault();
+          setRenaming(true);
+        }
+      }}
       onPointerDown={(e) => {
         if ((e.target as HTMLElement).closest("input, button")) return;
         onSelect();
@@ -94,7 +103,7 @@ export default function TrackHeader({ track, height, selected, level, onSelect, 
               }}
             />
           ) : (
-            <span className="tl-name" title={`${track.name}${sampler ? "" : "\nDouble-click to rename"}`} onDoubleClick={() => !sampler && setRenaming(true)}>
+            <span className="tl-name" title={`${track.name}${renamable ? "\nDouble-click (or F2) to rename" : ""}`} onDoubleClick={() => renamable && setRenaming(true)}>
               {track.name}
             </span>
           )}
@@ -107,7 +116,7 @@ export default function TrackHeader({ track, height, selected, level, onSelect, 
           <button className="tl-ms arm" disabled title="Arm for recording: comes with recording into the Timeline" aria-label={`Arm ${track.name} (not yet)`}>
             ●
           </button>
-          {!sampler && (
+          {track.kind === "audio" && (
             <button className="tl-x" title="Delete the track (undo brings it back)" aria-label={`Delete ${track.name}`} onClick={onRemove}>
               ×
             </button>
@@ -136,7 +145,7 @@ export default function TrackHeader({ track, height, selected, level, onSelect, 
           </div>
         )}
         <div className="tl-meter" aria-hidden="true">
-          <div style={{ transform: `scaleX(${meterPosition(level)})` }} />
+          <div ref={meter} style={{ transform: "scaleX(0)" }} />
         </div>
       </div>
       <div

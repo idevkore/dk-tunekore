@@ -8,11 +8,16 @@
 // them. The lanes and the ruler are canvases; the playhead is a DOM line
 // over both, moved every frame from the transport's ticks.
 //
+// It stays mounted while the Sampler shows (App.tsx), hidden, so its
+// Library, selection and view carry on; `active` says whether it is on screen.
+//
 // Keys while it shows: Space plays and stops (taken here, so the Sampler's
-// own Space handler doesn't also toggle), ⌘Z and ⇧⌘Z undo and redo the
+// own Space handler doesn't also toggle; a focused button or checkbox other
+// than the view switch takes its own Space), ⌘Z and ⇧⌘Z undo and redo the
 // Timeline's edits, ⌫ deletes the selected clips, ⌘D duplicates them, ⌘E
 // splits at the playhead, ⌘L loops the selection, ⌘A selects every clip,
-// = and - zoom, Home goes back to the start.
+// = and - zoom, Home goes back to the start. A focused track header takes
+// F2 or Enter to rename it.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -49,6 +54,8 @@ const SNAPS: { id: Snap; label: string }[] = [
 ];
 
 type Props = {
+  /** Whether the Timeline is the view on screen. */
+  active: boolean;
   switcher: ReactNode;
   message: Message | null;
   onMessage: (m: Message | null) => void;
@@ -71,7 +78,7 @@ const meterPosition = (peak: number) => (peak <= 0 ? 0 : Math.min(1, Math.max(0,
 /** The same signature keeps its identity, so the canvases don't redraw on every tick. */
 const sameSig = (next: [number, number]) => (s: [number, number]) => (s[0] === next[0] && s[1] === next[1] ? s : next);
 
-export default function Timeline({ switcher, message, onMessage }: Props) {
+export default function Timeline({ active, switcher, message, onMessage }: Props) {
   const [view, setView] = useState<TimelineView | null>(null);
   const [zoom, setZoom] = useState(24);
   const [scroll, setScroll] = useState(0);
@@ -84,8 +91,6 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
   const [tempo, setTempo] = useState(120);
   const [tempoText, setTempoText] = useState("120");
   const [signature, setSignature] = useState<[number, number]>([4, 4]);
-  const [levels, setLevels] = useState<Record<number, number>>({});
-  const [level, setLevel] = useState(0);
   const [follow, setFollow] = useState(true);
   const [drop, setDrop] = useState<Drop | null>(null);
   const [libDrag, setLibDrag] = useState<{ item: LibraryItem; x0: number; y0: number; moving: boolean } | null>(null);
@@ -97,6 +102,12 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
   const laneHead = useRef<HTMLDivElement>(null);
   const rulerHead = useRef<HTMLDivElement>(null);
   const posText = useRef<HTMLSpanElement>(null);
+  // Meters move by writing to their elements: no render 30 times a second.
+  const meters = useRef(new Map<number, HTMLDivElement>());
+  const masterMeter = useRef<HTMLDivElement>(null);
+  const masterLevel = useRef(0);
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const tick = useRef<Tick & { at: number }>({ playing: false, beat: 0, tempo: 120, signature: [4, 4], levels: [], at: 0 });
   const live = useRef({ zoom, scroll, size, follow, view });
   live.current = { zoom, scroll, size, follow, view };
@@ -132,10 +143,19 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
           setPlaying(t.playing);
           setTempo(t.tempo);
           setSignature(sameSig(t.signature));
-          setLevels(Object.fromEntries(t.levels));
+          for (const [id, peak] of t.levels) {
+            const el = meters.current.get(id);
+            if (el) el.style.transform = `scaleX(${meterPosition(peak)})`;
+          }
+          if (!t.playing) placeHead.current();
         }),
       ),
-      subscribe(onMeter((peak) => setLevel((prev) => Math.max(peak, prev * 0.8)))),
+      subscribe(
+        onMeter((peak) => {
+          masterLevel.current = Math.max(peak, masterLevel.current * 0.8);
+          if (masterMeter.current) masterMeter.current.style.transform = `scaleX(${meterPosition(masterLevel.current)})`;
+        }),
+      ),
     ];
     try {
       offs.push(subscribe(listen<TimelineView>("timeline:opened", (e) => adopt(e.payload))));
@@ -219,25 +239,35 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
     return beat;
   }, []);
 
+  /** Puts the playhead line and the position where the transport is now. */
+  const placeHead = useRef(() => {});
+  placeHead.current = () => {
+    const { zoom, scroll, size, follow } = live.current;
+    const beat = playhead();
+    const x = beatToX(beat, scroll, zoom);
+    for (const el of [laneHead.current, rulerHead.current]) {
+      if (!el) continue;
+      el.style.transform = `translateX(${Math.round(x)}px)`;
+      el.style.visibility = x >= 0 && x <= size.w ? "visible" : "hidden";
+    }
+    if (posText.current) posText.current.textContent = position(beat, tick.current.signature);
+    // Follow: a page on when the playhead runs off the right.
+    if (follow && tick.current.playing && size.w > 0 && (x > size.w - 24 || x < 0)) setScroll(Math.max(0, beat - (0.1 * size.w) / zoom));
+  };
+
+  // Every frame while playing and on screen; once on each change while stopped.
   useEffect(() => {
+    if (!active) return;
+    placeHead.current();
+    if (!playing) return;
     let raf = 0;
     const frame = () => {
-      const { zoom, scroll, size, follow } = live.current;
-      const beat = playhead();
-      const x = beatToX(beat, scroll, zoom);
-      for (const el of [laneHead.current, rulerHead.current]) {
-        if (!el) continue;
-        el.style.transform = `translateX(${Math.round(x)}px)`;
-        el.style.visibility = x >= 0 && x <= size.w ? "visible" : "hidden";
-      }
-      if (posText.current) posText.current.textContent = position(beat, tick.current.signature);
-      // Follow: a page on when the playhead runs off the right.
-      if (follow && tick.current.playing && size.w > 0 && (x > size.w - 24 || x < 0)) setScroll(Math.max(0, beat - (0.1 * size.w) / zoom));
+      placeHead.current();
       raf = requestAnimationFrame(frame);
     };
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-  }, [playhead]);
+  }, [active, playing, zoom, scroll, size, view]);
 
   // ---- Edits ----
 
@@ -278,6 +308,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
 
   const seek = useCallback((beat: number) => {
     tick.current = { ...tick.current, beat, at: performance.now() };
+    placeHead.current();
     api.seek(beat).catch(fail);
   }, [fail]);
 
@@ -327,19 +358,24 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (document.querySelector("dialog[open]") || typing(e.target)) return;
+      if (!activeRef.current || document.querySelector("dialog[open]") || typing(e.target)) return;
       const k = e.key.toLowerCase();
       const cmd = e.metaKey || e.ctrlKey;
+      const el = e.target as HTMLElement | null;
       if (e.key === " " && !cmd && !e.altKey) {
-        // A focused button outside the top bar takes its Space, as in the Sampler.
-        const el = e.target as HTMLElement | null;
-        if (el?.closest?.("button, [role=button]") && !el.closest(".bar")) return;
-        e.preventDefault();
-        // The Sampler stays mounted with a Space handler of its own: this one is the Timeline's.
+        // The Sampler stays mounted with a Space handler of its own: while the
+        // Timeline shows, Space is the Timeline's, so it never sees it.
         e.stopImmediatePropagation();
+        // A focused button or checkbox takes its own Space, except the view
+        // switch's, which keep focus after a switch.
+        const control = el?.closest?.("button, [role=button], input[type=checkbox], input[type=radio]");
+        if (control && !control.closest(".view-switch")) return;
+        e.preventDefault();
         if (!e.repeat) togglePlay();
         return;
       }
+      // A focused slider keeps its own keys (Home, End, the arrows).
+      if (el?.tagName === "INPUT") return;
       const run = (f: () => void) => {
         e.preventDefault();
         e.stopImmediatePropagation();
@@ -356,7 +392,8 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
       }
       if (e.altKey) return;
       if (e.key === "Backspace" || e.key === "Delete") return run(deleteSelected);
-      if (e.key === "Escape" && selected.size) return run(() => setSelected(new Set()));
+      // Escape goes on to the Library too (it stops a preview there).
+      if (e.key === "Escape" && selected.size) return setSelected(new Set());
       if (e.key === "=" || e.key === "+") return run(() => zoomBy(1.25, live.current.size.w / 2));
       if (e.key === "-") return run(() => zoomBy(0.8, live.current.size.w / 2));
       if (e.key === "Home") return run(() => {
@@ -433,6 +470,8 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
     const dpr = () => window.devicePixelRatio || 1;
     webview
       .onDragDropEvent((e) => {
+        // While the Sampler shows, its drops are its own.
+        if (!activeRef.current) return;
         const p = e.payload;
         if (p.type === "enter") finder.current = p.paths.filter(isAudio);
         if (p.type === "leave") {
@@ -463,7 +502,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
 
   if (!view) {
     return (
-      <div className="app timeline">
+      <div className="app timeline" hidden={!active}>
         <header className="bar">
           <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
           <img src={mark} alt="tuneKore" className="bar-mark narrow-only" />
@@ -482,7 +521,7 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
   const empty = allClips.length === 0;
 
   return (
-    <div className={`app timeline${libDrag?.moving ? " dragging" : ""}`}>
+    <div className={`app timeline${libDrag?.moving ? " dragging" : ""}`} hidden={!active}>
       <header className="bar">
         <img src={logo} alt="tuneKore" className="bar-logo wide-only" />
         <img src={mark} alt="tuneKore" className="bar-mark narrow-only" />
@@ -524,13 +563,13 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
             {signature[0]}/{signature[1]}
           </span>
         </div>
-        <button className={`tl-tool${loop.on ? " on" : ""}`} aria-pressed={loop.on} onClick={() => void setLoop({ ...loop, on: !loop.on })} title={`Loop the range on the ruler (${mod}L loops the selected clips)`}>
+        <button className={`tl-tool${loop.on ? " on" : ""}`} aria-pressed={loop.on} aria-label="Loop" onClick={() => void setLoop({ ...loop, on: !loop.on })} title={`Loop the range on the ruler (${mod}L loops the selected clips)`}>
           <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M3 9.5V7a3 3 0 0 1 3-3h7M11 2l2 2-2 2M13 6.5V9a3 3 0 0 1-3 3H3M5 14l-2-2 2-2" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
           <span className="tl-tool-label">Loop</span>
         </button>
-        <button className={`tl-tool${follow ? " on" : ""}`} aria-pressed={follow} onClick={() => setFollow(!follow)} title="Follow the playhead while playing">
+        <button className={`tl-tool${follow ? " on" : ""}`} aria-pressed={follow} aria-label="Follow the playhead" onClick={() => setFollow(!follow)} title="Follow the playhead while playing">
           <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2 8h9M8 4.5 11.5 8 8 11.5M14 3v10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
@@ -569,14 +608,14 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
             ↷
           </button>
         </div>
-        <button className={`tl-tool${library ? " on" : ""}`} aria-pressed={library} onClick={() => void setLibrary(!library)} title="Show the Library">
+        <button className={`tl-tool${library ? " on" : ""}`} aria-pressed={library} aria-label="Library" onClick={() => void setLibrary(!library)} title="Show the Library">
           <svg width="15" height="15" viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2.5 2.5h3v11h-3zM7 2.5h3v11H7zM11.5 3l2.5.6-2.4 10.2-2.5-.6z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
           </svg>
           <span className="tl-tool-label">Library</span>
         </button>
         <div className="meter" title="Output level" aria-hidden="true">
-          <div className="meter-fill" style={{ transform: `scaleX(${meterPosition(level)})` }} />
+          <div className="meter-fill" ref={masterMeter} style={{ transform: "scaleX(0)" }} />
         </div>
       </header>
       <div className="body tl-body">
@@ -613,7 +652,10 @@ export default function Timeline({ switcher, message, onMessage }: Props) {
                     track={l.track}
                     height={l.height}
                     selected={track === l.track.id}
-                    level={levels[l.track.id] ?? 0}
+                    meter={(el) => {
+                      if (el) meters.current.set(l.track.id, el);
+                      else meters.current.delete(l.track.id);
+                    }}
                     onSelect={() => setTrack(l.track.id)}
                     onMix={(mix) => api.setTrack(l.track.id, { mix }).then(take).catch(fail)}
                     onRename={(name) => api.setTrack(l.track.id, { name }).then(take).catch(fail)}

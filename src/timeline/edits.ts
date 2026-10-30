@@ -34,7 +34,12 @@ export function gridStep(snap: Snap, barBeats: number): number {
   }
 }
 
-/** `beat` on the nearest grid line, or as it is with no grid or with `free` (⌘ held). */
+const isMac = typeof navigator !== "undefined" && navigator.platform.toLowerCase().includes("mac");
+
+/** Whether a pointer event asks to ignore the grid: ⌘ held on the Mac, Ctrl elsewhere. */
+export const ignoresGrid = (e: { metaKey: boolean; ctrlKey: boolean }) => (isMac ? e.metaKey : e.ctrlKey);
+
+/** `beat` on the nearest grid line, or as it is with no grid or with `free` (the grid key held). */
 export function snapBeat(beat: number, step: number, free = false): number {
   if (free || step <= 0) return beat;
   return Math.round(beat / step) * step;

@@ -31,7 +31,8 @@ export interface ClipView {
 export interface TrackView {
   id: number;
   name: string;
-  kind: "sampler" | "audio";
+  /** Clips go on audio tracks; the Sampler's and instrument tracks show their mix. */
+  kind: "sampler" | "audio" | "instrument";
   /** An index into COLOURS. */
   colour: number;
   height: number;
