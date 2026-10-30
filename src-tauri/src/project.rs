@@ -445,17 +445,6 @@ impl TrackFile {
     }
 }
 
-/// The `tracks` section: the list, as files have always had it, or, once a
-/// deleted track left a gap above the highest id, the list with the id the
-/// next new track gets, so ids are never used twice.
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum TracksFile {
-    List(Vec<TrackFile>),
-    #[serde(rename_all = "camelCase")]
-    WithNext { next_id: u32, list: Vec<TrackFile> },
-}
-
 /// What a track's kind is when the file doesn't say.
 fn default_kind(id: TrackId) -> TrackKind {
     if id == SAMPLER_TRACK { TrackKind::Sampler } else { TrackKind::Audio }
@@ -463,7 +452,7 @@ fn default_kind(id: TrackId) -> TrackKind {
 
 /// Sets the engine's track list to `tracks`: the Sampler's track always
 /// stays, others are added or removed to match. `tracks` was checked first.
-fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile], next: Option<u32>) -> Result<(), String> {
+fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String> {
     let mut audio = audio.lock().unwrap();
     let mixer = audio.engine.mixer();
     for t in mixer.tracks().iter().filter(|t| t.id != SAMPLER_TRACK && tracks.iter().all(|f| f.id != t.id)) {
@@ -482,9 +471,6 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile], next: Option<u32>) -
         mixer.set_mix(f.id, f.mix)?;
         mixer.set_kind(f.id, f.kind())?;
     }
-    if let Some(next) = next {
-        mixer.reserve_track_ids(TrackId(next));
-    }
     Ok(())
 }
 
@@ -494,27 +480,22 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
-        let mut audio = self.audio.lock().unwrap();
-        let next = audio.engine.mixer().next_track_id().0;
-        let tracks: Vec<TrackFile> = audio
+        let tracks: Vec<TrackFile> = self
+            .audio
+            .lock()
+            .unwrap()
             .engine
             .tracks()
             .into_iter()
             .map(|t| TrackFile { kind: (t.kind != default_kind(t.id)).then_some(t.kind), id: t.id, name: t.name, mix: t.mix })
             .collect();
-        let highest = tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
-        // The plain list while the next id follows the highest, as files always were.
-        let file = if next > highest + 1 { TracksFile::WithNext { next_id: next, list: tracks } } else { TracksFile::List(tracks) };
-        serde_json::to_value(file).map_err(|e| e.to_string())
+        serde_json::to_value(tracks).map_err(|e| e.to_string())
     }
 
     fn read(&self, _: &C, value: Option<&Value>, _: &Path) -> Result<Apply<C>, String> {
-        let (tracks, next) = match value {
-            Some(v) => match serde_json::from_value(v.clone()).map_err(|e| format!("the project's tracks are damaged ({e})"))? {
-                TracksFile::List(list) => (list, None),
-                TracksFile::WithNext { next_id, list } => (list, Some(next_id)),
-            },
-            None => (Vec::new(), None),
+        let tracks: Vec<TrackFile> = match value {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's tracks are damaged ({e})"))?,
+            None => Vec::new(),
         };
         // Everything applying could trip on, checked now.
         let others = tracks.iter().filter(|t| t.id != SAMPLER_TRACK).count();
@@ -530,15 +511,62 @@ impl<C: 'static> Section<C> for TracksSection {
             return Err("the project has a track numbered 0".into());
         }
         let audio = self.audio;
-        Ok(Box::new(move |_| apply_tracks(audio, &tracks, next)))
+        Ok(Box::new(move |_| apply_tracks(audio, &tracks)))
     }
 
     fn clear(&self, _: &C) -> Result<(), String> {
-        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }], None)
+        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }])
     }
 
     fn revision(&self, _: &C) -> u64 {
         self.revision.load(Ordering::Relaxed)
+    }
+}
+
+/// `trackIds`: the id the project's next new track gets, `{"next": n}`, so a
+/// deleted track's id never comes back for another (a MIDI mapping or a plugin
+/// reference to it stays dangling rather than landing on the new track). Its
+/// own section so the `tracks` list keeps the shape older builds read; they
+/// keep this one as a section they don't know. Opening a file without it, and
+/// New, start past the highest track there is.
+pub struct TrackIdsSection(pub &'static Mutex<Audio>);
+
+#[derive(Serialize, Deserialize, Default)]
+struct TrackIdsFile {
+    next: u32,
+}
+
+impl<C: 'static> Section<C> for TrackIdsSection {
+    fn key(&self) -> &'static str {
+        "trackIds"
+    }
+
+    fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
+        let next = self.0.lock().unwrap().engine.mixer().next_track_id().0;
+        serde_json::to_value(TrackIdsFile { next }).map_err(|e| e.to_string())
+    }
+
+    fn read(&self, _: &C, value: Option<&Value>, _: &Path) -> Result<Apply<C>, String> {
+        let file: TrackIdsFile = match value {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's track ids are damaged ({e})"))?,
+            None => TrackIdsFile::default(),
+        };
+        let audio = self.0;
+        // Applies after `tracks`: it is registered after it.
+        Ok(Box::new(move |_| {
+            audio.lock().unwrap().engine.mixer().set_next_track_id(TrackId(file.next));
+            Ok(())
+        }))
+    }
+
+    fn clear(&self, _: &C) -> Result<(), String> {
+        self.0.lock().unwrap().engine.mixer().set_next_track_id(TrackId(0));
+        Ok(())
+    }
+
+    /// Changes only when tracks are added or removed, which the `tracks` section counts.
+    fn revision(&self, _: &C) -> u64 {
+        0
     }
 }
 
@@ -706,6 +734,7 @@ pub fn setup(app: &AppHandle) {
     let p = project(app);
     p.register_core(TransportSection(crate::audio(app).lock().unwrap().engine.transport()));
     p.register_core(TracksSection::new(crate::audio(app)));
+    p.register_core(TrackIdsSection(crate::audio(app)));
     spawn_autosave(app.clone());
 }
 
@@ -946,32 +975,57 @@ mod tests {
         assert_eq!(kinds, vec![Value::Null, Value::Null, json!("instrument"), Value::Null]);
     }
 
+    /// A project with its own engine and the track sections, as a launch of the app has.
+    fn launch() -> (Project<()>, &'static Mutex<Audio>) {
+        let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
+        let p: Project<()> = Project::new();
+        p.register_core(TransportSection(audio.lock().unwrap().engine.transport()));
+        p.register_core(TracksSection::new(audio));
+        p.register_core(TrackIdsSection(audio));
+        (p, audio)
+    }
+
+    fn tracks_text(ids: &[u32]) -> String {
+        let list: Vec<Value> = ids.iter().map(|&i| json!({ "id": i, "name": format!("t{i}") })).collect();
+        json!({ "format": FORMAT, "version": 2, "tracks": list }).to_string()
+    }
+
     #[test]
     fn a_deleted_tracks_id_isnt_given_to_a_new_track_after_reopening() {
-        // A project with its own engine, as a launch of the app has.
-        let launch = || {
-            let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
-            let p: Project<()> = Project::new();
-            p.register_core(TransportSection(audio.lock().unwrap().engine.transport()));
-            p.register_core(TracksSection::new(audio));
-            (p, audio)
-        };
         let (p, audio) = launch();
-        let text = r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler"},{"id":2,"name":"Bass"},{"id":3,"name":"Keys"}]}"#;
-        p.open_text(&(), text, Path::new("/a.tunek"), None, false).unwrap();
+        p.open_text(&(), &tracks_text(&[1, 2, 3]), Path::new("/a.tunek"), None, false).unwrap();
         audio.lock().unwrap().engine.mixer().remove_track(TrackId(3)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let file = p.save(&(), Some(dir.path().join("a"))).unwrap();
-        assert_eq!(json(&std::fs::read_to_string(&file).unwrap())["tracks"]["nextId"], json!(4));
+        let saved = json(&std::fs::read_to_string(&file).unwrap());
+        assert!(saved["tracks"].is_array(), "the list older builds read");
+        assert_eq!(saved["trackIds"], json!({ "next": 4 }));
         // Relaunch, reopen, add a track.
         let (p, audio) = launch();
         p.open(&(), &file, Some(file.clone()), false).unwrap();
-        let id = audio.lock().unwrap().engine.mixer().add_track("New").unwrap();
-        assert_eq!(id, TrackId(4), "not 3, the deleted track's");
-        // A file with no gap keeps the plain list it always had.
-        let (p, _) = launch();
-        p.open_text(&(), text, Path::new("/b.tunek"), None, false).unwrap();
-        assert!(json(&p.serialize(&(), Path::new("/b.tunek")).unwrap())["tracks"].is_array());
+        assert_eq!(audio.lock().unwrap().engine.mixer().add_track("New").unwrap(), TrackId(4), "not 3, the deleted track's");
+    }
+
+    #[test]
+    fn the_next_id_is_the_projects_not_the_sessions() {
+        let (p, audio) = launch();
+        p.open_text(&(), &tracks_text(&[1, 2, 3, 4]), Path::new("/a.tunek"), None, false).unwrap();
+        // Another project with two tracks, in the same session: its own next id.
+        p.open_text(&(), &tracks_text(&[1, 2]), Path::new("/b.tunek"), None, false).unwrap();
+        let saved = json(&p.serialize(&(), Path::new("/b.tunek")).unwrap());
+        assert!(saved["tracks"].is_array());
+        assert_eq!(saved["trackIds"], json!({ "next": 3 }));
+        p.new_project(&()).unwrap();
+        assert_eq!(audio.lock().unwrap().engine.mixer().next_track_id(), TrackId(2), "a new project starts after the Sampler");
+    }
+
+    #[test]
+    fn a_build_without_track_ids_keeps_the_section_as_it_found_it() {
+        // rig() has no trackIds section, as 0.1.12 and 0.1.13 don't.
+        let (p, _, _, _) = rig();
+        let text = json!({ "format": FORMAT, "version": 2, "tracks": [{ "id": 1, "name": "Sampler" }, { "id": 2, "name": "Bass" }], "trackIds": { "next": 9 } }).to_string();
+        p.open_text(&(), &text, Path::new("/a.tunek"), None, false).unwrap();
+        assert_eq!(json(&p.serialize(&(), Path::new("/a.tunek")).unwrap())["trackIds"], json!({ "next": 9 }));
     }
 
     #[test]

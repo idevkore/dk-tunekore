@@ -177,9 +177,12 @@ impl Mixer {
         TrackId(self.next_id)
     }
 
-    /// New tracks get ids from `next` on, as a project saved it. Never goes back.
-    pub fn reserve_track_ids(&mut self, next: TrackId) {
-        self.next_id = self.next_id.max(next.0);
+    /// New tracks get ids from `next` on (as a project saved it), or from
+    /// past the highest track there is when that is higher. Opening and new
+    /// projects set it, so it belongs to the project, not the app's session.
+    pub fn set_next_track_id(&mut self, next: TrackId) {
+        let highest = self.tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        self.next_id = next.0.max(highest.saturating_add(1)).max(1);
     }
 
     /// Removes a track and its devices.
@@ -835,10 +838,11 @@ mod tests {
         assert_eq!(m.track(next).map(|t| t.kind), Some(TrackKind::Instrument));
         assert!(m.revision() > r, "saved, so an edit");
         assert!(m.set_kind(TrackId(99), TrackKind::Audio).is_err());
-        m.reserve_track_ids(TrackId(20));
-        m.reserve_track_ids(TrackId(5));
-        assert_eq!(m.next_track_id(), TrackId(20), "never goes back");
+        m.set_next_track_id(TrackId(20));
+        assert_eq!(m.next_track_id(), TrackId(20));
         assert_eq!(m.add_track("After").unwrap(), TrackId(20));
+        m.set_next_track_id(TrackId(0));
+        assert_eq!(m.next_track_id(), TrackId(21), "never at or below a track there is");
     }
 
     #[test]

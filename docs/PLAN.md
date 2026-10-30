@@ -187,10 +187,11 @@ rather than edit the same ones.
   instrument, #37). `Mixer::set_kind` sets it; the `tracks` project section
   saves it, left out when it's the default, so version 2 files from before
   open as they were (track 1 the Sampler's, the rest audio). Track ids are
-  never reused: once a deleted track leaves a gap above the highest id, the
-  `tracks` section saves the next id (`{"nextId": n, "list": [...]}`) and an
-  open restores it, so a MIDI mapping or a plugin reference to a deleted
-  track can't land on a new one. The Timeline
+  never reused within a project: the `trackIds` section (`{"next": n}`, its
+  own so the `tracks` list keeps the shape older builds read, which keep it
+  as an unknown section) saves the id the next new track gets, and Open and
+  New set it (from the file, or past the highest track), so a MIDI mapping
+  or a plugin reference to a deleted track can't land on a new one. The Timeline
   shows every track, puts clips on audio tracks only, and puts its clip
   player only into an audio track's empty source slot, so a device another
   module put on a track stays.

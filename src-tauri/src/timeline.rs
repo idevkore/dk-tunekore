@@ -244,6 +244,9 @@ struct Doc {
     history: History,
     /// Bumped on every change the project saves.
     revision: u64,
+    /// The tracks whose name or mix the edit running now changed itself, for
+    /// its undo step (a fader moved meanwhile by MIDI isn't the edit's).
+    touching: Vec<TrackId>,
 }
 
 impl Default for Doc {
@@ -255,6 +258,7 @@ impl Default for Doc {
             view: ViewState::default(),
             history: History::default(),
             revision: 0,
+            touching: Vec::new(),
         }
     }
 }
@@ -586,16 +590,7 @@ impl TimelineState {
         Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), mixes, touched: Vec::new() }
     }
 
-    /// The tracks whose name or mix differs now from `before`.
-    fn touched(&self, before: &Snapshot) -> Vec<TrackId> {
-        let now = lock(self.audio).engine.tracks();
-        before
-            .mixes
-            .iter()
-            .filter(|(id, name, mix, _)| now.iter().find(|t| t.id == *id).is_some_and(|t| t.name != *name || t.mix != *mix))
-            .map(|(id, ..)| *id)
-            .collect()
-    }
+
 
     /// The engine's tracks and what each is.
     fn kinds(&self) -> HashMap<TrackId, TrackKind> {
@@ -753,7 +748,7 @@ impl TimelineState {
         let mut doc = lock(&self.doc);
         let mut before = self.snapshot(&doc);
         f(self, &mut doc)?;
-        before.touched = self.touched(&before);
+        before.touched = std::mem::take(&mut doc.touching);
         doc.checkpoint(key, before.clone());
         self.sync(&doc, Resend::Changed(&before.clips));
         self.note_revision(&doc);
@@ -1033,6 +1028,9 @@ impl TimelineState {
             }
             if let Some(mix) = change.mix {
                 mixer.set_mix(id, mix)?;
+            }
+            if change.name.is_some() || change.mix.is_some() {
+                doc.touching.push(id);
             }
             Ok(())
         })
@@ -1415,7 +1413,7 @@ impl TimelineState {
         let revision = doc.revision + 1;
         // The last project's files go; this one's were decoded as it was read.
         lock(&self.sources).retain(|p, _| clips.values().flatten().any(|c| c.path == *p));
-        *doc = Doc { tracks, clips, next_clip, view: read.view, history: History::default(), revision };
+        *doc = Doc { tracks, clips, next_clip, view: read.view, history: History::default(), revision, touching: Vec::new() };
         self.adopt(&mut doc);
         self.apply_loop(&doc.view);
         self.sync(&doc, Resend::All);

@@ -487,7 +487,7 @@ pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: Sta
         let mut files = Vec::new();
         for name in &names {
             let audio = separated.get(name).ok_or_else(|| format!("no stem called {name}"))?;
-            let path = folder.join(format!("{} - {}.wav", safe_name(&loaded.name), title(name)));
+            let path = free_name(&folder, &format!("{} - {}", safe_name(&loaded.name), title(name)));
             export_wav(audio, separated.sample_rate, &path)?;
             files.push((path, title(name)));
         }
@@ -496,6 +496,19 @@ pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: Sta
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// `<base>.wav` in `folder`, or `<base> 2.wav`, `<base> 3.wav`... when it is
+/// taken: a stem sent to the Timeline again never writes over the file that
+/// clips and saved projects already play.
+fn free_name(folder: &Path, base: &str) -> PathBuf {
+    let mut path = folder.join(format!("{base}.wav"));
+    let mut n = 2;
+    while path.exists() {
+        path = folder.join(format!("{base} {n}.wav"));
+        n += 1;
+    }
+    path
 }
 
 /// Where a song's stems and slices are written: Music/tuneKore/Samples/<song>.
@@ -569,4 +582,19 @@ pub fn commands() -> crate::Commands {
 /// Sends the player's position to the Analyzer window.
 pub fn setup(app: &AppHandle) {
     spawn_position(app.clone(), app.state::<Player>().inner().clone());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stem_sent_again_gets_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = free_name(dir.path(), "Song - Drums");
+        assert_eq!(first, dir.path().join("Song - Drums.wav"));
+        std::fs::write(&first, b"x").unwrap();
+        let second = free_name(dir.path(), "Song - Drums");
+        assert_eq!(second, dir.path().join("Song - Drums 2.wav"), "the first isn't written over");
+    }
 }
