@@ -5,7 +5,9 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 export const PADS = 16;
 /** The computer keys that play pads 1–16, laid out like the 4×4 grid. */
 export const PAD_KEYS = ["1", "2", "3", "4", "q", "w", "e", "r", "a", "s", "d", "f", "z", "x", "c", "v"];
-export const STEP_CHOICES = [8, 16, 32];
+export const STEP_CHOICES = [8, 16, 32, 64];
+/** Steps the grid shows at once. A longer pattern (up to four bars) is paged by two bars. */
+export const STEP_PAGE = 32;
 /** Project files: `Beat 1.tunek`. */
 export const PROJECT_EXT = "tunek";
 export const AUDIO_EXTENSIONS = ["wav", "aif", "aiff", "flac", "mp3", "m4a", "mp4"];

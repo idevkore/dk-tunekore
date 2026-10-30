@@ -1756,6 +1756,25 @@ mod tests {
     }
 
     #[test]
+    fn a_64_step_pattern_saves_and_reads_back_whole() {
+        let mut doc = Doc::default();
+        doc.steps = 64;
+        // Chords on the first step of each bar, and a soft, doubled hit on the very last step.
+        doc.pads[0].patterns[1] = 1 | 1 << 16 | 1 << 32 | 1 << 48 | 1 << 63;
+        doc.pads[0].set_velocity(1, 63, 100);
+        doc.pads[0].set_extras(1, 63, 128, 2);
+        let file = to_file(&doc, Path::new("/tmp/house.tunek"));
+        let json = serde_json::to_string(&file).unwrap();
+        let back: SamplerFile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.steps, 64);
+        assert_eq!(back.pads[0].patterns[1].len(), 64, "the text runs to the last step");
+        assert_eq!(pattern_bits(&back.pads[0].patterns[1]), 1 | 1 << 16 | 1 << 32 | 1 << 48 | 1 << 63);
+        assert_eq!(back.pads[0].velocity[1][63], 100);
+        assert_eq!(back.pads[0].chance[1][63], 128);
+        assert_eq!(back.pads[0].ratchet[1][63], 2);
+    }
+
+    #[test]
     fn sample_paths_are_relative_inside_the_project_folder() {
         let mut doc = Doc::default();
         doc.pads[0].missing = Some(PathBuf::from("/music/beats/kick.wav"));
