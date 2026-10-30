@@ -282,8 +282,12 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
       }
       if (typing(e.target) || e.altKey) return;
       if (e.key === " ") {
-        // A focused button takes its Space (the view switch, a pad, a menu item).
-        if ((e.target as HTMLElement | null)?.closest?.("button, [role=button]")) return;
+        // Space plays from the top bar's buttons (the view switch, the transport,
+        // the toolbar), which keep focus after a click or a view switch; any
+        // other focused button (a pad, a menu item) takes its Space.
+        const el = e.target as HTMLElement | null;
+        const inBar = !!el?.closest?.(".bar") && !el.closest(".menu");
+        if (el?.closest?.("button, [role=button]") && !inBar) return;
         e.preventDefault();
         if (!e.repeat) togglePlay();
         return;

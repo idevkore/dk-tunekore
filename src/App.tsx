@@ -70,6 +70,8 @@ export default function App() {
     let gone = false;
     try {
       listen<string>("view:show", (e) => {
+        // As with the keys: a dialog open in the Sampler stays on screen.
+        if (document.querySelector("dialog[open]")) return;
         const v = VIEWS.find((x) => x.id === e.payload);
         if (v) show(v.id, true);
       })
