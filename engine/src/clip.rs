@@ -775,6 +775,45 @@ mod tests {
     }
 
     #[test]
+    fn a_clip_and_a_sampler_step_on_the_same_beat_start_on_the_same_frame() {
+        use crate::sampler::{self, PadParams, SamplerShared};
+        use crate::track::TrackMix;
+        for (rate, tempo) in [(44_100u32, 97.0), (48_000, 120.0), (96_000, 133.3)] {
+            // The first frame with sound, with only the Sampler's track heard or only the clip's.
+            let first = |sampler_heard: bool| {
+                let shared = Arc::new(TransportShared::default());
+                shared.set_tempo(tempo);
+                let pads = Arc::new(SamplerShared::with_clock(shared.clone()));
+                pads.set_pad(0, &PadParams::default());
+                pads.set_pattern(0, 1 << 4); // step 5 of 16: beat 1
+                let mut mixer = Mixer::new();
+                let s = mixer.add_track("Sampler").unwrap();
+                let a = mixer.add_track("Audio").unwrap();
+                let (device, mut link) = sampler::device(pads.clone(), rate);
+                mixer.set_source(s, Some(Box::new(device))).unwrap();
+                let (clips, mut feed) = player();
+                mixer.set_source(a, Some(Box::new(clips))).unwrap();
+                let mut graph = mixer.start(rate);
+                link.send(0, Some(Arc::new(vec![vec![0.5; 2_000]]))).unwrap();
+                feed.publish(ClipSet::new(rate, vec![(spec(1.0, 0.05), dc(0.5, rate as usize))]));
+                mixer.set_mix(if sampler_heard { a } else { s }, TrackMix { mute: true, ..Default::default() }).unwrap();
+                let mut clock = Transport::new(rate);
+                shared.play();
+                let mut out = Vec::new();
+                for _ in 0..200 {
+                    graph.run(&mut clock, &shared, 512);
+                    out.extend_from_slice(graph.master().0);
+                }
+                // Past the muted track's 8 ms ramp down.
+                out.iter().skip(1_000).position(|&x| x.abs() > 1e-9).map(|i| i + 1_000)
+            };
+            let beat = (60.0 / tempo * f64::from(rate) - EDGE_FRAMES).ceil() as usize;
+            assert_eq!(first(true), Some(beat), "the Sampler at {rate} Hz, {tempo} BPM");
+            assert_eq!(first(false), Some(beat), "the clip at {rate} Hz, {tempo} BPM");
+        }
+    }
+
+    #[test]
     fn on_a_track_in_the_graph_with_edits_between_blocks() {
         let mut mixer = Mixer::new();
         let t = mixer.add_track("Audio 1").unwrap();
