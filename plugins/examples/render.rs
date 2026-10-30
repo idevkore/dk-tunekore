@@ -93,6 +93,12 @@ fn level(r: &offline::Rendered) -> String {
 }
 
 fn main() {
+    run();
+    // Unload the plugins' modules before the process exits (see `vst3::shutdown`).
+    vst3::shutdown();
+}
+
+fn run() {
     let a = match parse() {
         Ok(a) => a,
         Err(e) => return eprintln!("error: {e}"),

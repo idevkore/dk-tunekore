@@ -1,5 +1,9 @@
 //! Against the plugins installed on this Mac (the test list in `docs/PLAN.md` section 5). Each
 //! test skips, passing, when `CI` is set or its plugin is not installed.
+//!
+//! Its own small runner (`harness = false`) runs the cases one after another and then calls
+//! `vst3::shutdown()`, as the app does when it quits: Serum 2 crashes if its module exit is left
+//! to the process exit handler.
 
 use std::path::PathBuf;
 use tunekore_plugins::offline::{self, Input, RenderSpec};
@@ -31,7 +35,6 @@ fn notes(seconds: f64) -> RenderSpec {
     RenderSpec { seconds, notes: RenderSpec::arpeggio(), ..RenderSpec::default() }
 }
 
-#[test]
 fn serum_2_plays_notes_is_silent_without_them_and_restores_its_state_exactly() {
     let Some(bundle) = installed("Serum2.vst3") else { return };
     let mut a = load(&bundle, "Serum 2");
@@ -52,7 +55,6 @@ fn serum_2_plays_notes_is_silent_without_them_and_restores_its_state_exactly() {
     assert!(offline::max_difference(&played, &again) < 1e-4, "restored render differs by {}", offline::max_difference(&played, &again));
 }
 
-#[test]
 fn serum_plays_notes() {
     let Some(bundle) = installed("Serum.vst3") else { return };
     let mut c = load(&bundle, "Serum");
@@ -60,7 +62,6 @@ fn serum_plays_notes() {
     assert!(r.peak() > 0.05, "peak {}", r.peak());
 }
 
-#[test]
 fn analog_lab_v_loads_or_fails_with_an_error_but_never_aborts() {
     let Some(bundle) = installed("Analog Lab V.vst3") else { return };
     // In the hosting spike this plugin threw a C++ exception into Rust and the process aborted.
@@ -78,7 +79,6 @@ fn analog_lab_v_loads_or_fails_with_an_error_but_never_aborts() {
     }
 }
 
-#[test]
 fn jup_8_v4_plays_notes() {
     let Some(bundle) = installed("Jup-8 V4.vst3") else { return };
     let mut c = load(&bundle, "Jup-8 V4");
@@ -86,7 +86,6 @@ fn jup_8_v4_plays_notes() {
     assert!(r.peak() > 0.01, "peak {}", r.peak());
 }
 
-#[test]
 fn kontakt_7_runs_with_all_its_output_buses() {
     let Some(bundle) = installed("Kontakt 7.vst3") else { return };
     let mut c = load(&bundle, "Kontakt 7");
@@ -100,7 +99,6 @@ fn kontakt_7_runs_with_all_its_output_buses() {
     assert!(r.channels.iter().all(|ch| ch.len() == 48_000));
 }
 
-#[test]
 fn guitar_rig_7_processes_audio_as_an_effect() {
     let Some(bundle) = installed("Guitar Rig 7.vst3") else { return };
     let mut c = load(&bundle, "Guitar Rig 7");
@@ -109,4 +107,44 @@ fn guitar_rig_7_processes_audio_as_an_effect() {
     let r = offline::render(&mut *c, &spec).unwrap();
     assert_eq!(r.layout.input_channels(), 2, "main input on, sidechain off");
     assert!(r.peak() > 0.01, "peak {}", r.peak());
+}
+
+fn main() {
+    let cases: [(&str, fn()); 6] = [
+        ("serum_2_plays_notes_is_silent_without_them_and_restores_its_state_exactly", serum_2_plays_notes_is_silent_without_them_and_restores_its_state_exactly),
+        ("serum_plays_notes", serum_plays_notes),
+        ("analog_lab_v_loads_or_fails_with_an_error_but_never_aborts", analog_lab_v_loads_or_fails_with_an_error_but_never_aborts),
+        ("jup_8_v4_plays_notes", jup_8_v4_plays_notes),
+        ("kontakt_7_runs_with_all_its_output_buses", kontakt_7_runs_with_all_its_output_buses),
+        ("guitar_rig_7_processes_audio_as_an_effect", guitar_rig_7_processes_audio_as_an_effect),
+    ];
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--list") {
+        for (name, _) in &cases {
+            println!("{name}: test");
+        }
+        return;
+    }
+    // Like the standard harness: plain arguments filter by name; flags are ignored.
+    let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+    let mut failed = Vec::new();
+    for (name, case) in cases {
+        if !filters.is_empty() && !filters.iter().any(|f| name.contains(f.as_str())) {
+            continue;
+        }
+        match std::panic::catch_unwind(case) {
+            Ok(()) => println!("test {name} ... ok"),
+            Err(_) => {
+                println!("test {name} ... FAILED");
+                failed.push(name);
+            }
+        }
+    }
+    vst3::shutdown();
+    if failed.is_empty() {
+        println!("installed_plugins: ok");
+    } else {
+        println!("installed_plugins: {} failed: {}", failed.len(), failed.join(", "));
+        std::process::exit(101);
+    }
 }

@@ -84,6 +84,18 @@ pub fn load_class(bundle: &Path, class_id: &str) -> Result<Box<dyn PluginControl
     load(&info)
 }
 
+/// Runs every loaded module's exit function (`bundleExit`) and stops loading modules. Call it when
+/// the app quits, after dropping every plugin (a module with a live instance is left alone).
+///
+/// If the app never calls it, the module exits run from a process exit handler instead. That is
+/// a fallback, not a plan: some plugins set things up lazily that the process exit tears down
+/// first, and then crash in their module exit (Serum 2 frees memory twice; soundCraft saw the
+/// same in Steinberg's HALion Sonic). The fallback stays because other plugins crash in their
+/// static destructors when the module exit never ran at all.
+pub fn shutdown() {
+    module::exit_modules();
+}
+
 /// Whether a category is something the engine puts on a track.
 pub fn is_hostable(c: Category) -> bool {
     matches!(c, Category::Instrument | Category::Effect)

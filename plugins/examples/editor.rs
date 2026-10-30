@@ -153,6 +153,7 @@ mod mac {
         window.close();
         drop(plugin);
         drop(c);
+        vst3::shutdown();
         println!("closed cleanly");
         Ok(())
     }
