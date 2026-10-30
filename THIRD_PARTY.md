@@ -48,6 +48,33 @@ eleven Symphonia crates (`symphonia`, `-core`, `-common`, `-metadata`,
 `cssparser-macros`, `dtoa-short`, `option-ext` and `selectors`). `r-efi`
 offers LGPL-2.1-or-later as one of three choices; we use it as MIT.
 
+## Plugin host (Rust, `plugins/`), direct dependencies
+
+`plugins/` (`tunekore-plugins`) is its own Cargo workspace with its own
+`Cargo.lock` until #37 joins it to the main one; `npm run licenses` and CI
+don't read that lockfile yet.
+
+| Crate | Version | Licence | Use |
+| --- | --- | --- | --- |
+| [vst3](https://github.com/coupler-rs/vst3-rs) | 0.3.0 | MIT OR Apache-2.0 | VST 3 API bindings, generated from Steinberg's MIT-licensed headers |
+| [libloading](https://github.com/nagisa/rust_libloading) | 0.9.0 | ISC | Loads plugin binaries |
+| [crossbeam-queue](https://github.com/crossbeam-rs/crossbeam) | 0.3.14 | MIT OR Apache-2.0 | Lock-free queue for edits made in a plugin's editor |
+| serde, serde_json | 1.0.229, 1.0.154 | MIT OR Apache-2.0 | The plugin scan cache |
+| [thiserror](https://github.com/dtolnay/thiserror) | 2.0.21 | MIT OR Apache-2.0 | Error types |
+| [log](https://github.com/rust-lang/log) | 0.4.34 | MIT OR Apache-2.0 | Diagnostics, never on the audio thread |
+| [objc2](https://github.com/madsmtm/objc2), objc2-foundation | 0.6.5, 0.3.2 | MIT | macOS: plugin editor windows |
+| objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | macOS: plugin editor windows |
+| [cc](https://github.com/rust-lang/cc-rs) | 1.10.0 | MIT OR Apache-2.0 | Build: compiles the C++ shim that catches exceptions thrown by plugins |
+
+Its lockfile has 32 crates. The rest are MIT or Apache-2.0 (or both), Zlib,
+Unlicense OR MIT (`memchr`) and Unicode-3.0 (`unicode-ident`, build only):
+com-scrape-types, crossbeam-utils, objc2-encode, objc2-core-foundation,
+dispatch2, bitflags, cfg-if, itoa, memchr, proc-macro2, quote, syn,
+unicode-ident, serde_core, serde_derive, thiserror-impl, shlex,
+find-msvc-tools, windows-link and zmij. Steinberg's VST 3 API licence (MIT) is
+kept in `plugins/third_party/steinberg/LICENSE.txt` for the `vst3` crate's
+bindings; no Steinberg file is copied.
+
 ## Code adapted from other projects
 
 Code translated or closely adapted from another project's source, not linked
@@ -59,6 +86,7 @@ as a dependency. The adapted code carries a header comment naming its source.
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/dsp/src/plugins/dynamics.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The master limiter (`Maximizer`: lookahead min-hold gain smoothed by a moving average, hard ceiling) | `engine/src/limiter.rs` |
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/playback/src/record.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The input recorder's guard against a panicking callback, the silence a full ring owes to keep a take's timing, the NaN guard and the stream-lost check (we use `rtrb` and an in-memory take in place of its atomics ring and file writer) | `engine/src/input.rs` |
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/midi/src/rng.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The xorshift64* generator behind step probability, so an offline render repeats exactly | `engine/src/sampler.rs` (`XorShift`) |
+| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/vst3-host` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The VST3 host: module loading, host interfaces, events, instances, editors (`ffi.rs`), the bundle scan (`scan.rs`), the test plugin fixture and its build helper. Its licence and NOTICE are kept in `plugins/third_party/soundcraft/`, with what changed. | `plugins/src/vst3/`, `plugins/src/editor_window.rs`, `plugins/src/scan/bundles.rs`, `plugins/tests/fixture/`, `plugins/tests/common/mod.rs` |
 
 ## UI (TypeScript)
 

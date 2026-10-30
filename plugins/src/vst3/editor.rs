@@ -1,0 +1,263 @@
+//! A plugin's editor (`IPlugView`): creating it, attaching it to a window the host owns, and
+//! following its resize requests.
+//!
+//! Derived from soundCraft's `vst3-host` (`ffi.rs`), MIT OR Apache-2.0; see
+//! `third_party/soundcraft/`. What changed: the host window is not created here. The caller
+//! passes the native view to attach to ([`NativeParent`]) and a callback for resizes, so the
+//! engine can put the editor in a window of its own (see [`crate::editor_window`] for one).
+
+use super::instance::Instance;
+use super::ptr::PlugPtr;
+use super::shim::{self, Exception};
+use crate::plugin::{EditorSize, NativeParent, PluginError, ResizeCallback};
+use std::sync::Mutex;
+use vst3::Steinberg::{self as sb, IPlugFrameTrait, Vst as sv};
+use vst3::{Class, ComWrapper};
+
+/// The platform window type the view is asked to support.
+#[cfg(target_os = "macos")]
+fn platform_type() -> Option<sb::FIDString> {
+    Some(sb::kPlatformTypeNSView)
+}
+#[cfg(windows)]
+fn platform_type() -> Option<sb::FIDString> {
+    Some(sb::kPlatformTypeHWND)
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+fn platform_type() -> Option<sb::FIDString> {
+    None
+}
+
+/// Editors may only be opened on the main thread (AppKit, Win32).
+fn on_main_thread() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::MainThreadMarker::new().is_some()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// The `IPlugFrame` handed to a plugin view: `resizeView` asks the host to resize its window.
+struct PlugFrame {
+    on_resize: Mutex<ResizeCallback>,
+}
+
+impl Class for PlugFrame {
+    type Interfaces = (sb::IPlugFrame,);
+}
+
+impl PlugFrame {
+    /// Forgets the host's callback. Done whenever the frame may outlive the host's window (closed
+    /// or leaked with its view): the callback typically holds that window's address, and a late
+    /// `resizeView` from the plugin must not reach it.
+    fn disconnect(&self) {
+        let mut cb = self.on_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cb = Box::new(|_| {});
+    }
+}
+
+impl IPlugFrameTrait for PlugFrame {
+    unsafe fn resizeView(&self, view: *mut sb::IPlugView, new_size: *mut sb::ViewRect) -> sb::tresult {
+        // SAFETY: in-pointer from the plugin (or null, handled).
+        let Some(r) = (unsafe { new_size.as_mut() }) else { return sb::kInvalidArgument };
+        let size = rect_size(r);
+        // A callback that resizes the window can make the plugin ask again; that nested ask is
+        // ignored, the outer one is already being served.
+        if let Ok(mut cb) = self.on_resize.try_lock() {
+            cb(size);
+        }
+        if !view.is_null() {
+            // SAFETY: the plugin passes its own live view; `r` is the plugin's own writable rect.
+            // The shim keeps an exception from the view out of the plugin's own resize call.
+            let _ = unsafe { shim::i_pp((*(*view).vtbl).onSize, view, r as *mut sb::ViewRect) };
+        }
+        sb::kResultOk
+    }
+}
+
+/// Width and height of a view rect, clamped to a sane window size.
+fn rect_size(r: &sb::ViewRect) -> EditorSize {
+    EditorSize { width: r.right.saturating_sub(r.left).clamp(1, 16_384) as u32, height: r.bottom.saturating_sub(r.top).clamp(1, 16_384) as u32 }
+}
+
+fn rect_of(s: EditorSize) -> sb::ViewRect {
+    sb::ViewRect { left: 0, top: 0, right: s.width.min(i32::MAX as u32) as i32, bottom: s.height.min(i32::MAX as u32) as i32 }
+}
+
+/// An open editor: the view and the frame it calls back into.
+pub(crate) struct Editor {
+    view: PlugPtr<sb::IPlugView>,
+    frame: ComWrapper<PlugFrame>,
+}
+
+fn create_view(c: &PlugPtr<sv::IEditController>) -> Result<Option<PlugPtr<sb::IPlugView>>, Exception> {
+    // SAFETY: valid controller; the name is a static NUL-terminated string.
+    let raw = unsafe { c.create_view(c"editor".as_ptr()) }?;
+    // SAFETY: a non-null view comes with one reference owned by the caller.
+    Ok(unsafe { PlugPtr::from_raw(raw) })
+}
+
+impl Editor {
+    /// Whether the controller has an editor this platform can show.
+    pub fn supported(inst: &Instance, c: &PlugPtr<sv::IEditController>) -> bool {
+        let Some(platform) = platform_type() else { return false };
+        let view = match create_view(c) {
+            Ok(Some(v)) => v,
+            Ok(None) => return false,
+            Err(e) => {
+                inst.note_exception("IEditController::createView", &e.0);
+                return false;
+            }
+        };
+        // SAFETY: valid view; `platform` is a static NUL-terminated string.
+        match unsafe { view.is_platform_type_supported(platform) } {
+            Ok(r) => r == sb::kResultTrue,
+            Err(e) => {
+                // It threw: leak the view rather than release it.
+                inst.note_exception("IPlugView::isPlatformTypeSupported", &e.0);
+                std::mem::forget(view);
+                inst.mark_leaked();
+                false
+            }
+        }
+    }
+
+    /// Creates the view and attaches it to `parent`. Main thread only.
+    pub fn open(inst: &Instance, c: &PlugPtr<sv::IEditController>, parent: NativeParent, on_resize: ResizeCallback) -> Result<(Editor, EditorSize), PluginError> {
+        if !on_main_thread() {
+            return Err(PluginError::Failed("plugin editors must be opened on the main thread".into()));
+        }
+        let platform = platform_type().ok_or_else(|| PluginError::Unsupported("plugin editors are not hosted on this platform yet".into()))?;
+        if parent.0.is_null() {
+            return Err(PluginError::Failed("no window to put the editor in".into()));
+        }
+        let view = create_view(c)
+            .map_err(|e| {
+                inst.note_exception("IEditController::createView", &e.0);
+                PluginError::Exception { during: "IEditController::createView", message: e.0 }
+            })?
+            .ok_or_else(|| PluginError::Unsupported("this plugin has no editor".into()))?;
+        // A view that threw is leaked, never released or called again (and its frame with it,
+        // since the view may still hold it).
+        let throws = |during: &'static str, e: Exception, view: PlugPtr<sb::IPlugView>, frame: Option<ComWrapper<PlugFrame>>| {
+            inst.note_exception(during, &e.0);
+            if let Some(f) = &frame {
+                f.disconnect();
+            }
+            std::mem::forget(view);
+            std::mem::forget(frame);
+            inst.mark_leaked();
+            PluginError::Exception { during, message: e.0 }
+        };
+        // SAFETY: valid view; `platform` is a static NUL-terminated string.
+        match unsafe { view.is_platform_type_supported(platform) } {
+            Ok(sb::kResultTrue) => {}
+            Ok(_) => return Err(PluginError::Unsupported("the editor does not support this platform's windows".into())),
+            Err(e) => return Err(throws("IPlugView::isPlatformTypeSupported", e, view, None)),
+        }
+        let mut rect = sb::ViewRect { left: 0, top: 0, right: 400, bottom: 300 };
+        // SAFETY: valid view; `rect` is writable. On failure the default size stays.
+        let _ = unsafe { view.get_size(&mut rect) };
+        let size = rect_size(&rect);
+        let frame = ComWrapper::new(PlugFrame { on_resize: Mutex::new(on_resize) });
+        let frame_ptr = frame.as_com_ref::<sb::IPlugFrame>().map_or(std::ptr::null_mut(), |f| f.as_ptr());
+        // SAFETY: valid view; the frame is kept in the `Editor` and detached before it goes.
+        if let Err(e) = unsafe { view.set_frame(frame_ptr) } {
+            return Err(throws("IPlugView::setFrame", e, view, Some(frame)));
+        }
+        // SAFETY: valid view; the parent is a live native view of the type named, owned by the host.
+        match unsafe { view.attached(parent.0, platform) } {
+            Ok(sb::kResultOk) => {}
+            Ok(r) => {
+                // SAFETY: valid view; detach our frame again.
+                let _ = unsafe { view.set_frame(std::ptr::null_mut()) };
+                frame.disconnect();
+                return Err(PluginError::Failed(format!("the editor could not attach to its window (result {r})")));
+            }
+            Err(e) => return Err(throws("IPlugView::attached", e, view, Some(frame))),
+        }
+        // Many editors only know their size once attached (Kontakt reports one then).
+        let mut after = rect;
+        // SAFETY: valid, attached view; `after` is writable.
+        let size = match unsafe { view.get_size(&mut after) } {
+            Ok(sb::kResultOk) => rect_size(&after),
+            _ => size,
+        };
+        Ok((Editor { view, frame }, size))
+    }
+
+    /// Detaches the view. Returns `true` if it had to be leaked instead: off the main thread
+    /// (AppKit), or when the plugin had failed (it is not called again). Its owner must then not
+    /// terminate the plugin either, since the view's timers may still call into it.
+    pub fn close(self, inst: &Instance) -> bool {
+        // Whatever happens next, the host's window is about to go.
+        self.frame.disconnect();
+        if !on_main_thread() || inst.is_failed() {
+            log::warn!("vst3 {}: leaking an editor that cannot be closed here", inst.info.name);
+            std::mem::forget(self);
+            inst.mark_leaked();
+            return true;
+        }
+        // SAFETY: valid, attached view; main thread. `removed` before the window goes, and the
+        // frame is detached before it is released.
+        let r = unsafe { (self.view.removed(), self.view.set_frame(std::ptr::null_mut())) };
+        if r.0.is_err() || r.1.is_err() {
+            inst.note_exception("IPlugView::removed", "the editor threw while closing");
+            std::mem::forget(self);
+            inst.mark_leaked();
+            return true;
+        }
+        false
+    }
+
+    pub fn resizable(&self, _inst: &Instance) -> bool {
+        // SAFETY: valid view.
+        matches!(unsafe { self.view.can_resize() }, Ok(sb::kResultTrue))
+    }
+
+    /// Offers the editor a new size (it may adjust it) and returns the size it took. An editor
+    /// that cannot be resized keeps its size.
+    pub fn resize(&self, inst: &Instance, size: EditorSize) -> EditorSize {
+        if !self.resizable(inst) {
+            let mut r = rect_of(size);
+            // SAFETY: valid view; `r` is writable. On failure the offered size is reported back.
+            let _ = unsafe { self.view.get_size(&mut r) };
+            return rect_size(&r);
+        }
+        let mut rect = rect_of(size);
+        // SAFETY: valid view; `rect` is writable.
+        let _ = unsafe { self.view.check_size_constraint(&mut rect) };
+        // SAFETY: as above.
+        let _ = unsafe { self.view.on_size(&mut rect) };
+        rect_size(&rect)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_disconnected_frame_no_longer_reaches_the_host() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let seen = calls.clone();
+        let frame = ComWrapper::new(PlugFrame { on_resize: Mutex::new(Box::new(move |s: EditorSize| {
+            assert_eq!((s.width, s.height), (640, 480));
+            seen.fetch_add(1, Ordering::Relaxed);
+        })) });
+        let mut r = sb::ViewRect { left: 0, top: 0, right: 640, bottom: 480 };
+        // SAFETY: the host calling its own COM method; a null view is allowed.
+        unsafe { frame.resizeView(std::ptr::null_mut(), &mut r) };
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        // As when the editor closes or is leaked: a late request from the plugin goes nowhere.
+        frame.disconnect();
+        // SAFETY: as above.
+        unsafe { frame.resizeView(std::ptr::null_mut(), &mut r) };
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+}

@@ -5,6 +5,23 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.11: a plugin host
+
+idevkore/dk-tunekore#35, PR #46
+
+- tuneKore can now host VST3 instruments and effects in the engine (the app
+  gets them in #37): it finds the plugins on this Mac, loads them, plays notes
+  and audio through them in time with the transport, saves and restores their
+  sound exactly, and opens their own editors.
+- Finding plugins runs in a separate helper, so a plugin that crashes, hangs
+  or throws an error while loading is listed as failed instead of taking
+  tuneKore down. Failures are remembered and skipped until the plugin changes
+  or you retry them.
+- A plugin that throws an error while running is switched off with a message
+  instead of crashing tuneKore.
+- Checked with Serum, Serum 2, all 40 Arturia plugins, Kontakt 7, Guitar Rig 7,
+  Massive, Reaktor 6, Maschine 2, Komplete Kontrol, Replika and Solid Bus Comp.
+
 ## 0.1.10: touch discovery
 
 idevkore/dk-tunekore#30, PR #31
