@@ -10,6 +10,7 @@
 //!     --all-buses                switch on every audio bus (Kontakt's extra outputs, sidechains)
 //!     --param ID=VALUE           set a normalized parameter before rendering (repeatable)
 //!     --state-check              save the state, load it into a fresh instance and render again
+//!     --list-params N            print the first N visible parameters (id, name, value) and stop
 //!
 //! The lines it prints are for people and for grep: nothing here is a stable format.
 
@@ -29,12 +30,13 @@ struct Args {
     all_buses: bool,
     params: Vec<(ParamId, f64)>,
     state_check: bool,
+    list_params: usize,
 }
 
 fn parse() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let bundle = PathBuf::from(it.next().ok_or("usage: render <plugin.vst3> [options]")?);
-    let mut a = Args { bundle, name: None, class: None, seconds: 4.0, out: None, notes: true, sine: false, all_buses: false, params: Vec::new(), state_check: false };
+    let mut a = Args { bundle, name: None, class: None, seconds: 4.0, out: None, notes: true, sine: false, all_buses: false, params: Vec::new(), state_check: false, list_params: 0 };
     while let Some(x) = it.next() {
         let mut value = |what: &str| it.next().ok_or(format!("{x} needs {what}"));
         match x.as_str() {
@@ -51,6 +53,7 @@ fn parse() -> Result<Args, String> {
                 a.params.push((id.parse().map_err(|_| "bad parameter id")?, val.parse().map_err(|_| "bad parameter value")?));
             }
             "--state-check" => a.state_check = true,
+            "--list-params" => a.list_params = value("a number")?.parse().map_err(|_| "--list-params needs a number")?,
             o => return Err(format!("unknown option {o}")),
         }
     }
@@ -115,6 +118,14 @@ fn run() {
     };
     println!("load: {} ms, {} parameters, editor: {}", t.elapsed().as_millis(), c.params().len(), if c.has_editor() { "yes" } else { "no" });
     println!("buses: {}", describe(c.default_layout()));
+    if a.list_params > 0 {
+        let visible: Vec<ParamInfo> = c.params().iter().filter(|p| !p.hidden).take(a.list_params).cloned().collect();
+        for p in visible {
+            let v = c.param_value(p.id).unwrap_or(p.default);
+            println!("param {:>10}  {:<32} {:.3} = {}", p.id, p.name, v, c.param_text(p.id, v).unwrap_or_default());
+        }
+        return;
+    }
     let spec = spec(&a);
     let first = match offline::render(&mut *c, &spec) {
         Ok(r) => r,
