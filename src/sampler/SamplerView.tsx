@@ -644,21 +644,27 @@ const bpm = (t: number) => String(Math.round(t * 10) / 10);
 /**
  * The tempo box. A MIDI knob's moves show as they happen (`sampler:controls`)
  * without re-rendering the Sampler; the full view catches up when the turn
- * ends. While the field is being typed in, it keeps what was typed.
+ * ends. Once something is typed in it, it keeps what was typed, and leaving
+ * it commits that; leaving it untouched commits nothing, so a knob that
+ * turned the tempo meanwhile isn't undone by the old text.
  */
 function TempoBox({ tempo, onTempo }: { tempo: number; onTempo: (bpm: number) => void }) {
   const [text, setText] = useState(bpm(tempo));
   const now = useRef(tempo);
-  const typing = useRef(false);
+  const edited = useRef(false);
   const show = useCallback((t: number) => {
     now.current = t;
-    if (!typing.current) setText(bpm(t));
+    if (!edited.current) setText(bpm(t));
   }, []);
   useEffect(() => show(tempo), [tempo, show]);
   useEffect(() => subscribe(api.onControls((c) => show(c.tempo))), [show]);
-  const nudge = (d: number) => onTempo(Math.min(300, Math.max(40, Math.round(now.current + d))));
+  const nudge = (d: number) => {
+    edited.current = false; // a nudge replaces anything typed
+    onTempo(Math.min(300, Math.max(40, Math.round(now.current + d))));
+  };
   const commit = () => {
-    typing.current = false;
+    if (!edited.current) return setText(bpm(now.current));
+    edited.current = false;
     const t = Number(text);
     if (Number.isFinite(t) && t >= 40 && t <= 300) onTempo(t);
     else setText(bpm(now.current));
@@ -671,8 +677,10 @@ function TempoBox({ tempo, onTempo }: { tempo: number; onTempo: (bpm: number) =>
         className="mono"
         inputMode="decimal"
         value={text}
-        onFocus={() => (typing.current = true)}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => {
+          edited.current = true;
+          setText(e.target.value);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === "Enter") (e.target as HTMLInputElement).blur();
