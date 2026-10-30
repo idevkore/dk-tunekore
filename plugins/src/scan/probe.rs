@@ -45,6 +45,11 @@ pub fn failed_entry(bundle: &Path, error: String) -> ScanEntry {
 
 /// Loads every plugin in `bundle`, one after another, and describes each. A plugin that fails
 /// gets an entry with the error; a bundle that fails to load gets one entry for the bundle.
+///
+/// The plugins are left loaded (leaked): the probe process writes its answer and ends without
+/// tearing them down, because some plugins crash shortly after they are unloaded (Kontakt 7's
+/// web-request thread does), and that must not cost the scan its answer. Only call this in a
+/// process that is about to end.
 pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
     let stamp = stamp(bundle);
     let infos = match vst3::classes(bundle) {
@@ -59,14 +64,18 @@ pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
         .map(|info| {
             let t = Instant::now();
             match vst3::load(&info) {
-                Ok(c) => ScanEntry {
-                    buses: c.default_layout().clone(),
-                    params: c.params().len() as u32,
-                    load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
-                    error: None,
-                    stamp: stamp.clone(),
-                    info,
-                },
+                Ok(c) => {
+                    let entry = ScanEntry {
+                        buses: c.default_layout().clone(),
+                        params: c.params().len() as u32,
+                        load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+                        error: None,
+                        stamp: stamp.clone(),
+                        info,
+                    };
+                    std::mem::forget(c);
+                    entry
+                }
                 Err(e) => ScanEntry { buses: BusLayout::default(), params: 0, load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32, error: Some(e.to_string()), stamp: stamp.clone(), info },
             }
         })
