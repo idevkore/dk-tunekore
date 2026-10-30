@@ -5,7 +5,7 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
-## 0.1.13: open projects from the Finder
+## 0.1.15: open projects from the Finder
 
 idevkore/dk-tunekore#51
 
@@ -16,6 +16,46 @@ idevkore/dk-tunekore#51
 - Fixed: a project you only looked at no longer asks to be saved when you
   quit. Clicking into the tempo box and out again, or picking the length or
   pattern already set, no longer counts as a change or adds an undo step.
+
+## 0.1.14: the Timeline, with tracks and audio clips
+
+idevkore/dk-tunekore#36, PR #47
+
+- The Timeline (⌘2) shows the Sampler as its first track, with audio tracks
+  below it: each has a colour, a name, volume, pan, mute, solo, a meter and a
+  height you can drag. Tracks are now audio, instrument or the Sampler.
+- Drag samples from the Library or files from Finder onto a track, or below
+  the tracks to give each its own track, lined up. The Analyzer sends a stem,
+  or all four, to new tracks at bar 1, never overwriting an earlier send.
+- Move clips (⌥ copies), trim either edge, loop a clip by dragging the top of
+  its right edge, fade it in and out from its top corners, set its gain, split
+  at the playhead (⌘E), duplicate (⌘D) and delete (⌫). Edits snap to the grid
+  you pick; hold ⌘ (Ctrl on Windows and Linux) to ignore it.
+- Clips play in time with the Sampler, starting on the exact sample. Short
+  fades keep edits, seeks, loops and a clip's own loop point from clicking,
+  and a clip that's playing plays straight on through a tempo change.
+- The ruler moves the playhead and sets the loop. Zoom with ⌘-scroll, a pinch,
+  or = and -. Rename a track with F2 or Enter.
+- Undo and redo cover the Timeline's edits, and an undo only puts back the
+  faders that step changed. The project keeps the tracks, clips, loop and
+  view; track numbers are never reused; collecting samples copies the clips'
+  files too.
+
+## 0.1.13: MIDI learn
+
+idevkore/dk-tunekore#20, PR #50
+
+- MIDI learn: click the MIDI light (it reads LEARN), click a control, move a
+  knob or fader, and it controls it. Stay in the mode to map more; Esc leaves.
+  Or right-click a control to learn it, learn it for one pad only, or forget it.
+- Pad settings for the selected pad or one pad, tempo, swing, the master level,
+  and the Sampler track's volume and pan. 7-bit or 14-bit controllers, each
+  control with its own curve, and one undo step per knob turn.
+- When a knob and its value disagree: pick-up (the default), catch up gradually,
+  or jump, set in Audio settings, where the list of mappings is too.
+- Mappings save with the project; older projects open with none.
+- Turning a pad's cutoff while it rings now glides instead of stepping.
+- Fixed: a MIDI controller plugged in after tuneKore starts now connects (macOS).
 
 ## 0.1.12: one clock, tracks and the Timeline switch
 

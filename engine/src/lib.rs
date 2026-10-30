@@ -9,6 +9,8 @@
 //!   volume, pan, mute, solo and a meter. The main thread's [`Mixer`] owns
 //!   the track list and publishes a [`snapshot`] of it after each edit.
 //! - [`device`]: the [`Device`] trait that sources and effects implement.
+//! - [`clip`]: the Timeline's audio clips, played by a [`ClipPlayer`] in an
+//!   audio track's source slot; [`peaks`]: their waveforms.
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`,
 //! `load_clip`, the track calls) come from one thread at a time; callers
@@ -19,10 +21,12 @@
 //! RealtimeSanitizer's real-time context, which aborts on any of those when
 //! the build has `RTSAN_ENABLE=1` set.
 
+pub mod clip;
 pub mod device;
 pub mod graph;
 mod limiter;
 mod input;
+pub mod peaks;
 mod player;
 mod resample;
 mod sampler;
@@ -34,6 +38,7 @@ pub mod transport;
 #[cfg(test)]
 pub(crate) mod testing;
 
+pub use clip::{ClipFeed, ClipPlayer, ClipSet, ClipSpec, DECLICK_SECONDS};
 pub use limiter::{Limiter, CEILING};
 pub use input::{list_inputs, InputDevice, InputMeter, Recorder, Take, MAX_SECONDS};
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
@@ -43,9 +48,10 @@ pub use sampler::{
 };
 pub use device::{Buffers, Device, Event, Events};
 pub use graph::Mixer;
+pub use peaks::{Peaks, PEAK_LEVELS};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
-pub use track::{TrackId, TrackInfo, TrackMeter, TrackMix};
+pub use track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMix};
 pub use transport::{LoopRange, ProcessContext, TempoMap, TimeSignature, Transport, TransportShared};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -164,6 +170,7 @@ impl Engine {
         let shared = Arc::<Shared>::default();
         let mut mixer = Mixer::new();
         mixer.add_track_as(SAMPLER_TRACK, "Sampler").expect("the first track");
+        mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler).expect("the first track");
         let (device, sampler_link) = sampler::device(shared.sampler.clone(), 48_000);
         mixer.set_source(SAMPLER_TRACK, Some(Box::new(device))).expect("the Sampler's track");
         Self {
@@ -202,6 +209,7 @@ impl Engine {
         self.sampler_link = link;
         if self.mixer.track(SAMPLER_TRACK).is_none() {
             let _ = self.mixer.add_track_as(SAMPLER_TRACK, "Sampler");
+            let _ = self.mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler);
         }
         let _ = self.mixer.restore_source(SAMPLER_TRACK, Box::new(device));
     }

@@ -4,6 +4,7 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import { emit } from "@tauri-apps/api/event";
 import type { PadView, SamplerView } from "./api";
+import { installMidiMock } from "../midi/devmock";
 
 const peaks = (seed: number) => Array.from({ length: 160 }, (_, i) => Math.max(0, Math.exp(-i / (8 + seed * 3)) * (0.6 + 0.4 * Math.sin(i * seed))));
 
@@ -44,6 +45,8 @@ export function installMocks() {
       p.chance = Array.from({ length: v.steps }, (_, i) => p.chance[i] ?? 1);
       p.ratchet = Array.from({ length: v.steps }, (_, i) => p.ratchet[i] ?? 1);
     });
+
+  const midi = installMidiMock(v, publish);
 
   setInterval(() => {
     if (!playing) return;
@@ -189,6 +192,8 @@ export function installMocks() {
           return publish();
         case "display_zoom":
           return 1;
+        case "master":
+          return 0;
         case "autosave_check":
           return null;
         case "opened_files":
@@ -199,7 +204,7 @@ export function installMocks() {
         case "sampler_export":
           return { path: a.path, seconds: 8, format: "pcm24" };
         default:
-          return null;
+          return midi(cmd, a) ?? null;
       }
     },
     { shouldMockEvents: true },

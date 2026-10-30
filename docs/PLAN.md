@@ -181,6 +181,20 @@ rather than edit the same ones.
   limiter. For now the tracks run one after another on the audio thread;
   the worker pool comes later. The main thread's `Mixer` owns the track list
   and the devices; while no output is open the devices sit there.
+- **Track kinds** (`TrackKind` in `engine/src/track.rs`, #36). A track says
+  what it is, so each module knows its own: `sampler` (track 1, always),
+  `audio` (the Timeline's clips; the default) or `instrument` (a plugin
+  instrument, #37). `Mixer::set_kind` sets it; the `tracks` project section
+  saves it, left out when it's the default, so version 2 files from before
+  open as they were (track 1 the Sampler's, the rest audio). Track ids are
+  never reused within a project: the `trackIds` section (`{"next": n}`, its
+  own so the `tracks` list keeps the shape older builds read, which keep it
+  as an unknown section) saves the id the next new track gets, and Open and
+  New set it (from the file, or past the highest track), so a MIDI mapping
+  or a plugin reference to a deleted track can't land on a new one. The Timeline
+  shows every track, puts clips on audio tracks only, and puts its clip
+  player only into an audio track's empty source slot, so a device another
+  module put on a track stays.
 - **Devices** (`engine/src/device.rs`). The `Device` trait: `prepare(rate,
   max_frames)` on the main thread (it may allocate), `process(ctx, events,
   buffers)` on the audio thread (real-time safe), `latency()`. A track runs
@@ -220,7 +234,10 @@ rather than edit the same ones.
   as `null` until a module claims them. A module implements
   `project::Section` (save, read then apply, clear, revision) in its own
   file and calls `project::register` from its setup. Version 1 files open as
-  one Sampler track.
+  one Sampler track. A module's background work on its document that mustn't
+  land inside an open, a new project or a save runs in `project::exclusive`:
+  the lock order is the project's `busy`, then the module's document, then
+  the engine.
 - **Commands** (`src-tauri/src/lib.rs`). Each module lists its Tauri commands
   with `commands![...]` in its own file and exposes `commands()` and
   `setup()`; `lib.rs` routes each call by name. A new module adds three
@@ -234,13 +251,47 @@ rather than edit the same ones.
   `src/sampler/SamplerView.tsx` and stays mounted behind the Timeline;
   `src/timeline/Timeline.tsx` is the Timeline's.
 
+- **The Timeline** (#36, `engine/src/clip.rs`, `src-tauri/src/timeline.rs`,
+  `src/timeline/`). An audio track's source is a `ClipPlayer`. A clip starts at a beat and plays a span of its
+  file at the file's own speed (Warp, Phase 8, makes clips follow the
+  tempo): `offset`, `content` (the span it loops over), `phase`, `length`
+  and fades in seconds. Where a clip is in its file is the time the tempo
+  map puts between its start beat and the beat playing (`clip::frames_into`,
+  through `TempoMap::frames_between`, the one place that conversion
+  happens; `ProcessContext` carries the map), worked out from the beat alone
+  as the Sampler's steps are, so it lands on the exact frame at its edges,
+  its own loop and the transport's loop wrap. Today's map has one tempo and
+  no history, so the player remembers where each tempo change it heard
+  while playing landed and counts time through them: a playing clip's file
+  runs on through a tempo change, and a clip that hasn't started yet starts
+  on its beat at the new tempo. A jump (play, a seek, the loop's wrap) or an
+  edit places clips by the map again. Once the tempo lane makes the map a
+  list of changes, the map itself counts through them. Each clip edge gets a
+  1.5 ms declick unless the next clip carries on with the next frame of the
+  same file at the same gain and with no fade at the cut (a split), and a
+  looped clip's seam is crossfaded into what follows its content in the file,
+  or dipped when nothing does. At a jump what was playing fades out from its
+  level at that moment while the new position fades in, so a second jump
+  during a fade never clicks. The shell sends a track's clips to its player as a
+  `ClipSet` through the player's own one-slot mailbox, with a queue back for
+  freeing, so edits never go through `Mixer::set_source`. Files are decoded
+  with the Analyzer's decoder and resampled to the output's rate in the
+  shell, and kept in memory (streaming long files from disk comes later).
+  The `timeline` section saves each track's colour and height, the clips by
+  track id (paths relative to the project), the view and the loop; the
+  `tracks` section keeps names, mix and kinds. When the output reopens at
+  another rate, the Timeline's tick thread resamples with its document free
+  and sends the sets inside `project::exclusive`. MIDI clips (#38) can join as
+  another kind of clip set; plugins (#37) make instrument tracks, and an
+  audio track's effects go in its chain after the `ClipPlayer`.
+
 Where the next pieces go:
 
 | Work | Engine | Shell and UI |
 | --- | --- | --- |
 | Plugins in the app (#37) | `engine/src/plugin_device.rs`: a `Device` around the `plugins/` host. `prepare` sets up processing at the output's rate; `process` maps `ProcessContext` to the plugin's transport and `Events` to its notes; `latency` reports the plugin's. Put it in a track's source slot or chain through `Mixer`. | Its own module with `commands()` and a `plugins` section |
 | Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
-| MIDI learn (#20) | none needed | `midi.rs` (its `commands()` and `setup()` are there already) registers a `midi` section |
+| MIDI learn (#20, built) | none needed | `midi.rs` and `midi/`: the mappings are the `midi` section. Targets are ids such as `sampler.pad.selected.cutoff`, `sampler.pad.3.level`, `transport.tempo`, `master.level` and `track.1.volume`. A module adds its own by implementing `midi::Targets` for its prefix (`plugin.<id>.<param>` for #37) and calling `midi::register_targets` from its setup. |
 
 ### Plugin hosting
 
@@ -277,8 +328,11 @@ Where the next pieces go:
   small JSON messages. The engine answers with state events, and the UI keeps a
   read-only mirror of the document.
 - **Fast data** (meters at 30 Hz, the playhead) goes over binary channels.
-- **Waveform peaks** are computed in the engine and fetched from a custom
-  `tunekore://peaks/...` URL.
+- **Waveform peaks** are computed in the engine (`engine/src/peaks.rs`, off
+  the audio thread) and fetched as raw bytes by a command
+  (`timeline_peaks`, a `tauri::ipc::Response`), one zoom level of one file at
+  a time. A command needs no change to the window's builder, which a custom
+  `tunekore://` URL scheme would (#36).
 
 ## 3. What we take from Ableton, and in what order
 
@@ -396,7 +450,15 @@ Until then, this is what any host needs:
   Windows, and ALSA, JACK and PipeWire on Linux.
 - **MIDI keyboards and controllers:** class-compliant USB MIDI through CoreMIDI
   (and the Windows and Linux equivalents), plus MIDI learn to map any knob or
-  fader to a parameter.
+  fader to a parameter (#20). Learning takes the next control change, or a
+  14-bit pair (CC n and n + 32) when its other half follows within 40 ms. One
+  controller moves one control: the newest learn wins on both sides. Each
+  target maps the knob onto its range with its own curve: levels like a
+  mixer's fader, the cutoff on a log scale, times squared, tempo linear in
+  whole BPM, and bipolar controls centred on the knob's middle. A turn is one
+  undo step. When the knob and the value disagree it picks up by default
+  (jump and catch-up are the other choices, a setting of this Mac). Not yet:
+  NRPN, relative (endless) encoders, and mappings per controller port.
 - **MIDI out and clock:** send notes and MIDI clock to external synths and
   drum machines, and compensate for their latency.
 - **Control surfaces:** devices with their own protocol (for example Komplete

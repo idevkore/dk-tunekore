@@ -172,6 +172,17 @@ export const onState = (handler: (v: SamplerView) => void): Promise<UnlistenFn> 
 export const onTick = (handler: (t: Tick) => void): Promise<UnlistenFn> =>
   listen<Tick>("sampler:tick", (e) => handler(e.payload));
 
+/** What a MIDI knob moves, sent at most ~30 times a second while one turns:
+ * every pad's settings, the tempo and the swing. The full `sampler:state`
+ * follows once the turn ends. */
+export interface Controls {
+  pads: PadSettings[];
+  tempo: number;
+  swing: number;
+}
+export const onControls = (handler: (c: Controls) => void): Promise<UnlistenFn> =>
+  listen<Controls>("sampler:controls", (e) => handler(e.payload));
+
 /** The Analyzer wrote samples into `folder` and put them on pads. */
 export const onChopped = (handler: (folder: string) => void): Promise<UnlistenFn> =>
   listen<string>("sampler:chopped", (e) => handler(e.payload));

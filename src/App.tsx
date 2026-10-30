@@ -1,7 +1,8 @@
 // The main window: a Sampler / Timeline switch over the two views, both on
-// the engine's one transport, and the window's status line. The Sampler
-// stays mounted while the Timeline shows, so its state and the prompts it
-// owns (unsaved changes on quit, crash recovery, the window title) carry on.
+// the engine's one transport, and the window's status line. Both views stay
+// mounted, the hidden one hidden: the Sampler's state and the prompts it
+// owns (unsaved changes on quit, crash recovery, the window title) carry on,
+// and so do the Timeline's Library, selection and view.
 //
 // Switching: ⌘1 is the Sampler and ⌘2 the Timeline (Ctrl elsewhere), from the
 // keyboard, the View menu or the switch buttons; ⌘3 is kept for the Clip
@@ -105,7 +106,7 @@ export default function App() {
   return (
     <>
       <SamplerView active={view === "sampler"} switcher={switcher} message={message} onMessage={setMessage} />
-      {view === "timeline" && <Timeline switcher={switcher} message={message} onMessage={setMessage} />}
+      <Timeline active={view === "timeline"} switcher={switcher} message={message} onMessage={setMessage} />
     </>
   );
 }
