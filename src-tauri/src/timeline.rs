@@ -215,12 +215,17 @@ impl ViewState {
     }
 }
 
-/// What undo puts back: the clips, the tracks and their names, mix and kind.
+/// What undo puts back: the clips, the tracks, and the names and mix of the
+/// tracks the step itself changed. Every track's name, mix and kind are kept
+/// so a track the step removed can be made again, but a fader ridden since
+/// (by hand, by MIDI) isn't touched by undoing an unrelated edit.
 #[derive(Clone)]
 struct Snapshot {
     tracks: Vec<TrackMeta>,
     clips: BTreeMap<TrackId, Vec<Clip>>,
     mixes: Vec<(TrackId, String, TrackMix, TrackKind)>,
+    /// The tracks whose name or mix the step changed.
+    touched: Vec<TrackId>,
 }
 
 #[derive(Default)]
@@ -262,6 +267,14 @@ impl Doc {
         self.history.last = Some((key.to_string(), now));
         self.revision += 1;
         if merge {
+            // The run's step covers what this edit touched too.
+            if let Some(step) = self.history.undo.last_mut() {
+                for id in before.touched {
+                    if !step.touched.contains(&id) {
+                        step.touched.push(id);
+                    }
+                }
+            }
             return;
         }
         self.history.undo.push(before);
@@ -563,7 +576,18 @@ impl TimelineState {
             .iter()
             .filter_map(|m| tracks.iter().find(|t| t.id == m.id).map(|t| (t.id, t.name.clone(), t.mix, t.kind)))
             .collect();
-        Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), mixes }
+        Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), mixes, touched: Vec::new() }
+    }
+
+    /// The tracks whose name or mix differs now from `before`.
+    fn touched(&self, before: &Snapshot) -> Vec<TrackId> {
+        let now = lock(self.audio).engine.tracks();
+        before
+            .mixes
+            .iter()
+            .filter(|(id, name, mix, _)| now.iter().find(|t| t.id == *id).is_some_and(|t| t.name != *name || t.mix != *mix))
+            .map(|(id, ..)| *id)
+            .collect()
     }
 
     /// The engine's tracks and what each is.
@@ -720,8 +744,9 @@ impl TimelineState {
     /// tracks their clips. `f` checks everything before it changes anything.
     fn edit(&self, key: &str, f: impl FnOnce(&Self, &mut Doc) -> Result<(), String>) -> Result<View, String> {
         let mut doc = lock(&self.doc);
-        let before = self.snapshot(&doc);
+        let mut before = self.snapshot(&doc);
         f(self, &mut doc)?;
+        before.touched = self.touched(&before);
         doc.checkpoint(key, before.clone());
         self.sync(&doc, Resend::Changed(&before.clips));
         self.note_revision(&doc);
@@ -1061,11 +1086,14 @@ impl TimelineState {
             }
             for (id, name, mix, kind) in &snap.mixes {
                 if mixer.track(*id).is_none() {
-                    if *kind != TrackKind::Audio {
+                    if *kind != TrackKind::Audio || snap.tracks.iter().all(|t| t.id != *id) {
                         continue;
                     }
                     mixer.add_track_as(*id, name)?;
                     mixer.set_kind(*id, TrackKind::Audio)?;
+                } else if !snap.touched.contains(id) {
+                    // Not this step's: a fader ridden since stays where it is.
+                    continue;
                 }
                 mixer.rename(*id, name)?;
                 mixer.set_mix(*id, *mix)?;
@@ -1082,7 +1110,7 @@ impl TimelineState {
     pub fn undo(&self) -> Result<View, String> {
         let mut doc = lock(&self.doc);
         let Some(snap) = doc.history.undo.pop() else { return Ok(self.view(&doc)) };
-        let now = self.snapshot(&doc);
+        let now = Snapshot { touched: snap.touched.clone(), ..self.snapshot(&doc) };
         doc.history.redo.push(now);
         self.restore(&mut doc, snap)?;
         self.note_revision(&doc);
@@ -1092,7 +1120,7 @@ impl TimelineState {
     pub fn redo(&self) -> Result<View, String> {
         let mut doc = lock(&self.doc);
         let Some(snap) = doc.history.redo.pop() else { return Ok(self.view(&doc)) };
-        let now = self.snapshot(&doc);
+        let now = Snapshot { touched: snap.touched.clone(), ..self.snapshot(&doc) };
         doc.history.undo.push(now);
         self.restore(&mut doc, snap)?;
         self.note_revision(&doc);
@@ -1808,6 +1836,30 @@ mod tests {
         let v = rig.state.undo().unwrap();
         assert_eq!(v.tracks[1].mix.volume, 1.0);
         assert!(v.can_undo && v.can_redo);
+    }
+
+    #[test]
+    fn undo_puts_back_only_the_mixes_its_step_changed() {
+        let rig = rig();
+        let v = rig.state.add_files(&[rig.file("kick.wav")], None, 0.0).unwrap();
+        let c = v.tracks[1].clips[0].clone();
+        rig.state.set_track(TrackId(2), TrackChange { mix: Some(TrackMix { volume: 0.5, ..Default::default() }), ..Default::default() }).unwrap();
+        let mv = ClipIn { id: Some(c.id), track: 2, path: c.path.clone(), start: 4.0, offset: c.offset, content: c.content, phase: 0.0, length: c.length, fade_in: 0.0, fade_out: 0.0, gain_db: 0.0 };
+        rig.state.apply_edit(Edit { key: "move".into(), clips: vec![mv], delete: vec![] }).unwrap();
+        // A fader ridden outside the Timeline (MIDI, the Mixer) after the move.
+        let ridden = TrackMix { volume: 0.25, pan: 0.5, ..Default::default() };
+        lock(rig.audio).engine.mixer().set_mix(SAMPLER_TRACK, ridden).unwrap();
+        lock(rig.audio).engine.mixer().set_mix(TrackId(2), TrackMix { volume: 0.75, ..Default::default() }).unwrap();
+        let v = rig.state.undo().unwrap();
+        assert_eq!(v.tracks[1].clips[0].start, 0.0, "the move is undone");
+        assert_eq!(v.tracks[0].mix, ridden, "the Sampler's fader stays");
+        assert_eq!(v.tracks[1].mix.volume, 0.75, "and so does track 2's: the move didn't change it");
+        // Undoing the fader step puts back only that track's mix; redo returns
+        // it to what it was just before the undo.
+        let v = rig.state.undo().unwrap();
+        assert_eq!((v.tracks[1].mix.volume, v.tracks[0].mix), (1.0, ridden));
+        let v = rig.state.redo().unwrap();
+        assert_eq!((v.tracks[1].mix.volume, v.tracks[0].mix), (0.75, ridden));
     }
 
     #[test]

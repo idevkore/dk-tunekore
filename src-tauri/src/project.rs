@@ -445,6 +445,17 @@ impl TrackFile {
     }
 }
 
+/// The `tracks` section: the list, as files have always had it, or, once a
+/// deleted track left a gap above the highest id, the list with the id the
+/// next new track gets, so ids are never used twice.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum TracksFile {
+    List(Vec<TrackFile>),
+    #[serde(rename_all = "camelCase")]
+    WithNext { next_id: u32, list: Vec<TrackFile> },
+}
+
 /// What a track's kind is when the file doesn't say.
 fn default_kind(id: TrackId) -> TrackKind {
     if id == SAMPLER_TRACK { TrackKind::Sampler } else { TrackKind::Audio }
@@ -452,7 +463,7 @@ fn default_kind(id: TrackId) -> TrackKind {
 
 /// Sets the engine's track list to `tracks`: the Sampler's track always
 /// stays, others are added or removed to match. `tracks` was checked first.
-fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String> {
+fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile], next: Option<u32>) -> Result<(), String> {
     let mut audio = audio.lock().unwrap();
     let mixer = audio.engine.mixer();
     for t in mixer.tracks().iter().filter(|t| t.id != SAMPLER_TRACK && tracks.iter().all(|f| f.id != t.id)) {
@@ -471,6 +482,9 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String
         mixer.set_mix(f.id, f.mix)?;
         mixer.set_kind(f.id, f.kind())?;
     }
+    if let Some(next) = next {
+        mixer.reserve_track_ids(TrackId(next));
+    }
     Ok(())
 }
 
@@ -480,22 +494,27 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
-        let tracks: Vec<TrackFile> = self
-            .audio
-            .lock()
-            .unwrap()
+        let mut audio = self.audio.lock().unwrap();
+        let next = audio.engine.mixer().next_track_id().0;
+        let tracks: Vec<TrackFile> = audio
             .engine
             .tracks()
             .into_iter()
             .map(|t| TrackFile { kind: (t.kind != default_kind(t.id)).then_some(t.kind), id: t.id, name: t.name, mix: t.mix })
             .collect();
-        serde_json::to_value(tracks).map_err(|e| e.to_string())
+        let highest = tracks.iter().map(|t| t.id.0).max().unwrap_or(0);
+        // The plain list while the next id follows the highest, as files always were.
+        let file = if next > highest + 1 { TracksFile::WithNext { next_id: next, list: tracks } } else { TracksFile::List(tracks) };
+        serde_json::to_value(file).map_err(|e| e.to_string())
     }
 
     fn read(&self, _: &C, value: Option<&Value>, _: &Path) -> Result<Apply<C>, String> {
-        let tracks: Vec<TrackFile> = match value {
-            Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's tracks are damaged ({e})"))?,
-            None => Vec::new(),
+        let (tracks, next) = match value {
+            Some(v) => match serde_json::from_value(v.clone()).map_err(|e| format!("the project's tracks are damaged ({e})"))? {
+                TracksFile::List(list) => (list, None),
+                TracksFile::WithNext { next_id, list } => (list, Some(next_id)),
+            },
+            None => (Vec::new(), None),
         };
         // Everything applying could trip on, checked now.
         let others = tracks.iter().filter(|t| t.id != SAMPLER_TRACK).count();
@@ -511,11 +530,11 @@ impl<C: 'static> Section<C> for TracksSection {
             return Err("the project has a track numbered 0".into());
         }
         let audio = self.audio;
-        Ok(Box::new(move |_| apply_tracks(audio, &tracks)))
+        Ok(Box::new(move |_| apply_tracks(audio, &tracks, next)))
     }
 
     fn clear(&self, _: &C) -> Result<(), String> {
-        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }])
+        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }], None)
     }
 
     fn revision(&self, _: &C) -> u64 {
@@ -925,6 +944,34 @@ mod tests {
         let kinds: Vec<Value> = saved["tracks"].as_array().unwrap().iter().map(|t| t.get("kind").cloned().unwrap_or(Value::Null)).collect();
         // Track 1 is always the Sampler's, and only it: those and audio, the defaults, aren't written.
         assert_eq!(kinds, vec![Value::Null, Value::Null, json!("instrument"), Value::Null]);
+    }
+
+    #[test]
+    fn a_deleted_tracks_id_isnt_given_to_a_new_track_after_reopening() {
+        // A project with its own engine, as a launch of the app has.
+        let launch = || {
+            let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(tunekore_engine::Engine::new()))));
+            let p: Project<()> = Project::new();
+            p.register_core(TransportSection(audio.lock().unwrap().engine.transport()));
+            p.register_core(TracksSection::new(audio));
+            (p, audio)
+        };
+        let (p, audio) = launch();
+        let text = r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler"},{"id":2,"name":"Bass"},{"id":3,"name":"Keys"}]}"#;
+        p.open_text(&(), text, Path::new("/a.tunek"), None, false).unwrap();
+        audio.lock().unwrap().engine.mixer().remove_track(TrackId(3)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let file = p.save(&(), Some(dir.path().join("a"))).unwrap();
+        assert_eq!(json(&std::fs::read_to_string(&file).unwrap())["tracks"]["nextId"], json!(4));
+        // Relaunch, reopen, add a track.
+        let (p, audio) = launch();
+        p.open(&(), &file, Some(file.clone()), false).unwrap();
+        let id = audio.lock().unwrap().engine.mixer().add_track("New").unwrap();
+        assert_eq!(id, TrackId(4), "not 3, the deleted track's");
+        // A file with no gap keeps the plain list it always had.
+        let (p, _) = launch();
+        p.open_text(&(), text, Path::new("/b.tunek"), None, false).unwrap();
+        assert!(json(&p.serialize(&(), Path::new("/b.tunek")).unwrap())["tracks"].is_array());
     }
 
     #[test]

@@ -171,6 +171,17 @@ impl Mixer {
         Ok(())
     }
 
+    /// The id the next new track gets. Projects save it, so a deleted
+    /// track's id never comes back for another track after a relaunch.
+    pub fn next_track_id(&self) -> TrackId {
+        TrackId(self.next_id)
+    }
+
+    /// New tracks get ids from `next` on, as a project saved it. Never goes back.
+    pub fn reserve_track_ids(&mut self, next: TrackId) {
+        self.next_id = self.next_id.max(next.0);
+    }
+
     /// Removes a track and its devices.
     pub fn remove_track(&mut self, id: TrackId) -> Result<(), String> {
         let i = self.index(id)?;
@@ -824,6 +835,10 @@ mod tests {
         assert_eq!(m.track(next).map(|t| t.kind), Some(TrackKind::Instrument));
         assert!(m.revision() > r, "saved, so an edit");
         assert!(m.set_kind(TrackId(99), TrackKind::Audio).is_err());
+        m.reserve_track_ids(TrackId(20));
+        m.reserve_track_ids(TrackId(5));
+        assert_eq!(m.next_track_id(), TrackId(20), "never goes back");
+        assert_eq!(m.add_track("After").unwrap(), TrackId(20));
     }
 
     #[test]
