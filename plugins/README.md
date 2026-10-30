@@ -119,7 +119,8 @@ except a plugin that timed out, which is tried again for 3 scans in a row
 before it stays on the blocklist; `scan::retry_failed` gives the failures
 another try and `scan::rescan` probes everything. The scan has an overall
 time limit (`--deadline`), after which it stops the probes still running and
-writes what it found; it rewrites the cache after every bundle and lists its
+writes what it found (every bundle found gets an entry: one the limit kept from
+its turn is listed as timed out and probed next time); it rewrites the cache after every bundle and lists its
 running probes, stamped with its own process id, so the app can kill them if
 it has to kill the scanner.
 

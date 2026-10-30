@@ -190,9 +190,22 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
     });
     let _ = std::fs::remove_dir_all(&work);
     let _ = std::fs::remove_file(&probes_file);
-    let state = state.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut state = state.into_inner().unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Every bundle found gets an entry. One the time limit kept from its turn keeps what an earlier
+    // scan knew, or else is listed as timed out (0 timeouts counted: the next scan tries it).
+    let mut skipped = 0;
+    for b in &todo {
+        let listed = state.found.iter().any(|e| &e.info.path == b) || state.previous.get(b).is_some_and(|v| !v.is_empty());
+        if !listed {
+            skipped += 1;
+            state.found.push(failed_entry(b, ScanStatus::TimedOut, "not probed: the scan's overall time limit ran out before its turn".into()));
+        }
+    }
     if next.load(Ordering::Relaxed) < total {
-        progress(&format!("the scan's time limit ran out with {} bundle(s) not probed; they keep their old entries, if any", total.saturating_sub(next.load(Ordering::Relaxed))));
+        progress(&format!(
+            "the scan's time limit ran out with {} bundle(s) not probed ({skipped} listed as timed out, the rest keep their earlier entries)",
+            total.saturating_sub(next.load(Ordering::Relaxed))
+        ));
     }
     let cache = state.cache(&dirs);
     cache.write(&opts.cache_path)?;
@@ -279,6 +292,7 @@ fn probe_in_child(exe: &Path, bundle: &Path, timeout: Duration, left: Duration, 
     if !timed_out
         && let Ok(bytes) = std::fs::read(&result)
         && let Ok(entries) = serde_json::from_slice::<Vec<ScanEntry>>(&bytes)
+        && !entries.is_empty()
     {
         return entries;
     }
