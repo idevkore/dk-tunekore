@@ -64,8 +64,10 @@ chosen indices) and records the latency the `Plugin` reports.
 plugin's own editor) go into a mailbox with one slot per parameter: the
 latest value waits, across deactivation, and the next block delivers it. A
 zero-frame block is enough, as VST3 hosts flush parameters while stopped.
+When a block has no parameter queue left, the rest wait for the next one.
 `has_pending_params` says whether any are waiting (the state is what the
-processor has seen). Editor edits, gestures and restart requests reach the
+processor has seen); `load_state` discards them, so a knob moved before a
+preset loads cannot play over it. Editor edits, gestures and restart requests reach the
 main thread through a lock-free queue read by `poll`, so a plugin may report
 them from any thread, the audio thread included.
 
@@ -112,9 +114,14 @@ with the reason, and the scan goes on. The cache (`plugin-cache.json` in
 version, category, class id, buses, parameter count, load time, path, status
 (`ok`, `failed`, `crashed`, `timed_out`), error and a stamp of the binary.
 `ScanCache::plugins()` gives the ones that loaded and `failures()` the
-blocklist. Unchanged bundles are not probed again, failed ones included;
-`scan::retry_failed` gives the failures another try and `scan::rescan` probes
-everything.
+blocklist. Unchanged bundles are not probed again, failed ones included,
+except a plugin that timed out, which is tried again for 3 scans in a row
+before it stays on the blocklist; `scan::retry_failed` gives the failures
+another try and `scan::rescan` probes everything. The scan has an overall
+time limit (`--deadline`), after which it stops the probes still running and
+writes what it found; it rewrites the cache after every bundle and lists its
+running probes, stamped with its own process id, so the app can kill them if
+it has to kill the scanner.
 
 **Parameters** (`PluginController::params`) carry id, name, short name,
 units, range (`min`, `max` in the plugin's own units), default, step count, and
