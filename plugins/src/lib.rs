@@ -9,8 +9,10 @@
 //! Work in progress; see `README.md`.
 
 pub mod editor_window;
+pub mod offline;
 pub mod plugin;
 pub mod scan;
 pub mod vst3;
+pub mod wav;
 
 pub use plugin::*;

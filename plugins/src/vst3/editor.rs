@@ -110,12 +110,12 @@ impl Editor {
         }
         let view = create_view(c)
             .map_err(|e| {
-                inst.fail("IEditController::createView", &e.0);
+                inst.note_exception("IEditController::createView", &e.0);
                 PluginError::Exception { during: "IEditController::createView", message: e.0 }
             })?
             .ok_or_else(|| PluginError::Unsupported("this plugin has no editor".into()))?;
         let throws = |during: &'static str, e: Exception| {
-            inst.fail(during, &e.0);
+            inst.note_exception(during, &e.0);
             PluginError::Exception { during, message: e.0 }
         };
         // SAFETY: valid view; `platform` is a static NUL-terminated string.

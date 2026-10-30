@@ -199,12 +199,29 @@ impl Instance {
         self.error.lock().unwrap_or_else(PoisonError::into_inner).take()
     }
 
-    /// Runs a guarded call; an exception becomes an error and switches the plugin off.
+    /// Runs a guarded call that sets the plugin up or runs it; an exception becomes an error and
+    /// switches the plugin off, because its state is no longer known.
     fn guard<T>(&self, during: &'static str, r: Result<T, Exception>) -> Result<T, PluginError> {
         r.map_err(|e| {
             self.fail(during, &e.0);
             thrown(during, e)
         })
+    }
+
+    /// Runs a guarded call that only asks something (a parameter's text, its state): an
+    /// exception becomes an error and is remembered for `take_error`, but the plugin keeps
+    /// running.
+    pub fn soft<T>(&self, during: &'static str, r: Result<T, Exception>) -> Result<T, PluginError> {
+        r.map_err(|e| {
+            self.note_exception(during, &e.0);
+            thrown(during, e)
+        })
+    }
+
+    /// Records that a call threw, without switching the plugin off.
+    pub fn note_exception(&self, during: &'static str, message: &str) {
+        log::warn!("vst3 {}: {during}: {message}", self.info.name);
+        self.error.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(|| format!("{during}: {message}"));
     }
 
     /// Copies the component's state into the controller (`getState` → `setComponentState`).
@@ -213,10 +230,10 @@ impl Instance {
         let stream = MemoryStream::new(Vec::new());
         let Some(s) = stream.as_com_ref::<sb::IBStream>() else { return };
         // SAFETY: valid component; the stream lives on this frame for the whole call.
-        if matches!(unsafe { self.component.get_state(s.as_ptr()) }, Ok(sb::kResultOk)) {
+        if matches!(self.soft("IComponent::getState", unsafe { self.component.get_state(s.as_ptr()) }), Ok(sb::kResultOk)) {
             stream.rewind();
             // SAFETY: valid controller; same stream, rewound.
-            let _ = unsafe { c.set_component_state(s.as_ptr()) };
+            let _ = self.soft("IEditController::setComponentState", unsafe { c.set_component_state(s.as_ptr()) });
         }
     }
 
@@ -473,7 +490,7 @@ impl Vst3Controller {
     fn read_state(&self, during: &'static str, f: impl FnOnce(*mut sb::IBStream) -> Result<i32, Exception>) -> Result<Vec<u8>, PluginError> {
         let stream = MemoryStream::new(Vec::new());
         let s = stream.as_com_ref::<sb::IBStream>().ok_or_else(|| PluginError::Failed("no stream".into()))?;
-        let r = self.inst.guard(during, f(s.as_ptr()))?;
+        let r = self.inst.soft(during, f(s.as_ptr()))?;
         if ok(r) { Ok(stream.take()) } else { Err(PluginError::Failed(format!("{during} returned {r}"))) }
     }
 }
@@ -509,12 +526,12 @@ impl PluginController for Vst3Controller {
 
     fn latency_samples(&mut self) -> u32 {
         // SAFETY: valid processor.
-        self.inst.guard("IAudioProcessor::getLatencySamples", unsafe { self.inst.processor.get_latency_samples() }).unwrap_or(0)
+        self.inst.soft("IAudioProcessor::getLatencySamples", unsafe { self.inst.processor.get_latency_samples() }).unwrap_or(0)
     }
 
     fn tail_samples(&mut self) -> u32 {
         // SAFETY: valid processor.
-        self.inst.guard("IAudioProcessor::getTailSamples", unsafe { self.inst.processor.get_tail_samples() }).unwrap_or(0)
+        self.inst.soft("IAudioProcessor::getTailSamples", unsafe { self.inst.processor.get_tail_samples() }).unwrap_or(0)
     }
 
     fn params(&self) -> &[ParamInfo] {
@@ -525,7 +542,7 @@ impl PluginController for Vst3Controller {
         self.params.clear();
         let Some(c) = self.inst.controller() else { return };
         // SAFETY: valid controller.
-        let n = self.inst.guard("IEditController::getParameterCount", unsafe { c.get_parameter_count() }).unwrap_or(0).clamp(0, MAX_PARAMS);
+        let n = self.inst.soft("IEditController::getParameterCount", unsafe { c.get_parameter_count() }).unwrap_or(0).clamp(0, MAX_PARAMS);
         for i in 0..n {
             // SAFETY: plain data; all-zero is valid.
             let mut info: sv::ParameterInfo = unsafe { std::mem::zeroed() };
@@ -554,7 +571,7 @@ impl PluginController for Vst3Controller {
     fn param_value(&mut self, id: ParamId) -> Option<f64> {
         let c = self.inst.controller()?;
         // SAFETY: valid controller.
-        let v = self.inst.guard("IEditController::getParamNormalized", unsafe { c.get_param_normalized(id) }).ok()?;
+        let v = self.inst.soft("IEditController::getParamNormalized", unsafe { c.get_param_normalized(id) }).ok()?;
         v.is_finite().then(|| v.clamp(0.0, 1.0))
     }
 
@@ -565,7 +582,7 @@ impl PluginController for Vst3Controller {
         let v = normalized.clamp(0.0, 1.0);
         if let Some(c) = self.inst.controller() {
             // SAFETY: valid controller.
-            let _ = self.inst.guard("IEditController::setParamNormalized", unsafe { c.set_param_normalized(id, v) });
+            let _ = self.inst.soft("IEditController::setParamNormalized", unsafe { c.set_param_normalized(id, v) });
         }
         self.inst.host.send_to_processor(id, v);
     }
@@ -574,14 +591,14 @@ impl PluginController for Vst3Controller {
         let c = self.inst.controller()?;
         let mut s: sv::String128 = [0; 128];
         // SAFETY: valid controller; `s` is a writable String128.
-        let r = self.inst.guard("IEditController::getParamStringByValue", unsafe { c.get_param_string_by_value(id, normalized.clamp(0.0, 1.0), &mut s) }).ok()?;
+        let r = self.inst.soft("IEditController::getParamStringByValue", unsafe { c.get_param_string_by_value(id, normalized.clamp(0.0, 1.0), &mut s) }).ok()?;
         ok(r).then(|| read_c16(&s)).filter(|t| !t.is_empty())
     }
 
     fn param_plain(&mut self, id: ParamId, normalized: f64) -> Option<f64> {
         let c = self.inst.controller()?;
         // SAFETY: valid controller.
-        let v = self.inst.guard("IEditController::normalizedParamToPlain", unsafe { c.normalized_to_plain(id, normalized.clamp(0.0, 1.0)) }).ok()?;
+        let v = self.inst.soft("IEditController::normalizedParamToPlain", unsafe { c.normalized_to_plain(id, normalized.clamp(0.0, 1.0)) }).ok()?;
         v.is_finite().then_some(v)
     }
 
@@ -610,19 +627,19 @@ impl PluginController for Vst3Controller {
         let stream = MemoryStream::new(comp.to_vec());
         let s = stream.as_com_ref::<sb::IBStream>().ok_or_else(|| PluginError::Failed("no stream".into()))?;
         // SAFETY: valid component; the stream lives on this frame for the call.
-        let r = self.inst.guard("IComponent::setState", unsafe { self.inst.component.set_state(s.as_ptr()) })?;
+        let r = self.inst.soft("IComponent::setState", unsafe { self.inst.component.set_state(s.as_ptr()) })?;
         if !ok(r) {
             return Err(PluginError::Failed(format!("the plugin refused the state (result {r})")));
         }
         if let Some(c) = self.inst.controller() {
             stream.rewind();
             // SAFETY: valid controller; the same stream, rewound.
-            let _ = self.inst.guard("IEditController::setComponentState", unsafe { c.set_component_state(s.as_ptr()) });
+            let _ = self.inst.soft("IEditController::setComponentState", unsafe { c.set_component_state(s.as_ptr()) });
             if !ctrl.is_empty() {
                 let cs = MemoryStream::new(ctrl.to_vec());
                 if let Some(r) = cs.as_com_ref::<sb::IBStream>() {
                     // SAFETY: valid controller; the stream lives on this frame for the call.
-                    let _ = self.inst.guard("IEditController::setState", unsafe { c.set_state(r.as_ptr()) });
+                    let _ = self.inst.soft("IEditController::setState", unsafe { c.set_state(r.as_ptr()) });
                 }
             }
         }

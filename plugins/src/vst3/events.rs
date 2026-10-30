@@ -357,8 +357,8 @@ mod tests {
         let pc = ComWrapper::new(ParamChanges::new(1));
         assert!(pc.add(1, 0, 0.0));
         assert!(!pc.add(2, 0, 0.0), "no queue left");
-        for i in 0..POINTS_PER_QUEUE as u32 {
-            assert!(pc.add(1, i + 1, 0.5));
+        for i in 1..POINTS_PER_QUEUE as u32 {
+            assert!(pc.add(1, i, 0.5));
         }
         assert!(!pc.add(1, 1000, 0.5), "queue full");
     }
