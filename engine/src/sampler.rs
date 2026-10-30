@@ -4,8 +4,15 @@
 //! Samples reach the audio thread at the device's rate through a lock-free
 //! queue, and old ones go back through a second queue, so the audio thread
 //! never frees memory. Everything else (pad settings, the pattern, tempo,
-//! triggers from the UI) is an atomic in [`SamplerShared`]. The sequencer
-//! counts frames on the audio thread, so steps land on the sample.
+//! triggers from the UI) is an atomic in [`SamplerShared`].
+//!
+//! The sequencer has no clock of its own: it follows the transport
+//! ([`crate::transport`]). Its pattern is laid out on the beat grid from beat
+//! 0, a step every sixteenth (with swing), and it counts the beats each frame
+//! moves on, so steps land on the sample even across tempo changes, and a
+//! loop wrap or a seek finds its place again. Tempo and play or stop are the
+//! transport's: [`SamplerShared::set_tempo`] and
+//! [`SamplerShared::set_playing`] set the clock it runs on.
 //!
 //! The sequencer holds [`BANKS`] patterns. Each step of each pad has a
 //! velocity, a chance (probability) and a ratchet count. In song mode a chain
@@ -19,7 +26,10 @@
 //! step, from atomics only.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
 
+use crate::device::{Buffers, Device, Events};
+use crate::transport::{ProcessContext, Transport, TransportShared, EDGE_FRAMES};
 use crate::Track;
 
 /// Pads a kit has.
@@ -369,10 +379,11 @@ impl XorShift {
 #[derive(Debug)]
 pub struct SamplerShared {
     pads: [PadCtl; SLOTS],
-    tempo: AtomicU32, // BPM, f32 bits
+    /// The transport the Sampler runs on: the engine's, or its own for an
+    /// offline render. Tempo and play or stop live there.
+    clock: Arc<TransportShared>,
     swing: AtomicU32, // 0..1, f32 bits
     steps: AtomicU32,
-    playing: AtomicBool,
     /// The step that played last, or NO_STEP when stopped. Written by the audio thread.
     step: AtomicU32,
     metronome: AtomicBool,
@@ -401,10 +412,9 @@ impl Default for SamplerShared {
     fn default() -> Self {
         Self {
             pads: Default::default(),
-            tempo: AtomicU32::new(120.0f32.to_bits()),
+            clock: Arc::default(),
             swing: AtomicU32::new(0.0f32.to_bits()),
             steps: AtomicU32::new(16),
-            playing: AtomicBool::new(false),
             step: AtomicU32::new(NO_STEP),
             metronome: AtomicBool::new(false),
             recording: AtomicBool::new(false),
@@ -423,6 +433,16 @@ impl Default for SamplerShared {
 }
 
 impl SamplerShared {
+    /// A Sampler that runs on `clock`, the engine's transport.
+    pub fn with_clock(clock: Arc<TransportShared>) -> Self {
+        Self { clock, ..Default::default() }
+    }
+
+    /// The transport this Sampler runs on.
+    pub fn clock(&self) -> &Arc<TransportShared> {
+        &self.clock
+    }
+
     /// Sets how a pad (or the preview slot) plays. Ignores a bad index.
     pub fn set_pad(&self, slot: usize, p: &PadParams) {
         let Some(c) = self.pads.get(slot) else { return };
@@ -688,12 +708,13 @@ impl SamplerShared {
         self.pads.get(slot).map_or(0, |c| c.played.load(Ordering::Relaxed))
     }
 
+    /// Sets the tempo of the transport the Sampler runs on, 20..300 BPM.
     pub fn set_tempo(&self, bpm: f32) {
-        self.tempo.store(bpm.clamp(20.0, 300.0).to_bits(), Ordering::Relaxed);
+        self.clock.set_tempo(f64::from(bpm.clamp(20.0, 300.0)));
     }
 
     pub fn tempo(&self) -> f32 {
-        f32::from_bits(self.tempo.load(Ordering::Relaxed))
+        self.clock.tempo() as f32
     }
 
     /// 0 is straight; 1 delays every other sixteenth to a triplet feel.
@@ -714,13 +735,14 @@ impl SamplerShared {
         self.steps.load(Ordering::Relaxed) as usize
     }
 
-    /// Starts the pattern from step 1, or stops it.
+    /// Plays the transport the Sampler runs on, from its start (step 1 of
+    /// the pattern from beat 0), or stops it.
     pub fn set_playing(&self, on: bool) {
-        self.playing.store(on, Ordering::Release);
+        self.clock.set_playing(on);
     }
 
     pub fn is_playing(&self) -> bool {
-        self.playing.load(Ordering::Acquire)
+        self.clock.is_playing()
     }
 
     /// The step playing now, or `None` when stopped.
@@ -731,7 +753,15 @@ impl SamplerShared {
         }
     }
 
-    /// Length of step `step` in frames at `rate`, with swing.
+    /// Length of step `step` in beats, with swing: a sixteenth, with each
+    /// even step longer and each odd one shorter by up to a third of one, so
+    /// the off-beats land later.
+    fn step_beats(&self, step: usize) -> f64 {
+        let push = 0.25 * self.swing() as f64 / 3.0;
+        if step.is_multiple_of(2) { 0.25 + push } else { 0.25 - push }
+    }
+
+    /// Length of step `step` in frames at `rate`, with swing, at the current tempo.
     fn step_frames(&self, step: usize, rate: f64) -> f64 {
         let sixteenth = rate * 60.0 / self.tempo() as f64 / 4.0;
         let push = sixteenth * self.swing() as f64 / 3.0;
@@ -1020,9 +1050,21 @@ pub struct Sampler {
     release: f32,
     edge: f64,
     clock: u64,
+    /// Drives [`render`](Self::render) when the Sampler runs on its own (an
+    /// offline render, a test), reading `SamplerShared`'s clock. In the
+    /// engine the graph's transport drives [`process`](Self::process) instead.
+    own_clock: Transport,
+    /// The transport's beats per frame and frames per beat, for this piece of the block.
+    bpf: f64,
+    fpb: f64,
+    /// A boundary this close (in beats) is reached.
+    eps: f64,
     was_playing: bool,
+    /// A song that doesn't loop has ended and stopped the transport; the
+    /// sequencer stays stopped until the transport has seen it.
+    ended: bool,
     next_step: usize,
-    /// Frames left in the step that fired last. At a block boundary this says
+    /// Beats left in the step that fired last. At a block boundary this says
     /// where the sequencer is, so a recorded hit can be quantized.
     countdown: f64,
     /// A hit recorded onto `skip_step` was already played by hand: the
@@ -1042,8 +1084,8 @@ pub struct Sampler {
     rng: XorShift,
     /// Where the sequencer is, as of the step that fired last.
     pos: Position,
-    /// The rest of a ratcheted step, per pad: hits left, frames until the next
-    /// one, frames between hits and their velocity. `ratchet_active` has a bit
+    /// The rest of a ratcheted step, per pad: hits left, beats until the next
+    /// one, beats between hits and their velocity. `ratchet_active` has a bit
     /// for each pad with hits left.
     ratchet_left: [u8; PADS],
     ratchet_wait: [f64; PADS],
@@ -1098,6 +1140,33 @@ impl SamplerLink {
     }
 }
 
+/// The Sampler as a track's source: the pads and the sequencer, on the
+/// engine's transport.
+pub struct SamplerDevice {
+    sampler: Sampler,
+    shared: Arc<SamplerShared>,
+}
+
+impl Device for SamplerDevice {
+    /// Restarts the Sampler at the new rate. Its samples were at the old one,
+    /// so they are dropped: the engine sends them again.
+    fn prepare(&mut self, sample_rate: u32, _max_frames: usize) {
+        self.sampler.set_rate(sample_rate);
+        self.sampler.sync_counters(&self.shared);
+    }
+
+    fn process(&mut self, ctx: &ProcessContext, _events: &mut Events, audio: Buffers<'_>) {
+        self.sampler.process(ctx, &self.shared, audio.left, audio.right);
+    }
+}
+
+/// The Sampler device for `shared`, and the control side's link to its sample queues.
+pub fn device(shared: Arc<SamplerShared>, sample_rate: u32) -> (SamplerDevice, SamplerLink) {
+    let (mut sampler, link) = sampler(sample_rate);
+    sampler.sync_counters(&shared);
+    (SamplerDevice { sampler, shared }, link)
+}
+
 /// A sampler for a stream at `sample_rate`, and the control side's link to it.
 pub fn sampler(sample_rate: u32) -> (Sampler, SamplerLink) {
     let (send, incoming) = rtrb::RingBuffer::new(32);
@@ -1128,7 +1197,12 @@ impl Sampler {
             release: (1.0 / (rate * RELEASE_SECONDS)).min(1.0) as f32,
             edge: rate * RELEASE_SECONDS,
             clock: 0,
+            own_clock: Transport::new(sample_rate),
+            bpf: 0.0,
+            fpb: 0.0,
+            eps: 0.0,
             was_playing: false,
+            ended: false,
             next_step: 0,
             countdown: 0.0,
             skip_step: 0,
@@ -1151,6 +1225,30 @@ impl Sampler {
         }
     }
 
+    /// Makes this sampler run at `sample_rate`. Voices stop and every sample is
+    /// dropped (they were at the old rate). Not for the audio thread.
+    pub fn set_rate(&mut self, sample_rate: u32) {
+        let mut fresh = Sampler::offline(sample_rate);
+        fresh.incoming = self.incoming.take();
+        fresh.garbage = self.garbage.take();
+        fresh.rng = self.rng.clone();
+        fresh.hits = self.hits;
+        fresh.cuts = self.cuts;
+        if let Some(q) = fresh.incoming.as_mut() {
+            while q.pop().is_ok() {} // sent for the old rate
+        }
+        *self = fresh;
+    }
+
+    /// Counts the hits and cuts already made as seen, so a new sampler does
+    /// not play them again.
+    pub fn sync_counters(&mut self, shared: &SamplerShared) {
+        for slot in 0..SLOTS {
+            self.hits[slot] = shared.pads[slot].hits.load(Ordering::Acquire);
+            self.cuts[slot] = shared.pads[slot].cuts.load(Ordering::Acquire);
+        }
+    }
+
     /// Puts a sample (at this sampler's rate) in a slot directly. Not for the audio thread.
     pub fn set_sample(&mut self, slot: usize, data: Option<Track>) {
         if slot < SLOTS {
@@ -1158,17 +1256,59 @@ impl Sampler {
         }
     }
 
-    /// Takes in new samples and the UI's hits and cuts, then adds the pads
-    /// and the sequencer into `out` (interleaved, `channels` wide).
-    /// Real-time safe: no allocation, locks, logging or I/O.
+    /// Runs the Sampler on its own, on `shared`'s clock: takes in new
+    /// samples and the UI's hits and cuts, then adds the pads and the
+    /// sequencer into `out` (interleaved, `channels` wide). For offline
+    /// renders and tests; in the engine the graph calls
+    /// [`process`](Self::process).
     pub fn render(&mut self, shared: &SamplerShared, out: &mut [f32], channels: usize) {
-        self.take_samples();
+        let channels = channels.max(1);
+        let frames = out.len() / channels;
+        let mut clock = self.own_clock;
+        clock.run(&shared.clock, frames, |ctx, offset| {
+            let piece = &mut out[offset * channels..(offset + ctx.frames) * channels];
+            self.run(ctx, shared, |f, left, right, click| {
+                let o = &mut piece[f * channels..(f + 1) * channels];
+                if channels == 1 {
+                    o[0] += 0.5 * (left + right) + click;
+                } else {
+                    o[0] += left + click;
+                    o[1] += right + click;
+                }
+            });
+        });
+        self.own_clock = clock;
+    }
 
-        let mut playing = shared.playing.load(Ordering::Acquire);
-        if playing && !self.was_playing {
-            self.next_step = 0;
-            self.countdown = 0.0;
-            self.pos.chain_pos = NO_POS;
+    /// One piece of a block on the engine's transport: adds the pads and the
+    /// sequencer into `left` and `right`. Real-time safe: no allocation,
+    /// locks, logging or I/O.
+    pub fn process(&mut self, ctx: &ProcessContext, shared: &SamplerShared, left: &mut [f32], right: &mut [f32]) {
+        let n = ctx.frames.min(left.len()).min(right.len());
+        let ctx = ProcessContext { frames: n, ..*ctx };
+        self.run(&ctx, shared, |f, l, r, click| {
+            left[f] += l + click;
+            right[f] += r + click;
+        });
+    }
+
+    /// The Sampler's work for `ctx.frames` frames: `out(frame, left, right,
+    /// click)` takes each frame's pads and metronome click.
+    fn run(&mut self, ctx: &ProcessContext, shared: &SamplerShared, mut out: impl FnMut(usize, f32, f32, f32)) {
+        self.take_samples();
+        self.bpf = ctx.beats_per_frame;
+        self.fpb = ctx.frames_per_beat();
+        self.eps = ctx.beats_per_frame * EDGE_FRAMES;
+
+        if !ctx.playing || ctx.started {
+            self.ended = false;
+        }
+        let mut playing = ctx.playing && !self.ended;
+        let steps = shared.steps().max(1);
+        if playing && (!self.was_playing || ctx.started) {
+            self.locate(shared, ctx.beat, steps, true);
+        } else if playing && ctx.jumped {
+            self.locate(shared, ctx.beat, steps, false);
         } else if !playing && self.was_playing {
             self.stop_transport(shared);
             // Stopping silences the pads, as any transport stop does, instead of
@@ -1178,7 +1318,6 @@ impl Sampler {
             }
         }
         self.was_playing = playing;
-        let steps = shared.steps().max(1);
         // The pattern got shorter than where the sequencer is: carry on at the
         // same place in the bar, so the wrap (and any switch waiting for it)
         // still lands on a multiple of the new length.
@@ -1205,19 +1344,19 @@ impl Sampler {
         }
         self.tune_filters(shared);
 
-        let channels = channels.max(1);
-        let frames = out.len() / channels;
-        for frame in 0..frames {
+        for frame in 0..ctx.frames {
             if playing {
-                if self.countdown <= 0.0 && !self.fire_step(shared, steps) {
-                    // A song that doesn't loop reached its end, on this frame.
-                    shared.playing.store(false, Ordering::Release);
+                if self.countdown <= self.eps && !self.fire_step(shared, steps) {
+                    // A song that doesn't loop reached its end, on this frame:
+                    // stop the transport, and stay stopped until it has.
+                    shared.clock.set_playing(false);
+                    self.ended = true;
                     self.stop_transport(shared);
                     self.was_playing = false;
                     playing = false;
                 }
                 if playing {
-                    self.countdown -= 1.0;
+                    self.countdown -= self.bpf;
                     if self.ratchet_active != 0 {
                         self.tick_ratchets(shared);
                     }
@@ -1225,14 +1364,43 @@ impl Sampler {
             }
             let (left, right) = self.mix_frame(shared);
             let click = self.click_frame();
-            let o = &mut out[frame * channels..(frame + 1) * channels];
-            if channels == 1 {
-                o[0] += 0.5 * (left + right) + click;
-            } else {
-                o[0] += left + click;
-                o[1] += right + click;
-            }
+            out(frame, left, right, click);
         }
+    }
+
+    /// Puts the sequencer where `beat` falls in the pattern, laid out on the
+    /// beat grid from beat 0: on a step's first frame that step fires now;
+    /// inside a step it waits for the next one. `fresh` starts a song from
+    /// its first entry; otherwise (a loop wrap, a seek) the song carries on.
+    fn locate(&mut self, shared: &SamplerShared, beat: f64, steps: usize, fresh: bool) {
+        if fresh {
+            self.pos.chain_pos = NO_POS;
+        }
+        self.ratchet_active = 0;
+        self.skip_pads = 0;
+        let pass: f64 = (0..steps).map(|s| shared.step_beats(s)).sum();
+        let mut at = beat.rem_euclid(pass);
+        if pass - at <= self.eps {
+            at = 0.0;
+        }
+        let mut start = 0.0;
+        for s in 0..steps {
+            let len = shared.step_beats(s);
+            if at < start + len - self.eps {
+                if at - start <= self.eps {
+                    self.next_step = s;
+                    self.countdown = start - at; // at most `eps`: fires on this frame
+                } else {
+                    self.next_step = (s + 1) % steps;
+                    self.countdown = start + len - at;
+                    shared.step.store(s as u32, Ordering::Relaxed);
+                }
+                return;
+            }
+            start += len;
+        }
+        self.next_step = 0;
+        self.countdown = 0.0;
     }
 
     fn take_samples(&mut self) {
@@ -1331,7 +1499,7 @@ impl Sampler {
         shared.chain_pos.store(p.chain_pos, Ordering::Relaxed);
         shared.play_bank.store(playing as u32, Ordering::Relaxed);
         let bank = &shared.banks[playing];
-        let length = shared.step_frames(step, self.rate);
+        let length = shared.step_beats(step);
         // Pads whose hit was recorded onto this step a moment ago already sounded.
         let skip = if step == self.skip_step { self.skip_pads } else { 0 };
         self.skip_pads = 0;
@@ -1344,7 +1512,7 @@ impl Sampler {
                     let vel = bank.velocities[pad][step].load(Ordering::Relaxed) as f32 / VEL_MAX as f32;
                     let n = bank.ratchets[pad][step].load(Ordering::Relaxed).clamp(1, RATCHET_MAX);
                     let gap = length / f64::from(n);
-                    self.step_hit(shared, pad, gap, vel);
+                    self.step_hit(shared, pad, gap * self.fpb, vel);
                     self.ratchet_active &= !(1 << pad);
                     if n > 1 {
                         // The rest land at multiples of `gap` from the step's exact
@@ -1368,15 +1536,15 @@ impl Sampler {
     }
 
     /// Plays the ratchet hits that are due on this frame. They count down in
-    /// frames like `countdown` does, so they are as exact as the steps.
+    /// beats like `countdown` does, so they are as exact as the steps.
     fn tick_ratchets(&mut self, shared: &SamplerShared) {
         let mut active = self.ratchet_active;
         while active != 0 {
             let pad = active.trailing_zeros() as usize;
             active &= active - 1;
-            if self.ratchet_wait[pad] <= 0.0 {
+            if self.ratchet_wait[pad] <= self.eps {
                 if shared.pads[pad].flags.load(Ordering::Relaxed) & MUTE == 0 {
-                    self.step_hit(shared, pad, self.ratchet_gap[pad], self.ratchet_vel[pad]);
+                    self.step_hit(shared, pad, self.ratchet_gap[pad] * self.fpb, self.ratchet_vel[pad]);
                 }
                 self.ratchet_left[pad] -= 1;
                 if self.ratchet_left[pad] == 0 {
@@ -1385,12 +1553,12 @@ impl Sampler {
                 }
                 self.ratchet_wait[pad] += self.ratchet_gap[pad];
             }
-            self.ratchet_wait[pad] -= 1.0;
+            self.ratchet_wait[pad] -= self.bpf;
         }
     }
 
     /// Writes a hand-played hit on `pad` into the nearest step. Where the
-    /// sequencer is comes from `countdown`, the frames left in the step that
+    /// sequencer is comes from `countdown`, the beats left in the step that
     /// fired last: in its first half the hit goes on that step, in its second
     /// half on the next one, which the sequencer then skips for this pad once
     /// (if it will play the bank written to there).
@@ -1400,7 +1568,7 @@ impl Sampler {
     /// song it goes into the bank being edited, as the chain decides what plays.
     fn record_hit(&mut self, shared: &SamplerShared, pad: usize, steps: usize, vel: f32) {
         let current = (self.next_step + steps - 1) % steps;
-        let length = shared.step_frames(current, self.rate);
+        let length = shared.step_beats(current);
         let ahead = self.countdown <= length * 0.5;
         let (step, at) = if ahead {
             (self.next_step, self.position_at(shared, self.next_step))
@@ -3408,5 +3576,200 @@ mod tests {
         assert_eq!(shared.played(0), 4);
         run(&mut s, &shared, 2_000); // step 3 fires at 18,000
         assert_eq!(shared.played(0), 5, "A's step 3 still plays");
+    }
+
+    // The Sampler on the engine's transport and graph.
+
+    use crate::graph::{Graph, Mixer};
+    use crate::testing::realtime;
+
+    /// The Sampler as the only track of a graph, as the engine runs it, with
+    /// `samples` sent through its queue.
+    struct OnGraph {
+        mixer: Mixer,
+        graph: Graph,
+        clock: Transport,
+        link: SamplerLink,
+    }
+
+    impl OnGraph {
+        fn new(shared: &Arc<SamplerShared>, samples: &[(usize, Track)]) -> Self {
+            let (dev, mut link) = device(shared.clone(), RATE);
+            let mut mixer = Mixer::new();
+            let t = mixer.add_track("Sampler").unwrap();
+            mixer.set_source(t, Some(Box::new(dev))).unwrap();
+            let graph = mixer.start(RATE);
+            for (slot, data) in samples {
+                link.send(*slot, Some(data.clone())).unwrap();
+            }
+            Self { mixer, graph, clock: Transport::new(RATE), link }
+        }
+
+        /// Plays `frames` frames in blocks of `block`; returns left and right.
+        fn play(&mut self, shared: &SamplerShared, frames: usize, block: usize) -> (Vec<f32>, Vec<f32>) {
+            let (mut l, mut r) = (Vec::with_capacity(frames), Vec::with_capacity(frames));
+            let mut done = 0;
+            while done < frames {
+                let n = block.min(frames - done);
+                self.graph.run(&mut self.clock, shared.clock(), n);
+                let (a, b) = self.graph.master();
+                l.extend_from_slice(a);
+                r.extend_from_slice(b);
+                done += n;
+            }
+            (l, r)
+        }
+    }
+
+    /// The same busy pattern on two Samplers: swing, an odd length, pitch,
+    /// pan, a filter and a ratchet.
+    fn busy(s: &SamplerShared) {
+        s.set_tempo(133.0);
+        s.set_swing(0.4);
+        s.set_steps(12);
+        s.set_pattern(0, 0b1010_0101_0011);
+        s.set_pattern(1, 0b0100_0010_1000);
+        s.set_pad(1, &PadParams { gain: 0.7, pan: -0.3, pitch: 3.0, filter: FILTER_LOW_PASS, cutoff: 3_000.0, ..Default::default() });
+        s.set_ratchet(0, 0, 4, 3);
+        s.set_metronome(true);
+    }
+
+    #[test]
+    fn the_sampler_on_its_track_sounds_exactly_as_on_its_own() {
+        let samples = [(0, click(400)), (1, sine(220.0, 30_000))];
+        let on_track = Arc::new(SamplerShared::default());
+        let alone = SamplerShared::default();
+        busy(&on_track);
+        busy(&alone);
+        let mut g = OnGraph::new(&on_track, &samples);
+        let mut s = Sampler::offline(RATE);
+        for (slot, data) in &samples {
+            s.set_sample(*slot, Some(data.clone()));
+        }
+        on_track.set_playing(true);
+        alone.set_playing(true);
+
+        let frames = 2 * RATE as usize;
+        let (l, r) = g.play(&on_track, frames, 512);
+        let mut out = vec![0.0; frames * 2];
+        for block in out.chunks_mut(512 * 2) {
+            s.render(&alone, block, 2);
+        }
+        assert!(l.iter().any(|&x| x != 0.0), "something played");
+        let (al, ar): (Vec<f32>, Vec<f32>) = out.chunks(2).map(|f| (f[0], f[1])).unzip();
+        assert!(l == al && r == ar, "the track adds nothing and loses nothing: bit for bit the same");
+    }
+
+    #[test]
+    fn steps_follow_the_clock_through_a_tempo_change() {
+        let shared = Arc::new(SamplerShared::default());
+        shared.set_tempo(120.0);
+        shared.set_steps(16);
+        shared.set_pattern(0, 0xFFFF);
+        let mut g = OnGraph::new(&shared, &[(0, click(100))]);
+        shared.set_playing(true);
+        let (mut left, _) = g.play(&shared, 27_000, 1_000); // to beat 1.125, inside step 4
+        shared.set_tempo(90.0); // a beat is now 32,000 frames, a sixteenth 8,000
+        left.extend(g.play(&shared, 33_000, 1_000).0);
+        // Step 5 is at beat 1.25: 0.125 beats after the change, 4,000 frames at 90.
+        assert_eq!(onsets(&left), vec![0, 6_000, 12_000, 18_000, 24_000, 31_000, 39_000, 47_000, 55_000]);
+        // Each one is where the transport's clock reaches the step's beat.
+        let beat = |frame: usize| if frame <= 27_000 { frame as f64 / 24_000.0 } else { 1.125 + (frame - 27_000) as f64 / 32_000.0 };
+        for (k, &at) in onsets(&left).iter().enumerate() {
+            assert!((beat(at) - k as f64 * 0.25).abs() < 1e-9, "step {k} at frame {at} is beat {}", beat(at));
+        }
+    }
+
+    #[test]
+    fn a_transport_loop_starts_the_pattern_again_on_its_frame() {
+        let shared = Arc::new(SamplerShared::default());
+        shared.set_tempo(120.0);
+        shared.set_steps(16);
+        shared.set_pattern(0, 0b0000_1111); // the click on the first beat's four steps
+        shared.set_pattern(1, 0b0001_0000); // the flat pad on beat 2, past the loop
+        shared.clock().set_loop(0.0, 1.0);
+        shared.clock().set_looping(true);
+        let mut g = OnGraph::new(&shared, &[(0, click(100)), (1, flat(100, 0.8))]);
+        shared.set_playing(true);
+        let (left, _) = g.play(&shared, 72_000, 777);
+        let on = onsets(&left);
+        assert_eq!(on, (0..12).map(|k| k * 6_000).collect::<Vec<_>>(), "four steps a beat, again from each wrap");
+        assert!(on.iter().all(|&at| pad_at(&left, at) == Some(0)), "the step past the loop never plays");
+    }
+
+    #[test]
+    fn a_song_end_stops_the_transport_every_track_runs_on() {
+        let shared = Arc::new(SamplerShared::default());
+        shared.set_tempo(120.0);
+        shared.set_steps(4);
+        shared.set_bank_pattern(0, 0, 0b0001);
+        shared.set_chain(&[0]);
+        shared.set_song_mode(true);
+        shared.set_song_loop(false);
+        let mut g = OnGraph::new(&shared, &[(0, click(100))]);
+        shared.set_playing(true);
+        let (left, _) = g.play(&shared, 30_000, 1_000);
+        assert_eq!(onsets(&left), vec![0], "one pass, then the end");
+        assert!(!shared.clock().is_playing(), "the song's end stopped the transport");
+        let at = shared.clock().position_frames();
+        g.play(&shared, 5_000, 1_000);
+        assert_eq!(shared.clock().position_frames(), at, "and the clock holds still");
+        // Play again: the song starts over from its first entry.
+        shared.set_playing(true);
+        let (left, _) = g.play(&shared, 1_000, 1_000);
+        assert_eq!(onsets(&left), vec![0]);
+    }
+
+    #[test]
+    fn a_new_rate_does_not_play_old_hits_again() {
+        let shared = Arc::new(SamplerShared::default());
+        let (mut dev, mut link) = device(shared.clone(), RATE);
+        link.send(0, Some(dc(48_000, 0.5))).unwrap();
+        shared.trigger(0);
+        shared.release(0);
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        let ctx = ProcessContext::stopped(RATE, 256);
+        dev.process(&ctx, &mut Events::with_capacity(1), Buffers { left: &mut l, right: &mut r });
+        assert!(l[255] > 0.49, "the hit plays");
+        dev.prepare(44_100, 4_096);
+        link.collect();
+        link.send(0, Some(dc(44_100, 0.5))).unwrap();
+        let (mut l, mut r) = (vec![0.0; 256], vec![0.0; 256]);
+        dev.process(&ProcessContext::stopped(44_100, 256), &mut Events::with_capacity(1), Buffers { left: &mut l, right: &mut r });
+        assert!(l.iter().all(|&x| x == 0.0), "the same hit is not played again at the new rate");
+    }
+
+    #[test]
+    fn the_sampler_track_never_allocates_on_the_audio_thread() {
+        let shared = Arc::new(SamplerShared::default());
+        busy(&shared);
+        shared.set_chain(&[0, 1, 0]);
+        shared.set_song_mode(true);
+        shared.set_song_loop(true);
+        shared.set_recording(true);
+        let mut g = OnGraph::new(&shared, &[(0, click(400)), (1, sine(330.0, 20_000))]);
+        shared.set_playing(true);
+        let mut total = 0;
+        for i in 0..300 {
+            // The main thread's side of a busy session, between blocks.
+            match i % 6 {
+                0 => shared.trigger_velocity(2 + i % 3, 0.6),
+                1 => g.link.send(3, Some(click(200 + i))).unwrap(),
+                2 => shared.set_bank(i % 4),
+                3 => shared.set_tempo(100.0 + (i % 50) as f32),
+                4 => shared.cut(0),
+                _ => g.link.collect(),
+            }
+            if i == 150 {
+                shared.set_playing(false);
+            }
+            if i == 160 {
+                shared.set_playing(true);
+            }
+            let (_, n) = realtime(|| g.graph.run(&mut g.clock, shared.clock(), 512));
+            total += n;
+        }
+        g.mixer.collect();
+        assert_eq!(total, 0, "the audio thread allocated or freed {total} times");
     }
 }

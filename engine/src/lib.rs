@@ -1,29 +1,52 @@
 //! tuneKore's audio engine: output devices, a test tone (Phase 0), the
-//! Analyzer's stem player (Phase 1) and the Sampler's pads and sequencer
-//! (Phase 2).
+//! Analyzer's stem player (Phase 1), and the tracks every instrument and
+//! clip plays on, summed into the master and its limiter. The first track is
+//! the Sampler (Phase 2).
 //!
-//! Control calls (`list_outputs`, `open_output`, `close_output`, `load_clip`)
-//! come from one thread at a time; callers serialize them. `set_tone`,
-//! `take_peak` and the [`Player`] and [`SamplerHandle`] handles only touch atomics and are safe from
-//! any thread. The audio callback runs on the device's thread: no allocation,
-//! locks, logging or I/O there.
+//! - [`transport`]: the one beat clock (tempo, time signature, position,
+//!   play, stop, loop). Every device gets a [`ProcessContext`] from it.
+//! - [`track`] and [`graph`]: tracks with a source slot, a chain of devices,
+//!   volume, pan, mute, solo and a meter. The main thread's [`Mixer`] owns
+//!   the track list and publishes a [`snapshot`] of it after each edit.
+//! - [`device`]: the [`Device`] trait that sources and effects implement.
+//!
+//! Control calls (`list_outputs`, `open_output`, `close_output`,
+//! `load_clip`, the track calls) come from one thread at a time; callers
+//! serialize them. `set_tone`, `take_peak` and the [`Player`],
+//! [`SamplerHandle`] and transport handles only touch atomics and are safe
+//! from any thread. The audio callback runs on the device's thread: no
+//! allocation, locks, logging or I/O there. In debug builds it runs inside
+//! RealtimeSanitizer's real-time context, which aborts on any of those when
+//! the build has `RTSAN_ENABLE=1` set.
 
+pub mod device;
+pub mod graph;
 mod limiter;
 mod input;
 mod player;
 mod resample;
 mod sampler;
+pub mod snapshot;
 mod tone;
+pub mod track;
+pub mod transport;
+
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use limiter::{Limiter, CEILING};
 pub use input::{list_inputs, InputDevice, InputMeter, Recorder, Take, MAX_SECONDS};
 pub use player::{Clip, PlayerShared, Track, MAX_TRACKS};
 pub use sampler::{
-    render_pattern, render_song, PadParams, Sampler, SamplerShared, BANKS, CHAIN_MAX, FILTER_BAND_PASS, FILTER_HIGH_PASS, FILTER_LOW_PASS,
-    FILTER_OFF, MAX_STEPS, PADS, PREVIEW, SLOTS,
+    render_pattern, render_song, PadParams, Sampler, SamplerDevice, SamplerShared, BANKS, CHAIN_MAX, FILTER_BAND_PASS, FILTER_HIGH_PASS,
+    FILTER_LOW_PASS, FILTER_OFF, MAX_STEPS, PADS, PREVIEW, SLOTS,
 };
+pub use device::{Buffers, Device, Event, Events};
+pub use graph::Mixer;
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
+pub use track::{TrackId, TrackInfo, TrackMeter, TrackMix};
+pub use transport::{LoopRange, ProcessContext, TimeSignature, Transport, TransportShared};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use serde::Serialize;
@@ -33,7 +56,9 @@ use std::sync::Arc;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The callback works in blocks of at most this many frames.
-const BLOCK_FRAMES: usize = 4096;
+const BLOCK_FRAMES: usize = graph::MAX_FRAMES;
+/// The Sampler's track is the first, so its id is fixed.
+pub const SAMPLER_TRACK: TrackId = TrackId(1);
 
 /// Rates we offer when a device reports a range.
 const COMMON_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
@@ -54,7 +79,8 @@ pub struct OutputDevice {
 struct Shared {
     tone: ToneControl,
     player: PlayerShared,
-    sampler: SamplerShared,
+    transport: Arc<TransportShared>,
+    sampler: Arc<SamplerShared>,
     peak: AtomicU32, // f32 bits, max since the last take
     /// Master level, linear, f32 bits.
     master: AtomicU32,
@@ -64,10 +90,12 @@ struct Shared {
 
 impl Default for Shared {
     fn default() -> Self {
+        let transport = Arc::<TransportShared>::default();
         Self {
             tone: ToneControl::default(),
             player: PlayerShared::default(),
-            sampler: SamplerShared::default(),
+            sampler: Arc::new(SamplerShared::with_clock(transport.clone())),
+            transport,
             peak: AtomicU32::new(0),
             master: AtomicU32::new(1.0f32.to_bits()),
             limiting: AtomicU32::new(1.0f32.to_bits()),
@@ -113,8 +141,10 @@ pub struct Engine {
     /// The open stream's sample rate.
     rate: u32,
     source: Option<Arc<Source>>,
-    /// The open stream's end of the sampler's queues.
-    sampler_link: Option<sampler::SamplerLink>,
+    /// The tracks and their devices.
+    mixer: Mixer,
+    /// The control side's end of the Sampler device's sample queues.
+    sampler_link: sampler::SamplerLink,
     /// Each slot's sample at its own rate, kept to send again when the device changes.
     samples: Vec<Option<(u32, Track)>>,
 }
@@ -127,16 +157,49 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Self {
+        let shared = Arc::<Shared>::default();
+        let mut mixer = Mixer::new();
+        mixer.add_track_as(SAMPLER_TRACK, "Sampler").expect("the first track");
+        let (device, sampler_link) = sampler::device(shared.sampler.clone(), 48_000);
+        mixer.set_source(SAMPLER_TRACK, Some(Box::new(device))).expect("the Sampler's track");
         Self {
             host: cpal::default_host(),
             stream: None,
-            shared: Arc::default(),
+            shared,
             link: None,
             rate: 0,
             source: None,
-            sampler_link: None,
+            mixer,
+            sampler_link,
             samples: vec![None; SLOTS],
         }
+    }
+
+    /// The tracks and their devices. Add, remove and change tracks here;
+    /// each edit reaches the audio thread as a new snapshot.
+    pub fn mixer(&mut self) -> &mut Mixer {
+        self.mixer.collect();
+        &mut self.mixer
+    }
+
+    pub fn tracks(&self) -> Vec<TrackInfo> {
+        self.mixer.tracks()
+    }
+
+    /// The transport every track runs on: tempo, time signature, play, stop,
+    /// loop and position, from any thread.
+    pub fn transport(&self) -> Arc<TransportShared> {
+        self.shared.transport.clone()
+    }
+
+    /// Puts the Sampler back on its track after the output lost its devices.
+    fn restore_sampler(&mut self) {
+        let (device, link) = sampler::device(self.shared.sampler.clone(), self.rate.max(1));
+        self.sampler_link = link;
+        if self.mixer.track(SAMPLER_TRACK).is_none() {
+            let _ = self.mixer.add_track_as(SAMPLER_TRACK, "Sampler");
+        }
+        let _ = self.mixer.set_source(SAMPLER_TRACK, Some(Box::new(device)));
     }
 
     pub fn list_outputs(&self) -> Result<Vec<OutputDevice>, String> {
@@ -193,8 +256,20 @@ impl Engine {
             cpal::SampleFormat::I32 => self.build::<i32>(&dev, &config),
             cpal::SampleFormat::U16 => self.build::<u16>(&dev, &config),
             other => Err(format!("unsupported sample format {other:?}")),
-        }?;
-        stream.play().map_err(|e| e.to_string())?;
+        };
+        let stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                // The callback (and the graph in it) was dropped: take the devices back.
+                self.after_stream();
+                return Err(e);
+            }
+        };
+        if let Err(e) = stream.play() {
+            drop(stream);
+            self.after_stream();
+            return Err(e.to_string());
+        }
         self.stream = Some(stream);
         if let Some(source) = self.source.clone() {
             self.send_clip(&source)?;
@@ -238,7 +313,10 @@ impl Engine {
             Some((rate, t)) if *rate == self.rate => Some(t.clone()),
             Some((rate, t)) => Some(Arc::new(resample(t, *rate, self.rate)?)),
         };
-        self.sampler_link.as_mut().ok_or("no output is open")?.send(slot, data)
+        if self.stream.is_none() {
+            return Err("no output is open".into());
+        }
+        self.sampler_link.send(slot, data)
     }
 
     /// Loads tracks into the player, replacing what it had. Resamples them to
@@ -309,21 +387,28 @@ impl Engine {
         let rate = config.sample_rate;
         let mut tone = Tone::new(rate as f64);
         let (mut voice, link) = player::voice(rate);
-        let (mut pads, sampler_link) = sampler::sampler(rate);
+        let mut transport = Transport::new(rate);
+        // Prepares every track's devices for this rate and moves them into the graph.
+        let mut graph = self.mixer.start(rate);
         let mut limiter = Limiter::new(rate, channels);
         let mut scratch = vec![0.0f32; BLOCK_FRAMES * channels];
         shared.peak.store(0, Ordering::Relaxed);
+        self.rate = rate;
         let stream = dev
             .build_output_stream(
                 config.clone(),
-                // Audio thread: atomics, lock-free queues and the scratch buffer only.
+                // Audio thread: atomics, lock-free queues and preallocated buffers only.
                 move |out: &mut [T], _| {
+                    #[cfg(debug_assertions)]
+                    rtsan_standalone::realtime_enter();
                     let mut peak = 0.0f32;
                     for block in out.chunks_mut(BLOCK_FRAMES * channels) {
+                        let frames = block.len() / channels;
                         let buf = &mut scratch[..block.len()];
                         tone.render(&shared.tone, buf, channels);
                         voice.render(&shared.player, buf, channels);
-                        pads.render(&shared.sampler, buf, channels);
+                        graph.run(&mut transport, &shared.transport, frames);
+                        mix_into(buf, channels, graph.master());
                         let master = f32::from_bits(shared.master.load(Ordering::Relaxed));
                         shared.lower_limiting(limiter.process(buf, master));
                         for (o, &s) in block.iter_mut().zip(buf.iter()) {
@@ -332,23 +417,35 @@ impl Engine {
                         }
                     }
                     shared.raise_peak(peak);
+                    #[cfg(debug_assertions)]
+                    rtsan_standalone::realtime_exit();
                 },
-            // cpal calls this off the audio thread.
+                // cpal calls this off the audio thread.
                 |err| eprintln!("audio stream error: {err}"),
                 None,
             )
             .map_err(|e| e.to_string())?;
         self.link = Some(link);
-        self.sampler_link = Some(sampler_link);
-        self.rate = rate;
         Ok(stream)
     }
 
     pub fn close_output(&mut self) {
+        let was_open = self.stream.is_some();
         self.stream = None; // dropping the stream stops it and frees its clip
         self.link = None;
-        self.sampler_link = None;
         self.shared.player.set_playing(false);
+        if was_open {
+            self.after_stream();
+        }
+    }
+
+    /// Once the stream and its graph are dropped: takes the devices back, and
+    /// puts the Sampler back if they were lost with the stream.
+    fn after_stream(&mut self) {
+        self.sampler_link.collect();
+        if !self.mixer.stopped() || self.mixer.track(SAMPLER_TRACK).is_none_or(|t| !t.has_source) {
+            self.restore_sampler();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -380,6 +477,20 @@ impl Engine {
     }
 }
 
+/// Adds the graph's master (left, right) into an interleaved buffer
+/// `channels` wide: a mono device gets the two halved and summed, and
+/// channels past the second stay as they are.
+fn mix_into(buf: &mut [f32], channels: usize, (left, right): (&[f32], &[f32])) {
+    for (o, (&l, &r)) in buf.chunks_mut(channels).zip(left.iter().zip(right)) {
+        if channels == 1 {
+            o[0] += 0.5 * (l + r);
+        } else {
+            o[0] += l;
+            o[1] += r;
+        }
+    }
+}
+
 /// Plays, pauses, seeks and mixes the loaded clip, from any thread.
 #[derive(Clone)]
 pub struct Player(Arc<Shared>);
@@ -399,6 +510,13 @@ impl std::ops::Deref for SamplerHandle {
     type Target = SamplerShared;
     fn deref(&self) -> &SamplerShared {
         &self.0.sampler
+    }
+}
+
+impl Engine {
+    /// A handle that reads a track's level from any thread.
+    pub fn track_meter(&self, id: TrackId) -> Option<TrackMeter> {
+        self.mixer.meter(id)
     }
 }
 
