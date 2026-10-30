@@ -50,20 +50,23 @@ tracks and audio clips, with MIDI clips and plugins on tracks next.
 - **Timeline** (⌘2): tracks of audio clips on the Sampler's beat clock, with
   the Sampler as the first track.
   - **Tracks:** name, colour, volume, pan, mute, solo and a meter; drag a
-    track's foot to change its height. An arm button waits for recording.
+    track's foot to change its height, and press F2 or Enter on a focused
+    track to rename it. An arm button waits for recording.
   - **Clips:** drag samples from the Library or files from Finder onto a
     track (they play one after another), or below the tracks for a track
     each, lined up; the Analyzer sends a stem, or all four, to new tracks at
     bar 1. Move them (⌥ copies), trim either edge, loop one by
     dragging the top of its right edge, fade in and out from its top corners,
     set its gain, split at the playhead (⌘E), duplicate (⌘D) and delete (⌫).
-    Drags snap to the grid (bar, beat, 1/8, 1/16 or off; hold ⌘ to ignore it).
+    Drags snap to the grid (bar, beat, 1/8, 1/16 or off; hold ⌘, or Ctrl on
+    Windows and Linux, to ignore it).
   - **Ruler:** click to move the playhead; drag in its top strip for a loop
     range, drag the brace to move it, click it to turn the loop on or off.
     Zoom with ⌘-scroll, pinch, or = and -; the playhead is followed while
     playing.
   - Clips aren't warped yet: they play at their own speed, so a clip's length
-    in beats follows the tempo. Its files are decoded into memory.
+    in beats follows the tempo, and a tempo change while playing lets the
+    clips under the playhead play on. Their files are decoded into memory.
   - Undo and redo cover the Timeline's edits; tracks, clips, the loop and the
     view are saved in the project, and collecting samples copies the clips'
     files too.
