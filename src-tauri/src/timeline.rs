@@ -33,7 +33,6 @@ use serde_json::Value;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_analyzer::decode_file;
-use tunekore_engine::transport::EDGE_FRAMES;
 use tunekore_engine::{clip, resample, ClipFeed, ClipSet, ClipSpec, Peaks, Track, TrackId, TrackMeter, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::project::{self, Apply, Section};
@@ -786,10 +785,11 @@ impl TimelineState {
     /// is. The two halves meet on the same frame at the output's rate, so
     /// they play through without a seam.
     pub fn split(&self, ids: &[u64], beat: f64) -> Result<View, String> {
-        let rate = f64::from(self.rate());
+        let rate_hz = self.rate();
+        let rate = f64::from(rate_hz);
         let tempo = self.transport.tempo();
-        let fpb = rate * 60.0 / tempo;
-        let frame = |b: f64| (b * fpb - EDGE_FRAMES).ceil();
+        // The player's own count of frames, through the same tempo map.
+        let map = self.transport.tempo_map(rate_hz);
         self.edit("split", |_, doc| {
             let mut cuts = Vec::new();
             for (track, list) in &doc.clips {
@@ -810,7 +810,7 @@ impl TimelineState {
                 let c = list[at].clone();
                 let r = |s: f64| (s * rate).round();
                 let (o, p, k, l) = (r(c.offset), r(c.phase), r(c.content).max(1.0), r(c.length));
-                let n = frame(beat) - frame(c.start);
+                let n = clip::frames_before(&map, c.start, beat) as f64;
                 if n < 1.0 || n >= l {
                     continue;
                 }

@@ -3,12 +3,19 @@
 //!
 //! A clip sits on the beat grid at `start` and plays a span of a file at the
 //! file's own speed (clips follow the tempo once Warp lands, Phase 8). Where
-//! it is in the file is worked out from the beat alone, as the Sampler's
-//! steps are: so a clip lands on the exact frame at its start, its end, a
-//! trim, its own loop and the transport's loop wrap, and finds its place
-//! after a seek. Its length in beats follows the tempo; at a tempo change
-//! while playing, the clips under the playhead move to where the new tempo
-//! puts them, crossfaded.
+//! it is in the file is the time the tempo map puts between its start and
+//! the beat playing ([`frames_into`], the one place that turns beats into a
+//! clip's frames), worked out from the beat alone as the Sampler's steps
+//! are: so a clip lands on the exact frame at its start, its end, a trim, its
+//! own loop and the transport's loop wrap, and finds its place after a seek.
+//! Its length in beats follows the tempo.
+//!
+//! A tempo change while playing: today the map holds one tempo for the whole
+//! song, so a new tempo moves every clip under the playhead to where the new
+//! tempo puts it, and the player crossfades the jump. Once the Timeline's
+//! tempo lane makes the map a list of changes by beat, the time between a
+//! clip's start and the playhead runs through the changes, and unwarped audio
+//! plays straight through a tempo ramp instead of jumping at each step.
 //!
 //! The main thread builds a [`ClipSet`] for a track, each clip's audio
 //! already at the output's rate, and [`ClipFeed::publish`]es it. The
@@ -31,7 +38,7 @@ use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use crate::device::{Buffers, Device, Events};
 use crate::player::Track;
 use crate::snapshot::Mailbox;
-use crate::transport::{ProcessContext, EDGE_FRAMES};
+use crate::transport::{ProcessContext, TempoMap, EDGE_FRAMES};
 
 /// The shortest fade at a clip's edge, and the crossfade at a jump.
 pub const DECLICK_SECONDS: f64 = 0.0015;
@@ -90,9 +97,32 @@ impl Playing {
 
     /// The clip's frame at the first frame of a piece that starts on `beat`
     /// (negative before it starts).
-    fn index_at(&self, beat: f64, beats_per_frame: f64) -> f64 {
-        ((beat - self.start) / beats_per_frame + EDGE_FRAMES).floor()
+    fn index_at(&self, beat: f64, map: &TempoMap) -> f64 {
+        (frames_into(map, self.start, beat) + EDGE_FRAMES).floor()
     }
+}
+
+/// How far into a clip that starts on `start` the sound is at `beat`, in
+/// frames: the time the tempo map puts between the two beats, since a clip
+/// plays its file at the file's own speed. Every beat-to-clip-frame
+/// conversion goes through here.
+pub fn frames_into(map: &TempoMap, start: f64, beat: f64) -> f64 {
+    map.frames_between(start, beat)
+}
+
+/// How many frames a clip that starts on `start` plays before `cut` (beats),
+/// counted as the player counts them from beat 0. Cut a clip there and put
+/// the rest at `cut`: the second half starts on the frame after the first
+/// half's last, and plays the file's next frame.
+pub fn frames_before(map: &TempoMap, start: f64, cut: f64) -> u64 {
+    let first = |b: f64| (frames_into(map, 0.0, b) - EDGE_FRAMES).ceil();
+    (first(cut) - first(start)).max(0.0) as u64
+}
+
+/// The tempo map a piece runs on. One tempo for now, the context's; when the
+/// tempo lane lands the map comes from the transport, and only this changes.
+fn map_of(ctx: &ProcessContext) -> TempoMap {
+    TempoMap::constant(ctx.tempo, ctx.time_signature, ctx.sample_rate)
 }
 
 /// Every clip on one track, sorted by start, with its audio at `rate`.
@@ -196,14 +226,14 @@ impl Ramp {
 
 /// Adds frames `0..to` of every clip in `set` into `left` and `right`, for a
 /// piece whose first frame is at `beat`. Real-time safe.
-fn render(set: &ClipSet, beat: f64, bpf: f64, declick: usize, to: usize, left: &mut [f32], right: &mut [f32], ramp: Ramp) {
+fn render(set: &ClipSet, beat: f64, map: &TempoMap, declick: usize, to: usize, left: &mut [f32], right: &mut [f32], ramp: Ramp) {
     let to = to.min(left.len()).min(right.len());
-    if to == 0 || !(bpf > 0.0) || !beat.is_finite() {
+    if to == 0 || !beat.is_finite() {
         return;
     }
     let clips = &set.clips;
     for c in clips {
-        let i0 = c.index_at(beat, bpf);
+        let i0 = c.index_at(beat, map);
         if i0 + to as f64 <= 0.0 {
             // Not started by the piece's end, and the ones after start later still.
             break;
@@ -221,7 +251,7 @@ fn render(set: &ClipSet, beat: f64, bpf: f64, declick: usize, to: usize, left: &
         let joined = |other: u32, expect: i64| {
             other != NONE && {
                 let o = &clips[other as usize];
-                o.index_at(beat, bpf) as i64 == expect
+                o.index_at(beat, map) as i64 == expect
             }
         };
         let fade_in = if c.prev != NONE && joined(c.prev, i0 + clips[c.prev as usize].length as i64) { c.fade_in } else { c.fade_in.max(declick) };
@@ -261,12 +291,12 @@ enum Old {
     Prev,
 }
 
-/// A crossfade from where the sound was heading (`beat`, `bpf`) to where it is now.
+/// A crossfade from where the sound was heading (`beat`, on `map`) to where it is now.
 #[derive(Debug, Clone, Copy)]
 struct Fade {
     old: Old,
     beat: f64,
-    bpf: f64,
+    map: TempoMap,
     pos: usize,
 }
 
@@ -278,8 +308,8 @@ pub struct ClipPlayer {
     prev: Option<Box<ClipSet>>,
     fade: Option<Fade>,
     /// Where the last piece left off: the beat its next frame would be at,
-    /// and its beats per frame. `None` when it wasn't playing.
-    last: Option<(f64, f64)>,
+    /// and the tempo map it ran on. `None` when it wasn't playing.
+    last: Option<(f64, TempoMap)>,
     mailbox: Arc<Mailbox<ClipSet>>,
     garbage: Producer<Box<ClipSet>>,
     /// Sets that didn't fit on the return queue, waiting for room.
@@ -409,16 +439,18 @@ impl Device for ClipPlayer {
     fn process(&mut self, ctx: &ProcessContext, _events: &mut Events, audio: Buffers<'_>) {
         let n = audio.frames().min(ctx.frames);
         let swapped = self.flush_spill() && self.take_newest();
-        let bpf = ctx.beats_per_frame;
+        let map = map_of(ctx);
         // Where the sound jumps, start a crossfade from where it was heading.
+        // A new map is a jump too: with one tempo for the song, a new tempo
+        // puts every clip under the playhead somewhere else.
         match (self.last, ctx.playing) {
-            (Some((beat, was_bpf)), playing) => {
-                let jumped = !playing || ctx.jumped || ctx.started || bpf != was_bpf || (ctx.beat - beat).abs() > 0.5 * bpf;
+            (Some((beat, was)), playing) => {
+                let jumped = !playing || ctx.jumped || ctx.started || map != was || (ctx.beat - beat).abs() > 0.5 * ctx.beats_per_frame;
                 if jumped || swapped {
-                    self.fade = Some(Fade { old: if swapped { Old::Prev } else { Old::Current }, beat, bpf: was_bpf, pos: 0 });
+                    self.fade = Some(Fade { old: if swapped { Old::Prev } else { Old::Current }, beat, map: was, pos: 0 });
                 }
             }
-            (None, true) => self.fade = Some(Fade { old: Old::Nothing, beat: 0.0, bpf: 0.0, pos: 0 }),
+            (None, true) => self.fade = Some(Fade { old: Old::Nothing, beat: ctx.beat, map, pos: 0 }),
             (None, false) => {}
         }
         if swapped && !matches!(self.fade, Some(Fade { old: Old::Prev, .. })) {
@@ -430,7 +462,7 @@ impl Device for ClipPlayer {
         let len = self.declick;
         if ctx.playing {
             let ramp = self.fade.map_or(Ramp::One, |f| Ramp::In { pos: f.pos, len });
-            render(&self.current, ctx.beat, bpf, self.declick, n, &mut *audio.left, &mut *audio.right, ramp);
+            render(&self.current, ctx.beat, &map, self.declick, n, &mut *audio.left, &mut *audio.right, ramp);
         }
         if let Some(mut f) = self.fade {
             let old = match f.old {
@@ -439,10 +471,10 @@ impl Device for ClipPlayer {
                 Old::Prev => self.prev.as_deref(),
             };
             if let Some(set) = old {
-                render(set, f.beat, f.bpf, self.declick, (len - f.pos.min(len)).min(n), &mut *audio.left, &mut *audio.right, Ramp::Out { pos: f.pos, len });
+                render(set, f.beat, &f.map, self.declick, (len - f.pos.min(len)).min(n), &mut *audio.left, &mut *audio.right, Ramp::Out { pos: f.pos, len });
             }
             f.pos += n;
-            f.beat += n as f64 * f.bpf;
+            f.beat = f.map.advance(f.beat, n as f64);
             self.fade = (f.pos < len).then_some(f);
         }
         if self.fade.is_none() {
@@ -450,7 +482,7 @@ impl Device for ClipPlayer {
                 self.give_back(p);
             }
         }
-        self.last = ctx.playing.then(|| (ctx.beat + n as f64 * bpf, bpf));
+        self.last = ctx.playing.then(|| (map.advance(ctx.beat, n as f64), map));
     }
 }
 
@@ -667,6 +699,45 @@ mod tests {
         rig.run(40_000, 512);
         assert!(rig.out[200..29_000].iter().all(|&x| x == 1.0), "no fade at the cut");
         assert_eq!(rig.last_sound(), Some(29_999));
+    }
+
+    #[test]
+    fn a_cut_where_frames_before_says_plays_through_at_any_tempo_and_rate() {
+        // Clip starts and cuts between frames, at rates and tempos where beats aren't whole frames.
+        for (rate, tempo, start, cut) in [(44_100u32, 97.0, 1.00001, 1.3), (48_000, 133.3, 0.37, 2.0), (96_000, 61.0, 0.0, 0.123)] {
+            let map = TempoMap::constant(tempo, crate::transport::TimeSignature::default(), rate);
+            let n = frames_before(&map, start, cut) as f64;
+            let r = f64::from(rate);
+            let audio = dc(1.0, rate as usize * 4);
+            let a = ClipSpec { start, offset: 0.0, content: 4.0, phase: 0.0, length: n / r, fade_in: 0.0, fade_out: 0.0, gain: 1.0 };
+            let b = ClipSpec { start: cut, phase: n / r, length: 1.0, ..a };
+            let (mut player, mut feed) = player();
+            player.prepare(rate, 4096);
+            feed.publish(ClipSet::new(rate, vec![(a, audio.clone()), (b, audio)]));
+            let shared = TransportShared::default();
+            shared.set_tempo(tempo);
+            shared.play();
+            let mut clock = Transport::new(rate);
+            let (mut l, mut rr) = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+            let mut events = Events::with_capacity(4);
+            let mut out = Vec::new();
+            let frames = map.frame_of_beat(cut) as usize + rate as usize / 2;
+            let mut done = 0;
+            while done < frames {
+                let len = 512.min(frames - done);
+                clock.run(&shared, len, |ctx, off| {
+                    let (x, y) = (&mut l[off..off + ctx.frames], &mut rr[off..off + ctx.frames]);
+                    x.fill(0.0);
+                    y.fill(0.0);
+                    player.process(ctx, &mut events, Buffers { left: x, right: y });
+                });
+                out.extend_from_slice(&l[..len]);
+                done += len;
+            }
+            let from = (map.frame_of_beat(start) - EDGE_FRAMES).ceil() as usize + declick_frames(rate) + 1;
+            let at = (map.frame_of_beat(cut) - EDGE_FRAMES).ceil() as usize;
+            assert!(out[from..at + 1_000].iter().all(|&x| x == 1.0), "{rate} Hz, {tempo} BPM: a seam at the cut");
+        }
     }
 
     #[test]
