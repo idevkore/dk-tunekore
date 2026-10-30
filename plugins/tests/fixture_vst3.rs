@@ -135,3 +135,13 @@ fn loading_an_unknown_class_is_an_error() {
     info.class_id = "nope".into();
     assert!(matches!(vst3::load(&info), Err(PluginError::NotFound { .. })));
 }
+
+#[test]
+fn an_event_past_the_end_of_the_block_lands_on_its_last_frame() {
+    let mut c = load_fixture("Fixture Synth");
+    let mut p = c.activate(&setup()).unwrap();
+    let late = Event { offset: 10_000, kind: EventKind::NoteOn { channel: 0, key: 60, velocity: 0.5, note_id: 1 } };
+    let out = run(&mut *p, 0.0, &[late], &[]);
+    assert!(out[..FRAMES - 1].iter().all(|&x| x == 0.0));
+    assert_eq!(out[FRAMES - 1], 0.5);
+}

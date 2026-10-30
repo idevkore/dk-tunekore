@@ -482,13 +482,11 @@ pub struct Vst3Controller {
     default_layout: BusLayout,
     params: Vec<ParamInfo>,
     editor: Option<Editor>,
-    /// Whether the plugin has been activated: closing the editor and shutting down need to know.
-    activated: bool,
 }
 
 impl Vst3Controller {
     pub(crate) fn new(inst: Arc<Instance>) -> Vst3Controller {
-        let mut c = Vst3Controller { info: inst.info.clone(), default_layout: inst.read_layout(), params: Vec::new(), editor: None, activated: false, inst };
+        let mut c = Vst3Controller { info: inst.info.clone(), default_layout: inst.read_layout(), params: Vec::new(), editor: None, inst };
         c.refresh_params();
         c
     }
@@ -524,7 +522,6 @@ impl PluginController for Vst3Controller {
             return Err(PluginError::Failed("the setup needs a sample rate and a block size".into()));
         }
         let (layout, generation) = self.inst.start(setup)?;
-        self.activated = true;
         let (tx, rx) = rtrb::RingBuffer::new(EDIT_QUEUE);
         *self.inst.host.to_processor.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx);
         let mapping = self.inst.read_midi_mapping();
@@ -535,7 +532,6 @@ impl PluginController for Vst3Controller {
         // The running processor goes stale (and any block in progress finishes) first.
         self.inst.stop();
         *self.inst.host.to_processor.lock().unwrap_or_else(PoisonError::into_inner) = None;
-        self.activated = false;
     }
 
     fn latency_samples(&mut self) -> u32 {
@@ -742,6 +738,8 @@ pub struct Vst3Processor {
     generation: u64,
     layout: BusLayout,
     max_block: usize,
+    /// `kRealtime` or `kOffline`, as activated.
+    process_mode: i32,
     /// Edits from the plugin's editor, waiting to go into the next block.
     edits: rtrb::Consumer<ParamChange>,
     midi_map: Box<[u32]>,
@@ -786,6 +784,7 @@ impl Vst3Processor {
             inst,
             generation,
             max_block: setup.max_block_size as usize,
+            process_mode: if setup.realtime { sv::ProcessModes_::kRealtime } else { sv::ProcessModes_::kOffline } as i32,
             edits,
             midi_map,
             in_events,
@@ -855,8 +854,12 @@ impl Vst3Processor {
         while let Ok(edit) = self.edits.pop() {
             self.in_params.add(edit.id, 0, edit.value);
         }
+        // Offsets past the block would send the plugin outside its buffers: they land on the last
+        // frame instead.
+        let last = (frames - 1) as u32;
         for e in block.events {
-            if let Some(v) = events::to_vst3_event(e) {
+            let e = Event { offset: e.offset.min(last), ..*e };
+            if let Some(v) = events::to_vst3_event(&e) {
                 self.in_events.push(v);
             } else if let Some((ch, ctrl, value)) = midi_as_param(&e.kind) {
                 let id = self.midi_map[ch * MIDI_CONTROLLERS + ctrl];
@@ -866,13 +869,13 @@ impl Vst3Processor {
             }
         }
         for c in block.param_changes {
-            self.in_params.add(c.id, c.offset, c.value.clamp(0.0, 1.0));
+            self.in_params.add(c.id, c.offset.min(last), c.value.clamp(0.0, 1.0));
         }
 
         apply_transport(&mut self.context, block.transport);
 
         let mut data = sv::ProcessData {
-            processMode: sv::ProcessModes_::kRealtime as i32,
+            processMode: self.process_mode,
             symbolicSampleSize: sv::SymbolicSampleSizes_::kSample32 as i32,
             numSamples: frames as i32,
             numInputs: self.in_buses.len() as i32,
