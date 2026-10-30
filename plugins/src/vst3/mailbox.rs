@@ -72,8 +72,9 @@ impl ParamMailbox {
         }
     }
 
-    /// Takes every waiting value. The processor's side.
-    pub fn drain(&self, mut f: impl FnMut(u32, f64)) {
+    /// Takes waiting values, in slot order, while `f` accepts them (returns `true`). The value
+    /// `f` refuses, and every one after it, stays waiting. The processor's side.
+    pub fn drain(&self, mut f: impl FnMut(u32, f64) -> bool) {
         for (w, word) in self.dirty.iter().enumerate() {
             if word.load(Ordering::Relaxed) == 0 {
                 continue;
@@ -81,9 +82,13 @@ impl ParamMailbox {
             let mut bits = word.swap(0, Ordering::AcqRel);
             while bits != 0 {
                 let b = bits.trailing_zeros() as usize;
-                bits &= bits - 1;
                 let i = w * 64 + b;
-                f(self.ids[i].load(Ordering::Acquire), f64::from_bits(self.values[i].load(Ordering::Acquire)));
+                if !f(self.ids[i].load(Ordering::Acquire), f64::from_bits(self.values[i].load(Ordering::Acquire))) {
+                    // Put this one and the rest of the word back; later words were not touched.
+                    word.fetch_or(bits, Ordering::AcqRel);
+                    return;
+                }
+                bits &= bits - 1;
             }
         }
     }
@@ -105,7 +110,10 @@ mod tests {
 
     fn taken(m: &ParamMailbox) -> Vec<(u32, f64)> {
         let mut v = Vec::new();
-        m.drain(|id, x| v.push((id, x)));
+        m.drain(|id, x| {
+            v.push((id, x));
+            true
+        });
         v.sort_by_key(|p| p.0);
         v
     }
@@ -137,6 +145,22 @@ mod tests {
         let all = taken(&m);
         assert_eq!(all.len(), 64);
         assert!(all.contains(&(3, 0.7)));
+    }
+
+    #[test]
+    fn a_refused_value_and_the_rest_stay_waiting() {
+        let m = ParamMailbox::new(256);
+        for id in 0..200 {
+            m.post(id, 0.5);
+        }
+        let mut taken_now = 0;
+        m.drain(|_, _| {
+            taken_now += 1;
+            taken_now <= 150
+        });
+        assert!(m.pending());
+        assert_eq!(taken(&m).len(), 50, "everything not accepted is still there, once");
+        assert!(!m.pending());
     }
 
     #[test]

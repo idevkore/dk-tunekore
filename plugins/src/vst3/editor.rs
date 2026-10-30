@@ -49,6 +49,16 @@ impl Class for PlugFrame {
     type Interfaces = (sb::IPlugFrame,);
 }
 
+impl PlugFrame {
+    /// Forgets the host's callback. Done whenever the frame may outlive the host's window (closed
+    /// or leaked with its view): the callback typically holds that window's address, and a late
+    /// `resizeView` from the plugin must not reach it.
+    fn disconnect(&self) {
+        let mut cb = self.on_resize.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *cb = Box::new(|_| {});
+    }
+}
+
 impl IPlugFrameTrait for PlugFrame {
     unsafe fn resizeView(&self, view: *mut sb::IPlugView, new_size: *mut sb::ViewRect) -> sb::tresult {
         // SAFETY: in-pointer from the plugin (or null, handled).
@@ -80,7 +90,7 @@ fn rect_of(s: EditorSize) -> sb::ViewRect {
 /// An open editor: the view and the frame it calls back into.
 pub(crate) struct Editor {
     view: PlugPtr<sb::IPlugView>,
-    _frame: ComWrapper<PlugFrame>,
+    frame: ComWrapper<PlugFrame>,
 }
 
 fn create_view(c: &PlugPtr<sv::IEditController>) -> Result<Option<PlugPtr<sb::IPlugView>>, Exception> {
@@ -134,6 +144,9 @@ impl Editor {
         // since the view may still hold it).
         let throws = |during: &'static str, e: Exception, view: PlugPtr<sb::IPlugView>, frame: Option<ComWrapper<PlugFrame>>| {
             inst.note_exception(during, &e.0);
+            if let Some(f) = &frame {
+                f.disconnect();
+            }
             std::mem::forget(view);
             std::mem::forget(frame);
             inst.mark_leaked();
@@ -161,6 +174,7 @@ impl Editor {
             Ok(r) => {
                 // SAFETY: valid view; detach our frame again.
                 let _ = unsafe { view.set_frame(std::ptr::null_mut()) };
+                frame.disconnect();
                 return Err(PluginError::Failed(format!("the editor could not attach to its window (result {r})")));
             }
             Err(e) => return Err(throws("IPlugView::attached", e, view, Some(frame))),
@@ -172,13 +186,15 @@ impl Editor {
             Ok(sb::kResultOk) => rect_size(&after),
             _ => size,
         };
-        Ok((Editor { view, _frame: frame }, size))
+        Ok((Editor { view, frame: frame }, size))
     }
 
     /// Detaches the view. Returns `true` if it had to be leaked instead: off the main thread
     /// (AppKit), or when the plugin had failed (it is not called again). Its owner must then not
     /// terminate the plugin either, since the view's timers may still call into it.
     pub fn close(self, inst: &Instance) -> bool {
+        // Whatever happens next, the host's window is about to go.
+        self.frame.disconnect();
         if !on_main_thread() || inst.is_failed() {
             log::warn!("vst3 {}: leaking an editor that cannot be closed here", inst.info.name);
             std::mem::forget(self);
@@ -217,5 +233,31 @@ impl Editor {
         // SAFETY: as above.
         let _ = unsafe { self.view.on_size(&mut rect) };
         rect_size(&rect)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_disconnected_frame_no_longer_reaches_the_host() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let seen = calls.clone();
+        let frame = ComWrapper::new(PlugFrame { on_resize: Mutex::new(Box::new(move |s: EditorSize| {
+            assert_eq!((s.width, s.height), (640, 480));
+            seen.fetch_add(1, Ordering::Relaxed);
+        })) });
+        let mut r = sb::ViewRect { left: 0, top: 0, right: 640, bottom: 480 };
+        // SAFETY: the host calling its own COM method; a null view is allowed.
+        unsafe { frame.resizeView(std::ptr::null_mut(), &mut r) };
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        // As when the editor closes or is leaked: a late request from the plugin goes nowhere.
+        frame.disconnect();
+        // SAFETY: as above.
+        unsafe { frame.resizeView(std::ptr::null_mut(), &mut r) };
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
     }
 }

@@ -299,6 +299,11 @@ impl ParamChanges {
         Some((n, q))
     }
 
+    /// Whether a point for `id` would find a queue (its own, or a free one).
+    pub fn can_take(&self, id: u32) -> bool {
+        self.count.get() < self.queues.len() || self.queues.iter().take(self.count.get()).any(|q| q.id.get() == id)
+    }
+
     /// Host side: one point for `id` at `offset`, in time order (see [`ParamQueue::add`]).
     /// Returns whether it went in; anything lost is counted.
     pub fn add(&self, id: u32, offset: u32, value: f64) -> bool {

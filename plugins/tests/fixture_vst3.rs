@@ -219,3 +219,57 @@ fn buses_can_be_chosen_one_by_one() {
     assert!(!p.layout().audio_inputs[0].active && p.layout().audio_outputs[0].active);
     assert!(BusSelection::Only(vec![2, 5]).includes(5, 0) && !BusSelection::Only(vec![2, 5]).includes(0, 0));
 }
+
+#[test]
+fn loading_a_state_discards_values_set_before_it() {
+    let mut c = load_fixture("Fixture Gain");
+    let mut p = c.activate(&setup()).unwrap();
+    c.set_param(7, 0.75);
+    let _ = run(&mut *p, 0.0, &[], &[]);
+    let preset = c.save_state().unwrap();
+    // The user turns the knob while nothing processes, then loads the preset.
+    c.set_param(7, 0.1);
+    assert!(c.has_pending_params());
+    c.load_state(&preset).unwrap();
+    assert!(!c.has_pending_params(), "the old knob value was dropped");
+    assert_eq!(run(&mut *p, 0.5, &[], &[]), vec![0.75; FRAMES], "the processor plays the preset, not the old knob");
+    assert_eq!(c.param_value(7), Some(0.75));
+}
+
+#[test]
+fn a_plugin_with_no_audio_outputs_still_processes() {
+    // Fixture Thru with its audio outputs off: like a MIDI-only plugin, it only sends notes.
+    let mut c = load_fixture("Fixture Thru");
+    let midi_only = ProcessSetup { outputs: BusSelection::Only(vec![]), ..setup() };
+    let mut p = c.activate(&midi_only).unwrap();
+    assert_eq!(p.layout().output_channels(), 0);
+    let ins = vec![vec![0.5f32; FRAMES]; 2];
+    let mut table = ChannelTable::default();
+    let mut none: [Vec<f32>; 0] = [];
+    let (inputs, outputs) = table.audio(&ins, &mut none);
+    let note = [Event { offset: 3, kind: EventKind::NoteOn { channel: 0, key: 60, velocity: 0.5, note_id: 1 } }];
+    let t = Transport::default();
+    let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events: &note, param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    p.process(&mut block).unwrap();
+    assert_eq!(midi.as_slice(), &note, "the note came back out");
+    // The same through AudioOut::none().
+    let (inputs, _) = table.audio(&ins, &mut none);
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs: AudioOut::none(), events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    p.process(&mut block).unwrap();
+}
+
+#[test]
+fn more_waiting_values_than_parameter_queues_arrive_over_two_blocks() {
+    let mut c = load_fixture("Fixture Thru");
+    let mut p = c.activate(&setup()).unwrap();
+    // 300 values waiting; a block has queues for 256 parameters.
+    for id in 0..300u32 {
+        c.set_param(10_000 + id, 0.5);
+    }
+    let _ = run(&mut *p, 0.0, &[], &[]);
+    assert!(c.has_pending_params(), "the 44 that did not fit are still waiting");
+    let _ = run(&mut *p, 0.0, &[], &[]);
+    assert!(!c.has_pending_params());
+    assert_eq!(p.take_dropped().param_points, 0, "nothing was dropped on the way in");
+}

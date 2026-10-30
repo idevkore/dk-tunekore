@@ -802,6 +802,8 @@ impl PluginController for Vst3Controller {
         self.check_alive()?;
         let o = self.objs().ok_or_else(|| PluginError::Failed("the plugin is gone".into()))?;
         let (comp, ctrl) = split_state(data).ok_or_else(|| PluginError::Failed("not a plugin state".into()))?;
+        // Values set before the load must not reach the processor after it, over the loaded state.
+        self.inst.host.mailbox.drain(|_, _| true);
         let stream = MemoryStream::new(comp.to_vec());
         let s = stream.as_com_ref::<sb::IBStream>().ok_or_else(|| PluginError::Failed("no stream".into()))?;
         // SAFETY: valid component; the stream lives on this frame for the call.
@@ -1004,10 +1006,9 @@ impl Vst3Processor {
     /// The parameter changes for this block: values waiting in the mailbox (the UI, the editor)
     /// at its start, then MIDI controllers through the plugin's mapping, then the caller's.
     fn gather(&mut self, block: &ProcessBlock<'_>, last: u32) {
+        // Values that find no free queue this block stay waiting for the next one.
         let in_params = &self.in_params;
-        self.inst.host.mailbox.drain(|id, v| {
-            in_params.add(id, 0, v);
-        });
+        self.inst.host.mailbox.drain(|id, v| in_params.can_take(id) && in_params.add(id, 0, v));
         for e in block.events {
             let e = Event { offset: e.offset.min(last), ..*e };
             if let Some((ch, ctrl, value)) = midi_as_param(&e.kind) {
@@ -1031,7 +1032,7 @@ impl Vst3Processor {
         if frames > self.max_block
             || block.inputs.channels() != self.in_ptrs.len()
             || block.outputs.channels() != self.out_ptrs.len()
-            || (frames > 0 && (block.outputs.len() < frames || (!self.in_ptrs.is_empty() && block.inputs.len() < frames)))
+            || (frames > 0 && ((!self.out_ptrs.is_empty() && block.outputs.len() < frames) || (!self.in_ptrs.is_empty() && block.inputs.len() < frames)))
         {
             block.outputs.silence(frames);
             return Err(ProcessError::BadBlock);
