@@ -97,6 +97,9 @@ pub struct ProcessContext {
     pub bar_start: f64,
     pub looping: bool,
     pub loop_range: LoopRange,
+    /// Tempo and meter along the song, for turning beats into time: the
+    /// Timeline's audio clips find their place in their files through it.
+    pub map: TempoMap,
 }
 
 impl ProcessContext {
@@ -120,6 +123,7 @@ impl ProcessContext {
             bar_start: 0.0,
             looping: false,
             loop_range: LoopRange::default(),
+            map: TempoMap::constant(tempo, sig, sample_rate),
         }
     }
 
@@ -508,6 +512,7 @@ impl Transport {
                 bar_start,
                 looping,
                 loop_range: t.range,
+                map: t.map,
             }
         };
 
