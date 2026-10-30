@@ -125,17 +125,56 @@ fn a_second_scan_reuses_the_cache_and_a_rescan_does_not() {
 }
 
 #[test]
-fn a_plugin_that_timed_out_is_tried_again_every_scan() {
+fn a_plugin_that_timed_out_is_tried_a_few_more_times_then_blocklisted() {
     let dir = scratch_dir("scan-timeout-retry");
     let Some(_) = bad_plugin(&dir, "Hangs", Misbehaviour::HangsOnLoad) else { return eprintln!("skipped: no C++ compiler") };
-    let opts = options(&dir, &dir.join("cache.json"));
-    let first = scan::scan(&opts).unwrap();
-    assert_eq!(first.find("Hangs").unwrap().status, ScanStatus::TimedOut);
-    // It may only have been slow (a licence check on a busy Mac): the next scan tries again.
+    let opts = ScanOptions { timeout: Duration::from_secs(1), ..options(&dir, &dir.join("cache.json")) };
+    // It may only have been slow (a licence check on a busy Mac): the next scans try again...
+    for n in 1..=scan::TIMEOUT_RETRIES {
+        let t = Instant::now();
+        let c = scan::scan(&opts).unwrap();
+        assert!(t.elapsed() >= Duration::from_secs(1), "scan {n} probed it");
+        let e = c.find("Hangs").unwrap();
+        assert_eq!((e.status, e.timeouts), (ScanStatus::TimedOut, n));
+    }
+    // ...and after that it stays on the blocklist instead of costing every scan its timeout.
     let t = Instant::now();
-    let second = scan::scan(&opts).unwrap();
-    assert!(t.elapsed() >= Duration::from_secs(3), "probed again: {:?}", t.elapsed());
-    assert_eq!(second.find("Hangs").unwrap().status, ScanStatus::TimedOut);
+    let c = scan::scan(&opts).unwrap();
+    assert!(t.elapsed() < Duration::from_millis(900), "reused: {:?}", t.elapsed());
+    assert_eq!(c.find("Hangs").unwrap().timeouts, scan::TIMEOUT_RETRIES);
+    // Retrying failures on demand still tries it.
+    let c = scan::retry_failed(&opts).unwrap();
+    assert_eq!(c.find("Hangs").unwrap().timeouts, scan::TIMEOUT_RETRIES + 1);
+}
+
+#[test]
+fn only_the_scanner_that_wrote_the_probe_list_has_its_probes_killed() {
+    let dir = scratch_dir("probe-list");
+    let cache = dir.join("cache.json");
+    let spawn = || {
+        let mut c = std::process::Command::new("sleep");
+        c.arg("30");
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut c, 0);
+        c.spawn().unwrap()
+    };
+    let list = scan::runner::running_probes_path(&cache);
+    // A list left by a scanner that died: its ids may be other programs now.
+    let mut bystander = spawn();
+    std::fs::write(&list, format!("scanner 1\n{}\n", bystander.id())).unwrap();
+    scan::runner::kill_listed_probes(&cache, 2);
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(bystander.try_wait().unwrap().is_none(), "not ours: left alone");
+    // The list of the scanner that was just killed: its probes go too.
+    std::fs::write(&list, format!("scanner 2\n{}\n", bystander.id())).unwrap();
+    scan::runner::kill_listed_probes(&cache, 2);
+    let t = Instant::now();
+    while bystander.try_wait().unwrap().is_none() && t.elapsed() < Duration::from_secs(5) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(bystander.try_wait().unwrap().is_some(), "killed");
+    assert!(!list.exists());
+    let _ = bystander.kill();
 }
 
 #[test]

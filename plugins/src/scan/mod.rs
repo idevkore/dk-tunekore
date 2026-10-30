@@ -28,7 +28,7 @@ mod cache;
 pub mod probe;
 pub mod runner;
 
-pub use cache::{default_cache_path, ScanCache, ScanEntry, ScanStatus, CACHE_VERSION};
+pub use cache::{default_cache_path, ScanCache, ScanEntry, ScanStatus, CACHE_VERSION, TIMEOUT_RETRIES};
 pub use runner::ScanOptions;
 
 use std::path::PathBuf;
@@ -116,7 +116,7 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
                 let _ = child.kill();
                 let _ = child.wait();
                 // Its probes run in process groups of their own; it lists them for this.
-                runner::kill_listed_probes(&opts.cache_path);
+                runner::kill_listed_probes(&opts.cache_path, child.id());
                 return Err(ScanError::TimedOut(opts.total_timeout.as_secs()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),

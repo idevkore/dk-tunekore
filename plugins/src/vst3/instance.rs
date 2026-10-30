@@ -403,11 +403,18 @@ impl Instance {
     /// [`PROCESS_WAIT`].
     fn wait_for_process(&self) -> bool {
         let t = Instant::now();
+        let mut spins = 0u32;
         while self.in_process.load(Ordering::SeqCst) != 0 {
             if t.elapsed() >= PROCESS_WAIT {
                 return false;
             }
-            std::thread::yield_now();
+            // A block usually ends within microseconds; after that, sleep rather than spin.
+            if spins < 64 {
+                spins += 1;
+                std::thread::yield_now();
+            } else {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
         true
     }

@@ -136,3 +136,57 @@ fn a_plugin_that_throws_in_process_is_switched_off_without_allocating() {
     drop(p);
     drop(c); // leaks the plugin's objects instead of releasing them
 }
+
+/// One counted block through `p` with these events and changes; returns what it dropped.
+fn counted_block(p: &mut dyn Plugin, events: &[Event], changes: &[ParamChange]) -> Dropped {
+    let layout = p.layout().clone();
+    let ins = vec![vec![0.25f32; 256]; layout.input_channels()];
+    let mut outs = vec![vec![0.0f32; 256]; layout.output_channels()];
+    let mut table = ChannelTable::with_capacity(ins.len(), outs.len());
+    let (mut midi, mut params) = (OutBuf::with_capacity(16), OutBuf::with_capacity(16));
+    let t = Transport { playing: true, ..Transport::default() };
+    COUNTING.with(|f| f.set(true));
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
+    let mut b = ProcessBlock { frames: 256, inputs, outputs, events, param_changes: changes, transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let r = p.process(&mut b);
+    let dropped = p.take_dropped();
+    COUNTING.with(|f| f.set(false));
+    r.unwrap();
+    dropped
+}
+
+#[test]
+fn midi_through_the_plugins_mapping_allocates_nothing() {
+    // Fixture Synth maps CC 7 to a parameter (IMidiMapping). Its own allocations happen in its
+    // own library, with its own allocator, so only ours are counted.
+    let mut c = common::load_fixture("Fixture Synth");
+    let mut p = c.activate(&ProcessSetup { max_block_size: 256, ..ProcessSetup::default() }).unwrap();
+    let cc: Vec<Event> = (0..64u32).map(|i| Event { offset: i * 4, kind: EventKind::ControlChange { channel: 0, controller: 7, value: i as f32 / 64.0 } }).collect();
+    let bend = [Event { offset: 0, kind: EventKind::PitchBend { channel: 0, value: 0.5 } }, Event { offset: 1, kind: EventKind::ChannelPressure { channel: 0, pressure: 0.5 } }];
+    for _ in 0..100 {
+        counted_block(&mut *p, &cc, &[]);
+        counted_block(&mut *p, &bend, &[]);
+    }
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations inside process");
+}
+
+#[test]
+fn full_lists_drop_and_count_without_allocating() {
+    let mut c = common::load_fixture("Fixture Thru");
+    let mut p = c.activate(&ProcessSetup { max_block_size: 256, ..ProcessSetup::default() }).unwrap();
+    // More notes than the event list holds (and the plugin echoes them into its full output list),
+    let mut events: Vec<Event> = (0..1100u32).map(|i| Event { offset: i % 256, kind: EventKind::NoteOn { channel: 0, key: (i % 128) as u8, velocity: 0.5, note_id: i as i32 } }).collect();
+    events.extend((0..100u32).map(|i| Event { offset: 255, kind: EventKind::NoteOff { channel: 0, key: (i % 128) as u8, velocity: 0.0, note_id: i as i32 } }));
+    events.sort_by_key(|e| e.offset);
+    // more parameters than there are queues, more points on one than a queue holds,
+    let mut changes: Vec<ParamChange> = (0..300u32).map(|id| ParamChange { id, offset: 0, value: 0.5 }).collect();
+    changes.extend((0..40u32).map(|i| ParamChange { id: 7, offset: i * 6, value: f64::from(i) / 40.0 }));
+    changes.sort_by_key(|c| c.offset);
+    // and more waiting UI values than a block takes.
+    for id in 0..300u32 {
+        c.set_param(50_000 + id, 0.5);
+    }
+    let dropped = counted_block(&mut *p, &events, &changes);
+    assert!(dropped.events > 0 && dropped.param_points > 0, "{dropped:?}");
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations inside process");
+}

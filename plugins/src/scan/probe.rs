@@ -41,6 +41,7 @@ pub fn failed_entry(bundle: &Path, status: ScanStatus, error: String) -> ScanEnt
         status,
         error: Some(error),
         stamp: stamp(bundle),
+        timeouts: 0,
     }
 }
 
@@ -73,12 +74,13 @@ pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
                         status: ScanStatus::Ok,
                         error: None,
                         stamp: stamp.clone(),
+                        timeouts: 0,
                         info,
                     };
                     std::mem::forget(c);
                     entry
                 }
-                Err(e) => ScanEntry { buses: BusLayout::default(), params: 0, load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32, status: ScanStatus::Failed, error: Some(e.to_string()), stamp: stamp.clone(), info },
+                Err(e) => ScanEntry { buses: BusLayout::default(), params: 0, load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32, status: ScanStatus::Failed, error: Some(e.to_string()), stamp: stamp.clone(), timeouts: 0, info },
             }
         })
         .collect()

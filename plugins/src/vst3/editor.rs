@@ -186,7 +186,7 @@ impl Editor {
             Ok(sb::kResultOk) => rect_size(&after),
             _ => size,
         };
-        Ok((Editor { view, frame: frame }, size))
+        Ok((Editor { view, frame }, size))
     }
 
     /// Detaches the view. Returns `true` if it had to be leaked instead: off the main thread

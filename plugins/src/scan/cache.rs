@@ -7,6 +7,10 @@ use std::path::{Path, PathBuf};
 /// The cache format's version: a file with another number is ignored and scanned again.
 pub const CACHE_VERSION: u32 = 2;
 
+/// Scans in a row a plugin that timed out is tried again before it stays on the blocklist like
+/// any other failure (until its file changes, or a scan retries failures or rescans).
+pub const TIMEOUT_RETRIES: u32 = 3;
+
 /// How a plugin's probe went. Anything but `Ok` is a plugin the engine skips and the UI can show
 /// as failed, with [`ScanEntry::error`] saying why. A failed plugin is not probed again until
 /// its file changes or a scan asks to retry failures (`ScanOptions::retry_failed`, or a
@@ -43,6 +47,9 @@ pub struct ScanEntry {
     /// The bundle's binary at probe time (`<modified seconds>:<bytes>`); a changed stamp means
     /// the plugin was updated and must be probed again.
     pub stamp: String,
+    /// Scans in a row this plugin has timed out (0 unless `status` is `timed_out`).
+    #[serde(default)]
+    pub timeouts: u32,
 }
 
 impl ScanEntry {
@@ -144,6 +151,7 @@ mod tests {
             status: if error.is_some() { ScanStatus::TimedOut } else { ScanStatus::Ok },
             error: error.map(str::to_string),
             stamp: "1:2".into(),
+            timeouts: 0,
         }
     }
 

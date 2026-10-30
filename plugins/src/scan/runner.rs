@@ -6,7 +6,7 @@
 
 use super::bundles;
 use super::cache::ScanCache;
-use super::cache::{ScanEntry, ScanStatus};
+use super::cache::{ScanEntry, ScanStatus, TIMEOUT_RETRIES};
 use super::probe::{failed_entry, stamp};
 use std::collections::HashMap;
 use std::fs::File;
@@ -108,7 +108,7 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
     let found = bundles::find_bundles(&dirs);
 
     // Reuse what the cache already knows about bundles that have not changed, except plugins that
-    // timed out: those get another try every scan.
+    // timed out fewer than TIMEOUT_RETRIES scans in a row: those get another try.
     let mut cached: HashMap<PathBuf, Vec<ScanEntry>> = HashMap::new();
     if !opts.force
         && let Some(old) = ScanCache::read(&opts.cache_path)
@@ -124,7 +124,7 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
         match cached.remove(b) {
             Some(old)
                 if !now.is_empty()
-                    && old.iter().all(|e| e.stamp == now && e.status != ScanStatus::TimedOut)
+                    && old.iter().all(|e| e.stamp == now && (e.status != ScanStatus::TimedOut || e.timeouts >= TIMEOUT_RETRIES))
                     && !(opts.retry_failed && old.iter().any(|e| e.status != ScanStatus::Ok)) =>
             {
                 progress(&format!("{}: unchanged, {} plugin(s) from the cache", b.display(), old.len()));
@@ -141,6 +141,8 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
 
     let work = tempdir()?;
     let probes_file = running_probes_path(&opts.cache_path);
+    // Whatever an earlier scan that died left in the list is not ours: start it empty.
+    write_running(&probes_file, &[]);
     let next = AtomicUsize::new(0);
     let state = Mutex::new(state);
     let lock = || state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -171,8 +173,14 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
                     t.elapsed().as_millis()
                 ));
                 let mut g = lock();
-                g.previous.remove(bundle);
-                g.found.extend(found);
+                let before = g.previous.remove(bundle).unwrap_or_default();
+                let streak = before.iter().filter(|e| e.status == ScanStatus::TimedOut).map(|e| e.timeouts).max().unwrap_or(0);
+                g.found.extend(found.into_iter().map(|mut e| {
+                    if e.status == ScanStatus::TimedOut {
+                        e.timeouts = streak + 1;
+                    }
+                    e
+                }));
                 g.running.retain(|&p| !probe_pids_of(bundle, &work, i).contains(&p));
                 write_running(&probes_file, &g.running);
                 // Rewritten after every bundle, so a scan cut short keeps what it found.
@@ -196,18 +204,28 @@ fn probe_pids_of(_bundle: &Path, work: &Path, n: usize) -> Vec<u32> {
     std::fs::read_to_string(work.join(format!("{n}.pid"))).ok().and_then(|s| s.trim().parse().ok()).into_iter().collect()
 }
 
+/// Writes the list of running probes: `scanner <its pid>` on the first line, then one probe
+/// pid per line.
 fn write_running(path: &Path, pids: &[u32]) {
-    let text: String = pids.iter().map(|p| format!("{p}\n")).collect();
+    let mut text = format!("scanner {}\n", std::process::id());
+    for p in pids {
+        text.push_str(&format!("{p}\n"));
+    }
     let _ = std::fs::write(path, text);
 }
 
-/// Kills the probes a scanner listed as running (after killing the scanner itself).
-pub fn kill_listed_probes(cache: &Path) {
+/// Kills the probes that the scanner with process id `scanner` listed as running (after the
+/// scanner itself was killed). A list written by another scanner is left alone: its process ids
+/// may belong to other programs by now.
+pub fn kill_listed_probes(cache: &Path, scanner: u32) {
     let path = running_probes_path(cache);
-    if let Ok(text) = std::fs::read_to_string(&path) {
-        for pid in text.lines().filter_map(|l| l.trim().parse::<i32>().ok()) {
-            kill_pgid(pid);
-        }
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let mut lines = text.lines();
+    if lines.next().map(str::trim) != Some(format!("scanner {scanner}").as_str()) {
+        return;
+    }
+    for pid in lines.filter_map(|l| l.trim().parse::<i32>().ok()) {
+        kill_pgid(pid);
     }
     let _ = std::fs::remove_file(&path);
 }
