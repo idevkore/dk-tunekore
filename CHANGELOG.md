@@ -5,6 +5,30 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.14: the Timeline, with tracks and audio clips
+
+idevkore/dk-tunekore#36, PR #47
+
+- The Timeline (⌘2) shows the Sampler as its first track, with audio tracks
+  below it: each has a colour, a name, volume, pan, mute, solo, a meter and a
+  height you can drag. Tracks are now audio, instrument or the Sampler.
+- Drag samples from the Library or files from Finder onto a track, or below
+  the tracks to give each its own track, lined up. The Analyzer sends a stem,
+  or all four, to new tracks at bar 1, never overwriting an earlier send.
+- Move clips (⌥ copies), trim either edge, loop a clip by dragging the top of
+  its right edge, fade it in and out from its top corners, set its gain, split
+  at the playhead (⌘E), duplicate (⌘D) and delete (⌫). Edits snap to the grid
+  you pick; hold ⌘ (Ctrl on Windows and Linux) to ignore it.
+- Clips play in time with the Sampler, starting on the exact sample. Short
+  fades keep edits, seeks, loops and a clip's own loop point from clicking,
+  and a clip that's playing plays straight on through a tempo change.
+- The ruler moves the playhead and sets the loop. Zoom with ⌘-scroll, a pinch,
+  or = and -. Rename a track with F2 or Enter.
+- Undo and redo cover the Timeline's edits, and an undo only puts back the
+  faders that step changed. The project keeps the tracks, clips, loop and
+  view; track numbers are never reused; collecting samples copies the clips'
+  files too.
+
 ## 0.1.13: MIDI learn
 
 idevkore/dk-tunekore#20, PR #50
