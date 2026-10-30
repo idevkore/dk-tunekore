@@ -36,6 +36,16 @@ export interface PadSettings {
   cutoff: number;
   /** 0..1 */
   resonance: number;
+  /** Filter envelope: octaves -8..8 (0 off), then seconds, seconds, level 0..1, seconds. */
+  fenvAmount: number;
+  fenvAttack: number;
+  fenvDecay: number;
+  fenvSustain: number;
+  fenvRelease: number;
+  /** Velocity to cutoff, octaves -8..8 (positive: soft hits darker). */
+  velCutoff: number;
+  /** Velocity to amp attack and decay time, -1..1 (positive: soft hits shorter). */
+  velTime: number;
 }
 
 export interface PadView {

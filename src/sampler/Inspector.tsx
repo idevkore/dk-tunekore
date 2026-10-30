@@ -23,8 +23,11 @@ const fmtPan = (p: number) => (Math.abs(p) < 0.005 ? "C" : `${Math.round(Math.ab
 const fmtPitch = (st: number) => `${st > 0 ? "+" : ""}${st} st`;
 const fmtHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(hz >= 10000 ? 0 : 1)} kHz` : `${Math.round(hz)} Hz`);
 /** Whether the Shape tab differs from the defaults, to mark the tab. */
-const shaped = (s: PadSettings) => s.attack > 0 || s.decay > 0 || s.filter !== 0 || Math.abs(s.release - 0.004) > 0.0005;
+const shaped = (s: PadSettings) =>
+  s.attack > 0 || s.decay > 0 || s.filter !== 0 || Math.abs(s.release - 0.004) > 0.0005 || s.fenvAmount !== 0 || s.velCutoff !== 0 || s.velTime !== 0;
 const fmtTime = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFixed(2)} s`);
+const fmtOct = (o: number) => (Math.abs(o) < 0.05 ? "off" : `${o > 0 ? "+" : "−"}${Math.abs(o).toFixed(1)} oct`);
+const fmtPct = (v: number) => (Math.abs(v) < 0.005 ? "off" : `${v > 0 ? "+" : "−"}${Math.round(Math.abs(v) * 100)}%`);
 
 export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition, onChop, freePads }: Props) {
   // Local copy so sliders move smoothly; each change is sent as it happens.
@@ -110,10 +113,12 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
           </div>
           {tab === "shape" && (
             <div role="tabpanel" id="panel-shape" aria-labelledby="tab-shape" className="panel">
+              <h3 className="panel-sub">Amp</h3>
               <Curve label="Attack" value={s.attack} max={2} shown={fmtTime(s.attack)} onChange={(v) => change({ attack: v })} reset={0} />
               <Curve label="Decay" value={s.decay} max={5} shown={s.decay === 0 ? "off" : fmtTime(s.decay)} onChange={(v) => change({ decay: v })} reset={0} />
               <Slider label="Sustain" value={s.sustain} min={0} max={1} step={0.01} shown={`${Math.round(s.sustain * 100)}%`} onChange={(v) => change({ sustain: v })} reset={1} />
               <Curve label="Release" value={s.release} min={0.001} max={5} shown={fmtTime(s.release)} onChange={(v) => change({ release: v })} reset={0.004} />
+              <h3 className="panel-sub">Filter</h3>
               <div className="slider">
                 <span className="lbl">Filter</span>
                 <div className="seg mini" role="radiogroup" aria-label="Filter type">
@@ -128,7 +133,22 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
               </div>
               <Log label="Cutoff" value={s.cutoff} min={20} max={20000} shown={fmtHz(s.cutoff)} onChange={(v) => change({ cutoff: v })} disabled={s.filter === 0} reset={20000} />
               <Slider label="Reso" value={s.resonance} min={0} max={1} step={0.01} shown={`${Math.round(s.resonance * 100)}%`} onChange={(v) => change({ resonance: v })} reset={0} />
-              <p className="dim small hint">Decay falls to the sustain level while the sound plays; release is how long it fades when let go (gate pads). Double-click a label to reset it.</p>
+              <div className={`panel${s.filter === 0 ? " dimmed" : ""}`} title={s.filter === 0 ? "Turn the filter on to use its envelope" : undefined}>
+                <h3 className="panel-sub">Filter envelope</h3>
+                <Slider id="fenv-amount" label="Amount" value={s.fenvAmount} min={-8} max={8} step={0.1} shown={fmtOct(s.fenvAmount)} onChange={(v) => change({ fenvAmount: v })} reset={0} />
+                <Curve id="fenv-attack" label="Attack" value={s.fenvAttack} max={2} shown={fmtTime(s.fenvAttack)} onChange={(v) => change({ fenvAttack: v })} reset={0} />
+                <Curve id="fenv-decay" label="Decay" value={s.fenvDecay} max={5} shown={s.fenvDecay === 0 ? "off" : fmtTime(s.fenvDecay)} onChange={(v) => change({ fenvDecay: v })} reset={0.3} />
+                <Slider id="fenv-sustain" label="Sustain" value={s.fenvSustain} min={0} max={1} step={0.01} shown={`${Math.round(s.fenvSustain * 100)}%`} onChange={(v) => change({ fenvSustain: v })} reset={0} />
+                <Curve id="fenv-release" label="Release" value={s.fenvRelease} min={0.001} max={5} shown={fmtTime(s.fenvRelease)} onChange={(v) => change({ fenvRelease: v })} reset={0.1} />
+              </div>
+              <h3 className="panel-sub">Velocity</h3>
+              <div className={s.filter === 0 ? "dimmed" : ""}>
+                <Slider id="vel-cutoff" label="Cutoff" value={s.velCutoff} min={-8} max={8} step={0.1} shown={fmtOct(s.velCutoff)} onChange={(v) => change({ velCutoff: v })} reset={0} />
+              </div>
+              <Slider id="vel-time" label="Time" value={s.velTime} min={-1} max={1} step={0.01} shown={fmtPct(s.velTime)} onChange={(v) => change({ velTime: v })} reset={0} />
+              <p className="dim small hint">
+                Decay falls to the sustain level while the sound plays; release is how long it fades when let go (gate pads). The filter envelope moves the cutoff on every hit, up or down by its amount. Velocity Cutoff above zero makes soft hits darker; Time above zero makes their attack and decay shorter, below zero longer. Double-click a label to reset it.
+              </p>
             </div>
           )}
           {tab === "sample" && (
@@ -229,6 +249,8 @@ function Trim({ settings: s, peaks, onChange, onDone }: { settings: PadSettings;
 }
 
 interface SliderProps {
+  /** For the label's `for`; defaults to the label. Needed when two sliders share a label. */
+  id?: string;
   label: string;
   value: number;
   min: number;
@@ -240,8 +262,8 @@ interface SliderProps {
   reset?: number;
 }
 
-function Slider({ label, value, min, max, step, shown, onChange, reset }: SliderProps) {
-  const id = `s-${label.toLowerCase()}`;
+function Slider({ id: given, label, value, min, max, step, shown, onChange, reset }: SliderProps) {
+  const id = `s-${given ?? label.toLowerCase()}`;
   return (
     <div className="slider">
       <label htmlFor={id} onDoubleClick={() => reset !== undefined && onChange(reset)} title={reset !== undefined ? "Double-click to reset" : undefined}>
@@ -256,10 +278,10 @@ function Slider({ label, value, min, max, step, shown, onChange, reset }: Slider
 }
 
 /** A time slider with a squared scale, so short times get most of the travel. */
-function Curve({ label, value, min = 0, max, shown, onChange, reset }: { label: string; value: number; min?: number; max: number; shown: string; onChange: (v: number) => void; reset?: number }) {
+function Curve({ id, label, value, min = 0, max, shown, onChange, reset }: { id?: string; label: string; value: number; min?: number; max: number; shown: string; onChange: (v: number) => void; reset?: number }) {
   const pos = Math.sqrt(Math.max(0, (value - min) / (max - min)));
   return (
-    <Slider label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min + p * p * (max - min))} reset={reset === undefined ? undefined : Math.sqrt(Math.max(0, (reset - min) / (max - min)))} />
+    <Slider id={id} label={label} value={pos} min={0} max={1} step={0.001} shown={shown} onChange={(p) => onChange(min + p * p * (max - min))} reset={reset === undefined ? undefined : Math.sqrt(Math.max(0, (reset - min) / (max - min)))} />
   );
 }
 

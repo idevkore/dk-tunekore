@@ -48,6 +48,12 @@ pub const FILTER_OFF: u8 = 0;
 pub const FILTER_LOW_PASS: u8 = 1;
 pub const FILTER_HIGH_PASS: u8 = 2;
 pub const FILTER_BAND_PASS: u8 = 3;
+/// How far the filter envelope and velocity can move the cutoff, in octaves either way.
+const FENV_OCTAVES: f32 = 8.0;
+/// While a filter envelope moves the cutoff, the filter is retuned this often, in frames.
+const FENV_TICK: u32 = 16;
+/// Velocity to envelope time at full amount: a hit at velocity 0 is this many times shorter.
+const VEL_TIME_SPAN: f64 = 4.0;
 const NO_STEP: u32 = u32::MAX;
 /// The song position when no song is playing.
 const NO_POS: u32 = u32::MAX;
@@ -122,6 +128,23 @@ pub struct PadParams {
     pub cutoff: f32,
     /// Filter resonance, 0..1.
     pub resonance: f32,
+    /// Filter envelope: moves the cutoff by `fenv_amount` octaves (-8..8, 0 is
+    /// off) times the envelope's level on every hit. Its attack (0..2 s), decay
+    /// (0..5 s, 0 holds at full), sustain (0..1) and release (0..5 s) work like
+    /// the amp envelope's. Does nothing while the filter is off.
+    pub fenv_amount: f32,
+    pub fenv_attack: f32,
+    pub fenv_decay: f32,
+    pub fenv_sustain: f32,
+    pub fenv_release: f32,
+    /// Velocity to cutoff, in octaves, -8..8. A hit at velocity `v` moves the
+    /// cutoff by `vel_cutoff * (v - 1)` octaves: with a positive amount a soft
+    /// hit is darker, and a full hit sounds as set.
+    pub vel_cutoff: f32,
+    /// Velocity to envelope time, -1..1. A hit at velocity `v` scales the amp
+    /// envelope's attack and decay by `4^(vel_time * (v - 1))`: positive makes
+    /// soft hits shorter (a quarter at velocity 0), negative makes them longer.
+    pub vel_time: f32,
 }
 
 impl Default for PadParams {
@@ -143,6 +166,13 @@ impl Default for PadParams {
             filter: FILTER_OFF,
             cutoff: CUTOFF_MAX,
             resonance: 0.0,
+            fenv_amount: 0.0,
+            fenv_attack: 0.0,
+            fenv_decay: 0.3,
+            fenv_sustain: 0.0,
+            fenv_release: 0.1,
+            vel_cutoff: 0.0,
+            vel_time: 0.0,
         }
     }
 }
@@ -178,6 +208,14 @@ struct PadCtl {
     resonance: AtomicU32, // f32 bits
     /// Velocity of the next hit, 0..1 as f32 bits. Written before `hits` is bumped.
     hit_vel: AtomicU32,
+    // Filter envelope and velocity, kept after the fields above. All f32 bits.
+    fenv_amount: AtomicU32,
+    fenv_attack: AtomicU32,
+    fenv_decay: AtomicU32,
+    fenv_sustain: AtomicU32,
+    fenv_release: AtomicU32,
+    vel_cutoff: AtomicU32,
+    vel_time: AtomicU32,
 }
 
 impl Default for PadCtl {
@@ -202,6 +240,13 @@ impl Default for PadCtl {
             cutoff: AtomicU32::new(p.cutoff.to_bits()),
             resonance: AtomicU32::new(p.resonance.to_bits()),
             hit_vel: AtomicU32::new(1.0f32.to_bits()),
+            fenv_amount: AtomicU32::new(p.fenv_amount.to_bits()),
+            fenv_attack: AtomicU32::new(p.fenv_attack.to_bits()),
+            fenv_decay: AtomicU32::new(p.fenv_decay.to_bits()),
+            fenv_sustain: AtomicU32::new(p.fenv_sustain.to_bits()),
+            fenv_release: AtomicU32::new(p.fenv_release.to_bits()),
+            vel_cutoff: AtomicU32::new(p.vel_cutoff.to_bits()),
+            vel_time: AtomicU32::new(p.vel_time.to_bits()),
         }
     }
 }
@@ -227,6 +272,13 @@ impl PadCtl {
             filter: self.filter.load(Ordering::Relaxed),
             cutoff: f(&self.cutoff),
             resonance: f(&self.resonance),
+            fenv_amount: f(&self.fenv_amount),
+            fenv_attack: f(&self.fenv_attack),
+            fenv_decay: f(&self.fenv_decay),
+            fenv_sustain: f(&self.fenv_sustain),
+            fenv_release: f(&self.fenv_release),
+            vel_cutoff: f(&self.vel_cutoff),
+            vel_time: f(&self.vel_time),
         }
     }
 }
@@ -392,6 +444,14 @@ impl SamplerShared {
         c.filter.store(p.filter.min(FILTER_BAND_PASS), Ordering::Relaxed);
         c.cutoff.store(sane(p.cutoff, CUTOFF_MIN, CUTOFF_MAX, d.cutoff).to_bits(), Ordering::Relaxed);
         c.resonance.store(sane(p.resonance, 0.0, 1.0, d.resonance).to_bits(), Ordering::Relaxed);
+        let octaves = FENV_OCTAVES;
+        c.fenv_amount.store(sane(p.fenv_amount, -octaves, octaves, d.fenv_amount).to_bits(), Ordering::Relaxed);
+        c.fenv_attack.store(sane(p.fenv_attack, 0.0, 2.0, d.fenv_attack).to_bits(), Ordering::Relaxed);
+        c.fenv_decay.store(sane(p.fenv_decay, 0.0, 5.0, d.fenv_decay).to_bits(), Ordering::Relaxed);
+        c.fenv_sustain.store(sane(p.fenv_sustain, 0.0, 1.0, d.fenv_sustain).to_bits(), Ordering::Relaxed);
+        c.fenv_release.store(sane(p.fenv_release, 0.0, 5.0, d.fenv_release).to_bits(), Ordering::Relaxed);
+        c.vel_cutoff.store(sane(p.vel_cutoff, -octaves, octaves, d.vel_cutoff).to_bits(), Ordering::Relaxed);
+        c.vel_time.store(sane(p.vel_time, -1.0, 1.0, d.vel_time).to_bits(), Ordering::Relaxed);
     }
 
     pub fn pad(&self, slot: usize) -> PadParams {
@@ -779,6 +839,76 @@ impl VoiceFilter {
     }
 }
 
+/// Where a voice's filter envelope is.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+enum FenvStage {
+    Attack,
+    Decay,
+    #[default]
+    Hold,
+    Release,
+}
+
+/// A voice's filter envelope: a level, 0..1, that moves the cutoff. Linear
+/// attack and release, exponential decay, like the amp envelope.
+#[derive(Debug, Clone, Copy, Default)]
+struct FilterEnv {
+    level: f32,
+    stage: FenvStage,
+    atk_inc: f32,
+    dec_coef: f32,
+    sustain: f32,
+    rel_full: f32,
+    rel_step: f32,
+}
+
+impl FilterEnv {
+    fn new(p: &PadParams, rate: f64) -> Self {
+        let attack = f64::from(p.fenv_attack.max(0.0));
+        let decay = f64::from(p.fenv_decay.max(0.0));
+        let release = f64::from(p.fenv_release).max(MIN_RELEASE_SECONDS);
+        Self {
+            level: 0.0,
+            stage: FenvStage::Attack,
+            atk_inc: if attack > 0.0 { (1.0 / (rate * attack)).min(1.0) as f32 } else { 1.0 },
+            dec_coef: if decay > 0.0 { (0.001f64.powf(1.0 / (rate * decay)) as f32).max(1.0e-20) } else { 0.0 },
+            sustain: p.fenv_sustain.clamp(0.0, 1.0),
+            rel_full: (1.0 / (rate * release)).min(1.0) as f32,
+            rel_step: 0.0,
+        }
+    }
+
+    /// Starts the release from the level it is at, so it lasts `release` seconds.
+    fn release(&mut self) {
+        if self.stage != FenvStage::Release {
+            self.rel_step = self.level * self.rel_full;
+            self.stage = FenvStage::Release;
+        }
+    }
+
+    /// One frame on.
+    #[inline]
+    fn tick(&mut self) {
+        match self.stage {
+            FenvStage::Attack => {
+                self.level = (self.level + self.atk_inc).min(1.0);
+                if self.level >= 1.0 {
+                    self.stage = if self.dec_coef > 0.0 { FenvStage::Decay } else { FenvStage::Hold };
+                }
+            }
+            FenvStage::Decay => {
+                self.level = self.sustain + (self.level - self.sustain) * self.dec_coef;
+                if (self.level - self.sustain).abs() < DECAY_SNAP {
+                    self.level = self.sustain;
+                    self.stage = FenvStage::Hold;
+                }
+            }
+            FenvStage::Hold => {}
+            FenvStage::Release => self.level = (self.level - self.rel_step).max(0.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Voice {
     active: bool,
@@ -808,9 +938,27 @@ struct Voice {
     /// Released by a cut, choke or retrigger, so on the 4 ms fade.
     fast: bool,
     filter: VoiceFilter,
+    // Filter envelope and velocity, kept after the fields above.
+    fenv: FilterEnv,
+    /// The pad's cutoff (Hz), resonance and filter envelope amount (octaves),
+    /// read once per block so the knobs work while the voice rings.
+    cutoff: f32,
+    resonance: f32,
+    fenv_amount: f32,
+    /// The hit's velocity, 0..1, and how far it moves the cutoff, in octaves.
+    vel: f32,
+    vel_octaves: f32,
+    /// Frames until the envelope retunes the filter.
+    retune_in: u32,
 }
 
 impl Voice {
+    /// Tunes the filter to the pad's cutoff, moved by velocity and the filter envelope.
+    fn tune_filter(&mut self, mode: u8, rate: f64) {
+        let octaves = self.vel_octaves + self.fenv_amount * self.fenv.level;
+        self.filter.tune(mode, self.cutoff * octaves.exp2(), self.resonance, rate);
+    }
+
     /// Starts the release. `fast` is the step of a cut (4 ms from full level,
     /// whatever the pad's release is); `None` is the pad's own release, timed
     /// from the level the voice is at, so it lasts `release` seconds.
@@ -819,6 +967,7 @@ impl Voice {
         self.rel_step = if self.releasing { self.rel_step.max(step) } else { step };
         self.releasing = true;
         self.fast |= fast.is_some();
+        self.fenv.release();
     }
 }
 
@@ -846,6 +995,13 @@ impl Default for Voice {
             rel_step: 0.0,
             fast: false,
             filter: VoiceFilter::default(),
+            fenv: FilterEnv::default(),
+            cutoff: CUTOFF_MAX,
+            resonance: 0.0,
+            fenv_amount: 0.0,
+            vel: 1.0,
+            vel_octaves: 0.0,
+            retune_in: 0,
         }
     }
 }
@@ -1309,7 +1465,11 @@ impl Sampler {
                 v.filter.reset(); // switched on while ringing: start from silence
             }
             let f = |a: &AtomicU32| f32::from_bits(a.load(Ordering::Relaxed));
-            v.filter.tune(mode, f(&c.cutoff), f(&c.resonance), self.rate);
+            v.cutoff = f(&c.cutoff);
+            v.resonance = f(&c.resonance);
+            v.fenv_amount = f(&c.fenv_amount);
+            v.vel_octaves = f(&c.vel_cutoff) * (v.vel - 1.0);
+            v.tune_filter(mode, self.rate);
         }
     }
 
@@ -1340,18 +1500,18 @@ impl Sampler {
         };
         self.clock += 1;
         let rate = self.rate;
-        let attack_secs = ATTACK_SECONDS.max(f64::from(p.attack));
+        // Velocity to envelope time: soft hits shorter (or longer), full hits as set.
+        let time = VEL_TIME_SPAN.powf(f64::from(p.vel_time) * f64::from(vel - 1.0));
+        let attack_secs = ATTACK_SECONDS.max(f64::from(p.attack) * time);
         let release_secs = f64::from(p.release).max(MIN_RELEASE_SECONDS);
         // The default (0.004 as an f32) is the 4 ms fade exactly, as before.
         let release_secs = if (release_secs - RELEASE_SECONDS).abs() < 1e-6 { RELEASE_SECONDS } else { release_secs };
         let dec_coef = if p.decay > 0.0 {
             // Exponential, `decay` seconds to fall 60 dB of the way to sustain.
-            (0.001f64.powf(1.0 / (rate * f64::from(p.decay))) as f32).max(1.0e-20)
+            (0.001f64.powf(1.0 / (rate * f64::from(p.decay) * time)) as f32).max(1.0e-20)
         } else {
             0.0
         };
-        let mut filter = VoiceFilter::default();
-        filter.tune(p.filter, p.cutoff, p.resonance, rate);
         self.voices[i] = Voice {
             active: true,
             slot,
@@ -1374,8 +1534,16 @@ impl Sampler {
             rel_full: (1.0 / (rate * release_secs)).min(1.0) as f32,
             rel_step: 0.0,
             fast: false,
-            filter,
+            filter: VoiceFilter::default(),
+            fenv: FilterEnv::new(&p, rate),
+            cutoff: p.cutoff,
+            resonance: p.resonance,
+            fenv_amount: p.fenv_amount,
+            vel,
+            vel_octaves: p.vel_cutoff * (vel - 1.0),
+            retune_in: 0,
         };
+        self.voices[i].tune_filter(p.filter, rate);
         shared.pads[slot].played.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -1387,6 +1555,7 @@ impl Sampler {
     }
 
     fn mix_frame(&mut self, shared: &SamplerShared) -> (f32, f32) {
+        let rate = self.rate;
         let mut left = 0.0f32;
         let mut right = 0.0f32;
         for v in self.voices.iter_mut().filter(|v| v.active) {
@@ -1447,6 +1616,15 @@ impl Sampler {
             let read = |c: &[f32]| c[i] + (c[j] - c[i]) * frac;
             let mut l = read(&sample[0]);
             let mut r = if sample.len() > 1 { read(&sample[1]) } else { l };
+            v.fenv.tick();
+            if v.filter.mode != FILTER_OFF && v.fenv_amount != 0.0 {
+                // The envelope moves the cutoff: retune every few frames, not every one.
+                if v.retune_in == 0 {
+                    v.retune_in = FENV_TICK;
+                    v.tune_filter(v.filter.mode, rate);
+                }
+                v.retune_in -= 1;
+            }
             if v.filter.mode != FILTER_OFF {
                 l = v.filter.process(0, l);
                 r = v.filter.process(1, r);
@@ -2236,6 +2414,114 @@ mod tests {
         shared.trigger(0);
         let b = run(&mut s, &shared, 2_000);
         assert_eq!(a, b, "the same hit sounds the same twice");
+    }
+
+    /// The left channel of one hit at `vel`, divided by `vel` so hits compare by tone.
+    fn hit(p: &PadParams, sample: Track, vel: f32, frames: usize) -> Vec<f32> {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sample));
+        shared.trigger_velocity(0, vel);
+        run(&mut s, &shared, frames).chunks(2).map(|f| f[0] / vel).collect()
+    }
+
+    #[test]
+    fn the_filter_envelope_sweeps_the_cutoff_down() {
+        // 200 Hz, opened 6 octaves (12.8 kHz) on the hit, closing over half a second.
+        let p = PadParams { fenv_amount: 6.0, fenv_attack: 0.0, fenv_decay: 0.5, fenv_sustain: 0.0, ..lp(200.0, 0.0) };
+        let out = play(&p, sine(4_000.0, 96_000), 48_000);
+        let early = rms(&out[100..300]);
+        let late = rms(&out[24_000..]);
+        assert!(early > 0.4, "open on the hit: {early}");
+        assert!(late < 0.01, "closed after the decay: {late}");
+        let flat = play(&lp(200.0, 0.0), sine(4_000.0, 96_000), 48_000);
+        assert!(rms(&flat[100..300]) < 0.1, "with no amount it stays closed");
+    }
+
+    #[test]
+    fn a_negative_amount_closes_the_filter_on_the_hit() {
+        // 8 kHz pulled down 6 octaves, to 125 Hz, and held there (no decay).
+        let p = PadParams { fenv_amount: -6.0, fenv_decay: 0.0, ..lp(8_000.0, 0.0) };
+        let out = play(&p, sine(2_000.0, 48_000), 24_000);
+        assert!(rms(&out[4_000..]) < 0.02, "{}", rms(&out[4_000..]));
+        assert!(through(&lp(8_000.0, 0.0), 2_000.0) > 0.6);
+    }
+
+    #[test]
+    fn the_filter_envelope_attack_opens_the_filter() {
+        let p = PadParams { fenv_amount: 7.0, fenv_attack: 0.5, fenv_decay: 0.0, ..lp(100.0, 0.0) };
+        let out = play(&p, sine(4_000.0, 96_000), 48_000);
+        assert!(rms(&out[1_000..3_000]) < 0.05, "still closed: {}", rms(&out[1_000..3_000]));
+        assert!(rms(&out[30_000..]) > 0.6, "open after the attack: {}", rms(&out[30_000..]));
+    }
+
+    #[test]
+    fn the_filter_envelope_releases_with_the_pad() {
+        // Held open; once let go the cutoff falls back in 50 ms while the long amp release still sounds.
+        let shared = SamplerShared::default();
+        let p = PadParams { gate: true, release: 2.0, fenv_amount: 6.0, fenv_decay: 0.0, fenv_release: 0.05, ..lp(200.0, 0.0) };
+        shared.set_pad(0, &p);
+        let mut s = Sampler::offline(RATE);
+        s.set_sample(0, Some(sine(4_000.0, 96_000)));
+        shared.trigger(0);
+        let held: Vec<f32> = run(&mut s, &shared, 4_800).chunks(2).map(|f| f[0]).collect();
+        shared.release(0);
+        let after: Vec<f32> = run(&mut s, &shared, 9_600).chunks(2).map(|f| f[0]).collect();
+        assert!(rms(&held[1_000..]) > 0.6, "open while held: {}", rms(&held[1_000..]));
+        assert!(rms(&after[3_600..]) < 0.01, "closed after the release: {}", rms(&after[3_600..]));
+    }
+
+    #[test]
+    fn the_filter_envelope_needs_the_filter_on() {
+        let p = PadParams { fenv_amount: 6.0, vel_cutoff: 6.0, ..Default::default() };
+        assert_eq!(play(&p, sine(4_000.0, 9_600), 4_800), play(&PadParams::default(), sine(4_000.0, 9_600), 4_800));
+    }
+
+    #[test]
+    fn velocity_to_cutoff_makes_a_soft_hit_darker() {
+        // 8 kHz; a quarter-velocity hit is 4.5 octaves lower, about 350 Hz.
+        let p = PadParams { vel_cutoff: 6.0, ..lp(8_000.0, 0.0) };
+        let hard = hit(&p, sine(2_000.0, 48_000), 1.0, 24_000);
+        let soft = hit(&p, sine(2_000.0, 48_000), 0.25, 24_000);
+        assert!(rms(&hard[8_000..]) > 0.6, "a full hit sounds as set: {}", rms(&hard[8_000..]));
+        assert!(rms(&soft[8_000..]) < 0.1, "a soft hit is darker: {}", rms(&soft[8_000..]));
+        let plain = hit(&lp(8_000.0, 0.0), sine(2_000.0, 48_000), 0.25, 24_000);
+        assert!((rms(&plain[8_000..]) - rms(&hard[8_000..])).abs() < 0.01, "with no amount velocity is only level");
+    }
+
+    #[test]
+    fn velocity_to_time_shortens_or_lengthens_a_soft_hit() {
+        let p = PadParams { decay: 0.2, sustain: 0.0, vel_time: 1.0, ..Default::default() };
+        let hard = hit(&p, dc(48_000, 0.5), 1.0, 9_600);
+        let soft = hit(&p, dc(48_000, 0.5), 0.25, 9_600);
+        // 0.1 s in, a full hit has fallen 30 dB; a soft one, with a decay about a third as long, far more.
+        assert!((hard[4_800] - 0.5 * 0.001f32.powf(0.5)).abs() < 0.002, "a full hit is as set: {}", hard[4_800]);
+        assert!(soft[4_800] < hard[4_800] * 0.05, "shorter: {} vs {}", soft[4_800], hard[4_800]);
+        let long = hit(&PadParams { vel_time: -1.0, ..p }, dc(48_000, 0.5), 0.25, 9_600);
+        assert!(long[4_800] > hard[4_800] * 5.0, "longer: {} vs {}", long[4_800], hard[4_800]);
+    }
+
+    #[test]
+    fn filter_envelope_and_velocity_settings_stay_in_range() {
+        let shared = SamplerShared::default();
+        shared.set_pad(0, &PadParams {
+            fenv_amount: 20.0,
+            fenv_attack: -1.0,
+            fenv_decay: 9.0,
+            fenv_sustain: 2.0,
+            fenv_release: f32::NAN,
+            vel_cutoff: -20.0,
+            vel_time: 3.0,
+            ..Default::default()
+        });
+        let p = shared.pad(0);
+        assert_eq!(
+            (p.fenv_amount, p.fenv_attack, p.fenv_decay, p.fenv_sustain, p.fenv_release, p.vel_cutoff, p.vel_time),
+            (8.0, 0.0, 5.0, 1.0, 0.1, -8.0, 1.0)
+        );
+        let d = PadParams::default();
+        assert_eq!((d.fenv_amount, d.vel_cutoff, d.vel_time), (0.0, 0.0, 0.0), "off by default");
     }
 
     #[test]
