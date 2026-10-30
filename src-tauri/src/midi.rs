@@ -160,6 +160,41 @@ fn connect(id: &str, name: &str, pads: SamplerHandle, state: Arc<MidiState>) -> 
         .map_err(|e| e.to_string())
 }
 
+/// Waits `d` between scans. On macOS it runs this thread's run loop
+/// meanwhile: CoreMIDI updates a process's list of devices only through the
+/// run loop of the thread that made the process's first client (this one,
+/// the scan's), so with a plain sleep a controller plugged in after launch
+/// never shows up, however many new clients look.
+#[cfg(target_os = "macos")]
+fn wait_for_devices(d: Duration) {
+    use std::ffi::c_void;
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        static kCFRunLoopDefaultMode: *const c_void;
+        fn CFRunLoopRunInMode(mode: *const c_void, seconds: f64, return_after_source_handled: u8) -> i32;
+    }
+    /// What `CFRunLoopRunInMode` returns when the run loop has nothing to run.
+    const FINISHED: i32 = 1;
+    let end = Instant::now() + d;
+    loop {
+        let left = end.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        // SAFETY: runs this thread's own run loop in the default mode, a
+        // constant CoreFoundation exports; nothing is passed in or kept.
+        if unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, left.as_secs_f64(), 0) } == FINISHED {
+            std::thread::sleep(left);
+            break;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn wait_for_devices(d: Duration) {
+    std::thread::sleep(d);
+}
+
 /// Connects to every input now and every two seconds after, and sends
 /// `midi:activity` (the pad's index) at most 30 times a second.
 pub fn spawn(app: AppHandle, pads: SamplerHandle, state: Arc<MidiState>) {
@@ -190,7 +225,7 @@ pub fn spawn(app: AppHandle, pads: SamplerHandle, state: Arc<MidiState>) {
                     eprintln!("no MIDI: {e}");
                 }
             }
-            std::thread::sleep(SCAN_EVERY);
+            wait_for_devices(SCAN_EVERY);
         }
     });
     std::thread::spawn(move || loop {
