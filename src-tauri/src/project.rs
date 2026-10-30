@@ -41,7 +41,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tauri::{AppHandle, Manager};
-use tunekore_engine::{track::TRACK_SLOTS, TrackId, TrackMix, TransportShared, SAMPLER_TRACK};
+use tunekore_engine::{track::TRACK_SLOTS, TrackId, TrackKind, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::Audio;
 
@@ -146,6 +146,17 @@ impl<C: 'static> Project<C> {
 
     fn sections(&self) -> Vec<Arc<dyn Section<C>>> {
         lock(&self.sections).clone()
+    }
+
+    /// Runs `f` while no open, new, save or autosave runs, and keeps them
+    /// waiting until it returns: for a module's background work on its own
+    /// document that mustn't land in the middle of one (the Timeline's players
+    /// fed again after the output's rate changes). Lock order: this (`busy`),
+    /// then the module's document, then the engine. `f` must not open, save or
+    /// start a project, nor call `exclusive` again: `busy` is held already.
+    pub fn exclusive<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _busy = lock(&self.busy);
+        f()
     }
 
     /// The project's file, or `None` before it is first saved.
@@ -326,7 +337,7 @@ fn from_v1(mut obj: Map<String, Value>) -> Map<String, Value> {
     let tempo = obj.remove("tempo").unwrap_or(json!(120.0));
     let mut v2 = Map::new();
     v2.insert("transport".into(), json!({ "tempo": tempo, "timeSignature": [4, 4] }));
-    v2.insert("tracks".into(), json!([TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default() }]));
+    v2.insert("tracks".into(), json!([TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }]));
     v2.insert("sampler".into(), Value::Object(obj));
     v2
 }
@@ -417,6 +428,26 @@ struct TrackFile {
     name: String,
     #[serde(default)]
     mix: TrackMix,
+    /// Left out when it is the default: the Sampler's for track 1, audio for
+    /// the rest (as every version 2 file before kinds were saved).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<TrackKind>,
+}
+
+impl TrackFile {
+    /// The kind it names, or its default. Only track 1 is the Sampler's.
+    fn kind(&self) -> TrackKind {
+        match (self.id == SAMPLER_TRACK, self.kind) {
+            (true, _) => TrackKind::Sampler,
+            (false, Some(TrackKind::Sampler) | None) => TrackKind::Audio,
+            (false, Some(k)) => k,
+        }
+    }
+}
+
+/// What a track's kind is when the file doesn't say.
+fn default_kind(id: TrackId) -> TrackKind {
+    if id == SAMPLER_TRACK { TrackKind::Sampler } else { TrackKind::Audio }
 }
 
 /// Sets the engine's track list to `tracks`: the Sampler's track always
@@ -430,6 +461,7 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String
     if tracks.iter().all(|f| f.id != SAMPLER_TRACK) {
         mixer.set_mix(SAMPLER_TRACK, TrackMix::default())?;
         mixer.rename(SAMPLER_TRACK, "Sampler")?;
+        mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler)?;
     }
     for f in tracks {
         if mixer.track(f.id).is_none() {
@@ -437,6 +469,7 @@ fn apply_tracks(audio: &Mutex<Audio>, tracks: &[TrackFile]) -> Result<(), String
         }
         mixer.rename(f.id, &f.name)?;
         mixer.set_mix(f.id, f.mix)?;
+        mixer.set_kind(f.id, f.kind())?;
     }
     Ok(())
 }
@@ -447,8 +480,15 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn save(&self, _: &C, _: &Path) -> Result<Value, String> {
-        let tracks: Vec<TrackFile> =
-            self.audio.lock().unwrap().engine.tracks().into_iter().map(|t| TrackFile { id: t.id, name: t.name, mix: t.mix }).collect();
+        let tracks: Vec<TrackFile> = self
+            .audio
+            .lock()
+            .unwrap()
+            .engine
+            .tracks()
+            .into_iter()
+            .map(|t| TrackFile { kind: (t.kind != default_kind(t.id)).then_some(t.kind), id: t.id, name: t.name, mix: t.mix })
+            .collect();
         serde_json::to_value(tracks).map_err(|e| e.to_string())
     }
 
@@ -475,7 +515,7 @@ impl<C: 'static> Section<C> for TracksSection {
     }
 
     fn clear(&self, _: &C) -> Result<(), String> {
-        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default() }])
+        apply_tracks(self.audio, &[TrackFile { id: SAMPLER_TRACK, name: "Sampler".into(), mix: TrackMix::default(), kind: None }])
     }
 
     fn revision(&self, _: &C) -> u64 {
@@ -492,6 +532,12 @@ fn project(app: &AppHandle) -> tauri::State<'_, Project<AppHandle>> {
 /// Adds a module's section. Call it once, from the module's setup.
 pub fn register(app: &AppHandle, section: impl Section<AppHandle>) {
     project(app).register(section);
+}
+
+/// [`Project::exclusive`] on the app's project: `f` runs while no open, new,
+/// save or autosave does. Lock order: busy, then a module's document, then the engine.
+pub fn exclusive<R>(app: &AppHandle, f: impl FnOnce() -> R) -> R {
+    project(app).exclusive(f)
 }
 
 pub fn path(app: &AppHandle) -> Option<PathBuf> {
@@ -868,6 +914,37 @@ mod tests {
         assert!(p.open_text(&(), &twice, Path::new("/a.tunek"), None, false).unwrap_err().contains("two tracks numbered 3"));
         assert_eq!(transport.tempo(), 120.0, "no section applied");
         assert_eq!(*state.lock().unwrap(), Value::Null);
+    }
+
+    #[test]
+    fn track_kinds_save_when_they_differ_from_the_default() {
+        let (p, _, _, _) = rig();
+        let text = r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler","kind":"audio"},{"id":4,"name":"Drums"},{"id":7,"name":"Keys","kind":"instrument"},{"id":9,"name":"Odd","kind":"sampler"}]}"#;
+        p.open_text(&(), text, Path::new("/a.tunek"), None, false).unwrap();
+        let saved = json(&p.serialize(&(), Path::new("/a.tunek")).unwrap());
+        let kinds: Vec<Value> = saved["tracks"].as_array().unwrap().iter().map(|t| t.get("kind").cloned().unwrap_or(Value::Null)).collect();
+        // Track 1 is always the Sampler's, and only it: those and audio, the defaults, aren't written.
+        assert_eq!(kinds, vec![Value::Null, Value::Null, json!("instrument"), Value::Null]);
+    }
+
+    #[test]
+    fn exclusive_work_holds_off_a_save() {
+        let (p, _, _, _) = rig();
+        let p = Arc::new(p);
+        let dir = tempfile::tempdir().unwrap();
+        let saved = Arc::new(AtomicBool::new(false));
+        let t = p.exclusive(|| {
+            let (p2, file, saved2) = (p.clone(), dir.path().join("a"), saved.clone());
+            let t = std::thread::spawn(move || {
+                p2.save(&(), Some(file)).unwrap();
+                saved2.store(true, Ordering::Release);
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            assert!(!saved.load(Ordering::Acquire), "the save waits for the exclusive work");
+            t
+        });
+        t.join().unwrap();
+        assert!(saved.load(Ordering::Acquire));
     }
 
     #[test]

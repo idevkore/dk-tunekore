@@ -8,8 +8,11 @@
 //! section, with clips keyed by track id and file paths relative to the
 //! project like the Sampler's samples.
 //!
-//! Every track but the Sampler's (track 1) is an audio track, whose source is
-//! a [`tunekore_engine::ClipPlayer`]. After each edit the track's clips go to
+//! Tracks say what they are ([`TrackKind`], saved by the `tracks` section).
+//! The Timeline shows them all; its clips go on audio tracks only, whose
+//! source is a [`tunekore_engine::ClipPlayer`], and it puts a player only
+//! into an audio track's empty source slot, so a device another module put
+//! there stays. After each edit the track's clips go to
 //! it as a new [`ClipSet`], their audio decoded with the Analyzer's decoder
 //! and resampled to the output's rate here, off the audio thread. Decoded
 //! files stay in memory (long files are not streamed from disk yet), with
@@ -19,8 +22,9 @@
 //! a second while they change, and puts the clips back on their players when
 //! the output reopens at another rate or loses its devices.
 //!
-//! Lock order: the document, then the feeds, then any of the sources, the
-//! meters and the audio engine, which take no other lock while held.
+//! Lock order: the project's `busy` (the tick thread's refeeding runs under
+//! `project::exclusive`), then the document, then the feeds, then any of the
+//! sources, the meters and the audio engine, which take no other lock while held.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -33,7 +37,8 @@ use serde_json::Value;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_analyzer::decode_file;
-use tunekore_engine::{clip, resample, ClipFeed, ClipSet, ClipSpec, Peaks, Track, TrackId, TrackMeter, TrackMix, TransportShared, SAMPLER_TRACK};
+use tunekore_engine::track::TRACK_SLOTS;
+use tunekore_engine::{clip, resample, ClipFeed, ClipSet, ClipSpec, Peaks, Track, TrackId, TrackKind, TrackMeter, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::project::{self, Apply, Section};
 use crate::Audio;
@@ -107,8 +112,9 @@ impl Clip {
         }
     }
 
-    fn looped(&self) -> bool {
-        self.phase + self.length > self.content + 1e-9
+    /// This clip with the times of `s` (its start, place in the file and fades).
+    fn with_times(&self, s: &ClipSpec) -> Clip {
+        Clip { start: s.start, offset: s.offset, content: s.content, phase: s.phase, length: s.length, fade_in: s.fade_in, fade_out: s.fade_out, ..self.clone() }
     }
 
     /// Where it ends, in beats, at `tempo`.
@@ -191,12 +197,12 @@ impl ViewState {
     }
 }
 
-/// What undo puts back: the clips, the tracks and their names and mix.
+/// What undo puts back: the clips, the tracks and their names, mix and kind.
 #[derive(Clone)]
 struct Snapshot {
     tracks: Vec<TrackMeta>,
     clips: BTreeMap<TrackId, Vec<Clip>>,
-    mixes: Vec<(TrackId, String, TrackMix)>,
+    mixes: Vec<(TrackId, String, TrackMix, TrackKind)>,
 }
 
 #[derive(Default)]
@@ -249,10 +255,6 @@ impl Doc {
 
     fn find(&self, id: u64) -> Option<(TrackId, &Clip)> {
         self.clips.iter().find_map(|(t, list)| list.iter().find(|c| c.id == id).map(|c| (*t, c)))
-    }
-
-    fn is_audio_track(&self, id: TrackId) -> bool {
-        id != SAMPLER_TRACK && self.tracks.iter().any(|t| t.id == id)
     }
 
     fn next_colour(&self) -> u8 {
@@ -347,7 +349,7 @@ pub struct ClipView {
 pub struct TrackView {
     id: TrackId,
     name: String,
-    /// "sampler" or "audio".
+    /// "sampler", "audio" or "instrument". Clips go on audio tracks.
     kind: &'static str,
     colour: u8,
     height: u32,
@@ -456,6 +458,9 @@ pub struct TimelineState {
     /// A file was read again after it changed on disk: every track's clips
     /// go to their players again, so none plays the old audio.
     replaced: AtomicBool,
+    /// Bumped by each open and new project, so work that read files before
+    /// it held the document can tell the project changed under it.
+    generation: AtomicU64,
     audio: &'static Mutex<Audio>,
     transport: Arc<TransportShared>,
 }
@@ -471,6 +476,7 @@ impl TimelineState {
             revision: AtomicU64::new(0),
             reads: AtomicU64::new(0),
             replaced: AtomicBool::new(false),
+            generation: AtomicU64::new(0),
             audio,
             transport,
         }
@@ -537,15 +543,33 @@ impl TimelineState {
         let mixes = doc
             .tracks
             .iter()
-            .filter_map(|m| tracks.iter().find(|t| t.id == m.id).map(|t| (t.id, t.name.clone(), t.mix)))
+            .filter_map(|m| tracks.iter().find(|t| t.id == m.id).map(|t| (t.id, t.name.clone(), t.mix, t.kind)))
             .collect();
         Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), mixes }
     }
 
-    /// Gives every audio track a clip player, and sends the tracks `what`
-    /// names their clips at the player's rate.
+    /// The engine's tracks and what each is.
+    fn kinds(&self) -> HashMap<TrackId, TrackKind> {
+        lock(self.audio).engine.tracks().into_iter().map(|t| (t.id, t.kind)).collect()
+    }
+
+    /// Whether clips can go on track `id`: it is listed and it is an audio track.
+    fn is_audio(&self, doc: &Doc, id: TrackId) -> bool {
+        doc.tracks.iter().any(|t| t.id == id) && self.kinds().get(&id) == Some(&TrackKind::Audio)
+    }
+
+    /// Tracks the engine can still take.
+    fn room(&self) -> usize {
+        TRACK_SLOTS.saturating_sub(lock(self.audio).engine.tracks().len())
+    }
+
+    /// Gives every audio track with an empty source slot a clip player, and
+    /// sends the tracks `what` names their clips at the player's rate. A
+    /// track whose slot holds a device other than the Timeline's player (an
+    /// instrument another module put there) is left alone.
     fn sync(&self, doc: &Doc, what: Resend<'_>) {
-        let ids: Vec<TrackId> = doc.tracks.iter().map(|t| t.id).filter(|&id| id != SAMPLER_TRACK).collect();
+        let kinds = self.kinds();
+        let ids: Vec<TrackId> = doc.tracks.iter().map(|t| t.id).filter(|id| kinds.get(id) == Some(&TrackKind::Audio)).collect();
         let mut feeds = lock(&self.feeds);
         feeds.retain(|id, _| ids.contains(id));
         let lost: Vec<TrackId> = ids.iter().copied().filter(|id| feeds.get(id).is_none_or(|f| !f.feed.is_attached())).collect();
@@ -553,9 +577,10 @@ impl TimelineState {
             let mut a = lock(self.audio);
             let mixer = a.engine.mixer();
             for id in lost {
-                if mixer.track(id).is_none() {
-                    // Gone from the engine (a project opening): nothing to feed.
-                    feeds.remove(&id);
+                feeds.remove(&id);
+                // Only into an empty slot: the player was lost with the output,
+                // or the track is new. Anything else there isn't the Timeline's.
+                if !mixer.track(id).is_some_and(|t| t.kind == TrackKind::Audio && !t.has_source) {
                     continue;
                 }
                 let (player, feed) = clip::player();
@@ -589,24 +614,22 @@ impl TimelineState {
     }
 
     /// Lists the engine's tracks the document doesn't know yet (made by the
-    /// project's `tracks` section) as audio tracks, when nothing else has put
-    /// a source on them: a track another module filled (an instrument) is its own.
+    /// project's `tracks` section or another module), whatever their kind,
+    /// the Sampler's first, and keeps clips on audio tracks only.
     fn adopt(&self, doc: &mut Doc) {
         let tracks = lock(self.audio).engine.tracks();
-        let ours: Vec<TrackId> = lock(&self.feeds).iter().filter(|(_, f)| f.feed.is_attached()).map(|(id, _)| *id).collect();
         doc.tracks.retain(|m| tracks.iter().any(|t| t.id == m.id));
-        for t in tracks {
-            if doc.tracks.iter().all(|m| m.id != t.id) && (t.id == SAMPLER_TRACK || !t.has_source || ours.contains(&t.id)) {
+        for t in &tracks {
+            if doc.tracks.iter().all(|m| m.id != t.id) {
                 let meta = TrackMeta { id: t.id, colour: doc.next_colour(), height: DEFAULT_HEIGHT };
-                // The Sampler's track leads.
-                if t.id == SAMPLER_TRACK {
+                if t.kind == TrackKind::Sampler {
                     doc.tracks.insert(0, meta);
                 } else {
                     doc.tracks.push(meta);
                 }
             }
         }
-        doc.clips.retain(|id, _| doc.tracks.iter().any(|t| t.id == *id && t.id != SAMPLER_TRACK));
+        doc.clips.retain(|id, _| tracks.iter().any(|t| t.id == *id && t.kind == TrackKind::Audio));
     }
 
     fn view(&self, doc: &Doc) -> View {
@@ -625,7 +648,11 @@ impl TimelineState {
                     Some(TrackView {
                         id: m.id,
                         name: t.name.clone(),
-                        kind: if m.id == SAMPLER_TRACK { "sampler" } else { "audio" },
+                        kind: match t.kind {
+                            TrackKind::Sampler => "sampler",
+                            TrackKind::Audio => "audio",
+                            TrackKind::Instrument => "instrument",
+                        },
                         colour: m.colour,
                         height: m.height,
                         mix: t.mix,
@@ -682,7 +709,13 @@ impl TimelineState {
 
     /// Adds an empty audio track to the engine and the document.
     fn new_track(&self, doc: &mut Doc, name: &str) -> Result<TrackId, String> {
-        let id = lock(self.audio).engine.mixer().add_track(name)?;
+        let id = {
+            let mut a = lock(self.audio);
+            let mixer = a.engine.mixer();
+            let id = mixer.add_track(name)?;
+            mixer.set_kind(id, TrackKind::Audio)?;
+            id
+        };
         let colour = doc.next_colour();
         doc.tracks.push(TrackMeta { id, colour, height: DEFAULT_HEIGHT });
         Ok(id)
@@ -713,6 +746,13 @@ impl TimelineState {
     /// [`add_files`](Self::add_files), with a name for each file's new track
     /// (its file's name when `None`).
     fn add(&self, files: &[(PathBuf, Option<String>)], track: Option<TrackId>, start: f64) -> Result<View, String> {
+        let read = self.read_files(files);
+        self.place(read, track, start)
+    }
+
+    /// Decodes files to add, without the document: slow.
+    fn read_files(&self, files: &[(PathBuf, Option<String>)]) -> Reading {
+        let generation = self.generation.load(Ordering::Acquire);
         let mut read = Vec::new();
         let mut failed = Vec::new();
         let rate = self.live_rate();
@@ -728,12 +768,27 @@ impl TimelineState {
                 Err(e) => failed.push(format!("{} ({e})", file_stem(f))),
             }
         }
+        Reading { generation, read, failed }
+    }
+
+    /// Puts files [`read_files`](Self::read_files) read on the Timeline, as one
+    /// undoable step: all of them or, when the project changed meanwhile or
+    /// there isn't room for their tracks, none.
+    fn place(&self, reading: Reading, track: Option<TrackId>, start: f64) -> Result<View, String> {
+        let Reading { generation, read, failed } = reading;
         let view = if read.is_empty() {
             None
         } else {
             Some(self.edit("add", |s, doc| {
+                if s.generation.load(Ordering::Acquire) != generation {
+                    return Err("another project opened while the files were read: add them again".into());
+                }
+                let on = track.filter(|&t| s.is_audio(doc, t));
+                let room = s.room();
+                if on.is_none() && read.len() > room {
+                    return Err(format!("tuneKore runs at most {TRACK_SLOTS} tracks, and there's room for {room} more"));
+                }
                 let tempo = s.transport.tempo();
-                let on = track.filter(|&t| doc.is_audio_track(t));
                 let mut at = finite(start, 0.0).max(0.0);
                 for (path, name, src) in &read {
                     let track = match on {
@@ -761,6 +816,7 @@ impl TimelineState {
 
     /// Adds, changes and deletes clips as one undoable step.
     pub fn apply_edit(&self, edit: Edit) -> Result<View, String> {
+        let generation = self.generation.load(Ordering::Acquire);
         // Files first, before the document is held: a copy of a clip names a file already decoded.
         let mut seconds: HashMap<PathBuf, Option<f64>> = HashMap::new();
         for c in &edit.clips {
@@ -772,9 +828,16 @@ impl TimelineState {
         }
         let key = if edit.key.is_empty() { "edit".to_string() } else { edit.key.clone() };
         self.edit(&key, move |s, doc| {
+            if s.generation.load(Ordering::Acquire) != generation {
+                return Err("another project opened in the meantime".into());
+            }
             for c in &edit.clips {
-                if c.track != 0 && !doc.is_audio_track(TrackId(c.track)) {
-                    return Err(if c.track == SAMPLER_TRACK.0 { "the Sampler's track holds the Sampler; put clips on an audio track".into() } else { format!("there is no track {}", c.track) });
+                if c.track != 0 && !s.is_audio(doc, TrackId(c.track)) {
+                    return Err(match s.kinds().get(&TrackId(c.track)) {
+                        Some(TrackKind::Sampler) => "the Sampler's track holds the Sampler; put clips on an audio track".into(),
+                        Some(TrackKind::Instrument) => "that's an instrument track; put audio clips on an audio track".into(),
+                        _ => format!("there is no track {}", c.track),
+                    });
                 }
                 if let Some(id) = c.id {
                     if doc.find(id).is_none() {
@@ -829,51 +892,27 @@ impl TimelineState {
     /// is. The two halves meet on the same frame at the output's rate, so
     /// they play through without a seam.
     pub fn split(&self, ids: &[u64], beat: f64) -> Result<View, String> {
-        let rate_hz = self.rate();
-        let rate = f64::from(rate_hz);
         let tempo = self.transport.tempo();
-        // The player's own count of frames, through the same tempo map.
-        let map = self.transport.tempo_map(rate_hz);
+        // The player's own count of frames, through the same tempo map, at its rate.
+        let map = self.transport.tempo_map(self.rate());
         self.edit("split", |_, doc| {
-            let mut cuts = Vec::new();
-            for (track, list) in &doc.clips {
-                for c in list {
-                    if (ids.is_empty() || ids.contains(&c.id)) && c.start < beat && beat < c.end(tempo) {
-                        cuts.push((*track, c.id));
+            let Doc { clips, next_clip, .. } = doc;
+            let mut done = 0;
+            for list in clips.values_mut() {
+                let mut out = Vec::with_capacity(list.len() + 1);
+                for c in list.drain(..) {
+                    let here = (ids.is_empty() || ids.contains(&c.id)) && c.start < beat && beat < c.end(tempo);
+                    match here.then(|| clip::split(&map, &c.spec(), beat)).flatten() {
+                        Some((left, right)) => {
+                            out.push(c.with_times(&left));
+                            out.push(Clip { id: *next_clip, ..c.with_times(&right) });
+                            *next_clip += 1;
+                            done += 1;
+                        }
+                        None => out.push(c),
                     }
                 }
-            }
-            if cuts.is_empty() {
-                return Err("there is no clip to split at the playhead".into());
-            }
-            let mut done = 0;
-            for (track, id) in cuts {
-                let new_id = doc.next_clip;
-                let list = doc.clips.get_mut(&track).expect("listed above");
-                let Some(at) = list.iter().position(|c| c.id == id) else { continue };
-                let c = list[at].clone();
-                let r = |s: f64| (s * rate).round();
-                let (o, p, k, l) = (r(c.offset), r(c.phase), r(c.content).max(1.0), r(c.length));
-                let n = clip::frames_before(&map, c.start, beat) as f64;
-                if n < 1.0 || n >= l {
-                    continue;
-                }
-                let mut left = Clip { offset: o / rate, phase: p / rate, content: k / rate, length: n / rate, fade_out: 0.0, ..c.clone() };
-                let mut right = Clip { id: new_id, start: beat, offset: o / rate, content: k / rate, length: (l - n) / rate, fade_in: 0.0, ..c.clone() };
-                if c.looped() {
-                    right.phase = ((p + n) % k) / rate;
-                } else {
-                    left.content = (p + n) / rate;
-                    right.offset = (o + p + n) / rate;
-                    right.content = (k - p - n).max(1.0) / rate;
-                    right.phase = 0.0;
-                }
-                left.fade_in = left.fade_in.min(left.length);
-                right.fade_out = right.fade_out.min(right.length);
-                list[at] = left;
-                list.insert(at + 1, right);
-                doc.next_clip += 1;
-                done += 1;
+                *list = out;
             }
             if done == 0 {
                 return Err("there is no clip to split at the playhead".into());
@@ -891,8 +930,12 @@ impl TimelineState {
 
     pub fn remove_track(&self, id: TrackId) -> Result<View, String> {
         self.edit("track:remove", |s, doc| {
-            if !doc.is_audio_track(id) {
-                return Err(if id == SAMPLER_TRACK { "the Sampler's track stays".into() } else { format!("there is no track {}", id.0) });
+            if !s.is_audio(doc, id) {
+                return Err(match s.kinds().get(&id) {
+                    Some(TrackKind::Sampler) => "the Sampler's track stays".into(),
+                    Some(TrackKind::Instrument) => "an instrument track belongs to its instrument".into(),
+                    _ => format!("there is no track {}", id.0),
+                });
             }
             lock(s.audio).engine.mixer().remove_track(id)?;
             doc.tracks.retain(|t| t.id != id);
@@ -981,20 +1024,26 @@ impl TimelineState {
         self.transport.set_looping(v.loop_on);
     }
 
-    /// Puts `snap` back: the tracks it had (made again with their ids, or
-    /// removed), their names and mix, and the clips.
+    /// Puts `snap` back: the audio tracks it had (made again with their ids,
+    /// or removed), every track's name and mix, and the clips. Other kinds of
+    /// track belong to their modules: they are never made or removed here.
     fn restore(&self, doc: &mut Doc, snap: Snapshot) -> Result<(), String> {
         {
             let mut a = lock(self.audio);
             let mixer = a.engine.mixer();
             for t in &doc.tracks {
-                if t.id != SAMPLER_TRACK && snap.tracks.iter().all(|s| s.id != t.id) {
+                let audio = mixer.track(t.id).is_some_and(|i| i.kind == TrackKind::Audio);
+                if audio && snap.tracks.iter().all(|s| s.id != t.id) {
                     mixer.remove_track(t.id)?;
                 }
             }
-            for (id, name, mix) in &snap.mixes {
+            for (id, name, mix, kind) in &snap.mixes {
                 if mixer.track(*id).is_none() {
+                    if *kind != TrackKind::Audio {
+                        continue;
+                    }
                     mixer.add_track_as(*id, name)?;
+                    mixer.set_kind(*id, TrackKind::Audio)?;
                 }
                 mixer.rename(*id, name)?;
                 mixer.set_mix(*id, *mix)?;
@@ -1028,15 +1077,38 @@ impl TimelineState {
         Ok(self.view(&doc))
     }
 
-    /// The thread's work: frees what the players handed back, and puts the
-    /// clips back on players that were lost or changed rate.
-    fn maintain(&self) {
-        let stale = lock(&self.feeds).values_mut().fold(false, |stale, f| {
+    /// Frees what the players handed back; true when one was lost or changed
+    /// rate and needs [`refeed`](Self::refeed). Takes only the feeds' lock.
+    fn needs_refeed(&self) -> bool {
+        lock(&self.feeds).values_mut().fold(false, |stale, f| {
             f.feed.collect();
             stale || !f.feed.is_attached() || f.feed.rate() != f.rate
-        });
-        if stale {
+        })
+    }
+
+    /// Puts the clips back on players that were lost or changed rate. The
+    /// slow part (resampling every file at the new rate) runs with the
+    /// document free, so edits carry on; the sets go out only if no edit came
+    /// in meanwhile, since an edit sends them itself. The tick thread runs it
+    /// under `project::exclusive`, so it never lands inside an open or a save.
+    fn refeed(&self) {
+        let (revision, work) = {
             let doc = lock(&self.doc);
+            let feeds = lock(&self.feeds);
+            let work: Vec<(u32, PathBuf)> = feeds
+                .iter()
+                .filter(|(_, f)| f.feed.rate() > 0 && f.feed.rate() != f.rate)
+                .flat_map(|(id, f)| doc.clips.get(id).into_iter().flatten().map(move |c| (f.feed.rate(), c.path.clone())))
+                .collect();
+            (doc.revision, work)
+        };
+        for (rate, path) in &work {
+            if let Some(s) = self.source(path) {
+                let _ = s.at_rate(*rate);
+            }
+        }
+        let doc = lock(&self.doc);
+        if doc.revision == revision {
             self.sync(&doc, Resend::Stale);
         }
     }
@@ -1172,6 +1244,14 @@ fn relative(path: &Path, base: &Path) -> String {
     }
 }
 
+/// Files read for [`TimelineState::place`]: the decoded ones, the ones that
+/// failed, and the project's generation when reading began.
+struct Reading {
+    generation: u64,
+    read: Vec<(PathBuf, String, Arc<Source>)>,
+    failed: Vec<String>,
+}
+
 /// What [`TimelineState::read_file`] read, decoded, ready to apply.
 struct Read {
     tracks: Vec<TrackMeta>,
@@ -1265,11 +1345,13 @@ impl TimelineState {
     /// doesn't have are left out and named in the error.
     fn apply_file(&self, read: Read) -> Result<(), String> {
         let mut doc = lock(&self.doc);
-        let engine: Vec<TrackId> = lock(self.audio).engine.tracks().iter().map(|t| t.id).collect();
-        let mut tracks: Vec<TrackMeta> = read.tracks.into_iter().filter(|t| engine.contains(&t.id)).collect();
-        tracks.dedup_by_key(|t| t.id);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        let kinds = self.kinds();
+        let mut seen = std::collections::HashSet::new();
+        let tracks: Vec<TrackMeta> = read.tracks.into_iter().filter(|t| kinds.contains_key(&t.id) && seen.insert(t.id)).collect();
         let mut clips = read.clips;
-        let orphans: Vec<u32> = clips.keys().filter(|id| **id == SAMPLER_TRACK || !engine.contains(id)).map(|id| id.0).collect();
+        // Clips go on audio tracks only.
+        let orphans: Vec<u32> = clips.keys().filter(|id| kinds.get(id) != Some(&TrackKind::Audio)).map(|id| id.0).collect();
         let lost: usize = orphans.iter().map(|id| clips.remove(&TrackId(*id)).map_or(0, |l| l.len())).sum();
         let next_clip = clips.values().flatten().map(|c| c.id).max().unwrap_or(0) + 1;
         let revision = doc.revision + 1;
@@ -1281,7 +1363,7 @@ impl TimelineState {
         self.sync(&doc, Resend::All);
         self.note_revision(&doc);
         if lost > 0 {
-            return Err(format!("{lost} clip(s) were on tracks the project doesn't have"));
+            return Err(format!("{lost} clip(s) were on tracks the project doesn't have as audio tracks"));
         }
         Ok(())
     }
@@ -1289,6 +1371,7 @@ impl TimelineState {
     /// Empties the Timeline for a new project.
     fn clear(&self) {
         let mut doc = lock(&self.doc);
+        self.generation.fetch_add(1, Ordering::AcqRel);
         let revision = doc.revision + 1;
         *doc = Doc { revision, ..Doc::default() };
         self.adopt(&mut doc);
@@ -1486,7 +1569,10 @@ fn spawn_tick(app: AppHandle, s: Arc<TimelineState>) {
         let mut last: Option<Tick> = None;
         loop {
             std::thread::sleep(TICK);
-            s.maintain();
+            // Busy, then the document, then the engine, as everywhere.
+            if s.needs_refeed() {
+                project::exclusive(&app, || s.refeed());
+            }
             let t = &s.transport;
             let playing = t.is_playing();
             let sig = t.time_signature();
@@ -1776,27 +1862,142 @@ mod tests {
         assert_eq!(v.tracks[1].height, MAX_HEIGHT);
     }
 
-    #[test]
-    fn a_track_another_module_filled_is_left_alone() {
-        struct Instrument;
-        impl tunekore_engine::Device for Instrument {
-            fn process(&mut self, _: &tunekore_engine::ProcessContext, _: &mut tunekore_engine::Events, _: tunekore_engine::Buffers<'_>) {}
+    /// A stand-in for another module's device (an instrument), noting when it is dropped.
+    struct Instrument(Arc<AtomicBool>);
+    impl tunekore_engine::Device for Instrument {
+        fn process(&mut self, _: &tunekore_engine::ProcessContext, _: &mut tunekore_engine::Events, _: tunekore_engine::Buffers<'_>) {}
+    }
+    impl Drop for Instrument {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn a_device_another_module_puts_on_a_track_is_left_alone() {
         let rig = rig();
-        let keys = {
+        rig.state.add_track().unwrap();
+        rig.state.add_track().unwrap();
+        let (two, three) = (TrackId(2), TrackId(3));
+        let (gone2, gone3) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+        {
             let mut a = lock(rig.audio);
             let m = a.engine.mixer();
-            let keys = m.add_track("Keys").unwrap();
-            m.set_source(keys, Some(Box::new(Instrument))).unwrap();
-            m.add_track("Empty").unwrap();
-            keys
-        };
-        rig.project.open_text(&(), r#"{"format":"tunekore-project","version":2,"tracks":[{"id":1,"name":"Sampler"},{"id":2,"name":"Keys"},{"id":3,"name":"Empty"}]}"#, Path::new("/a.tunek"), None, false).unwrap();
-        // The project's tracks section made both empty; give Keys its instrument back, as its module would.
-        lock(rig.audio).engine.mixer().set_source(keys, Some(Box::new(Instrument))).unwrap();
-        rig.state.clear();
+            // Made an instrument track, as plugins will (#37)...
+            m.set_kind(two, TrackKind::Instrument).unwrap();
+            m.set_source(two, Some(Box::new(Instrument(gone2.clone())))).unwrap();
+            // ...or a device put straight into an audio track's slot.
+            m.set_source(three, Some(Box::new(Instrument(gone3.clone())))).unwrap();
+        }
+        // What the tick thread does: the Timeline's players there are gone.
+        assert!(rig.state.needs_refeed());
+        rig.state.refeed();
+        assert!(!gone2.load(Ordering::Relaxed) && !gone3.load(Ordering::Relaxed), "neither device was replaced by a clip player");
+        assert!(!rig.state.needs_refeed(), "and the Timeline stopped feeding them");
+        // An instrument track shows, but takes no clips: a drop on it makes an audio track.
+        let v = rig.state.add_files(&[rig.file("kick.wav")], Some(two), 0.0).unwrap();
+        assert_eq!(v.tracks.iter().find(|t| t.id == two).map(|t| (t.kind, t.clips.len())), Some(("instrument", 0)));
+        assert_eq!(v.tracks.len(), 4);
+        assert!(rig.state.remove_track(two).unwrap_err().contains("instrument"));
+    }
+
+    #[test]
+    fn an_instrument_track_in_a_project_keeps_its_device_and_its_clips_are_refused() {
+        let rig = rig();
+        let gone = Arc::new(AtomicBool::new(false));
+        let text = serde_json::json!({
+            "format": "tunekore-project", "version": 2,
+            "tracks": [{ "id": 1, "name": "Sampler" }, { "id": 2, "name": "Keys", "kind": "instrument" }, { "id": 3, "name": "Drums" }],
+            "timeline": { "tracks": [{ "id": 2, "colour": 1, "height": 60 }, { "id": 3, "colour": 2, "height": 60 }],
+                "clips": { "2": [{ "id": 1, "file": "kick.wav", "start": 0.0, "offset": 0.0, "content": 1.0, "length": 1.0 }],
+                           "3": [{ "id": 2, "file": "kick.wav", "start": 0.0, "offset": 0.0, "content": 1.0, "length": 1.0 }] } }
+        });
+        let file = rig.dir.path().join("keys.tunek");
+        // The plugins section applies before the Timeline's and puts the instrument in.
+        struct Plugins(&'static Mutex<Audio>, Arc<AtomicBool>);
+        impl Section<()> for Plugins {
+            fn key(&self) -> &'static str {
+                "plugins"
+            }
+            fn save(&self, _: &(), _: &Path) -> Result<Value, String> {
+                Ok(Value::Null)
+            }
+            fn read(&self, _: &(), _: Option<&Value>, _: &Path) -> Result<Apply<()>, String> {
+                let (audio, gone) = (self.0, self.1.clone());
+                Ok(Box::new(move |_| lock(audio).engine.mixer().set_source(TrackId(2), Some(Box::new(Instrument(gone))))))
+            }
+            fn clear(&self, _: &()) -> Result<(), String> {
+                Ok(())
+            }
+            fn revision(&self, _: &()) -> u64 {
+                0
+            }
+        }
+        let project = Project::new();
+        project.register(Plugins(rig.audio, gone.clone()));
+        project.register(TimelineSection { state: rig.state.clone(), notify: Arc::new(|_: &View| {}) });
+        project.register_core(TransportSection(lock(rig.audio).engine.transport()));
+        project.register_core(TracksSection::new(rig.audio));
+        let err = project.open_text(&(), &text.to_string(), &file, None, false).unwrap_err();
+        assert!(err.contains("as audio tracks"), "{err}");
+        rig.state.refeed();
+        assert!(!gone.load(Ordering::Relaxed), "the instrument is still on its track");
         let v = rig.state.current();
-        assert_eq!(v.tracks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["Sampler", "Empty"], "Keys isn't an audio track");
+        let kinds: Vec<(u32, &str, usize)> = v.tracks.iter().map(|t| (t.id.0, t.kind, t.clips.len())).collect();
+        assert_eq!(kinds, [(1, "sampler", 0), (2, "instrument", 0), (3, "audio", 1)]);
+    }
+
+    #[test]
+    fn a_split_made_here_plays_through_the_player_without_a_seam() {
+        use tunekore_engine::{Buffers, Device, Events, Transport};
+        let rig = rig();
+        rig.state.add_files(&[rig.file("kick.wav")], None, 0.37).unwrap();
+        rig.state.split(&[], 1.123).unwrap();
+        let clips = lock(&rig.state.doc).clips[&TrackId(2)].clone();
+        assert_eq!(clips.len(), 2);
+        let set = rig.state.build(&clips, FALLBACK_RATE);
+        let (mut player, mut feed) = clip::player();
+        player.prepare(FALLBACK_RATE, 4096);
+        feed.publish(set);
+        let shared = TransportShared::default();
+        shared.play();
+        let mut clock = Transport::new(FALLBACK_RATE);
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        let mut events = Events::with_capacity(4);
+        let mut out = Vec::new();
+        for _ in 0..200 {
+            clock.run(&shared, 512, |ctx, off| {
+                let (x, y) = (&mut l[off..off + ctx.frames], &mut r[off..off + ctx.frames]);
+                x.fill(0.0);
+                y.fill(0.0);
+                player.process(ctx, &mut events, Buffers { left: x, right: y });
+            });
+            out.extend_from_slice(&l);
+        }
+        // kick.wav is 0.25 throughout; 0.37 to 1.123 beats at 120 BPM and 48 kHz is frames 8,880 to 26,952.
+        assert!(out[9_100..40_000].iter().all(|&x| x == 0.25), "a seam at the cut");
+    }
+
+    #[test]
+    fn adding_files_needs_room_for_their_tracks_and_the_same_project() {
+        let rig = rig();
+        {
+            let mut a = lock(rig.audio);
+            let m = a.engine.mixer();
+            for i in 0..62 {
+                m.add_track(&format!("t{i}")).unwrap();
+            }
+        }
+        rig.state.clear();
+        let before = rig.state.current();
+        let err = rig.state.add_files(&[rig.file("kick.wav"), rig.file("snare.wav")], None, 0.0).unwrap_err();
+        assert!(err.contains("room for 1 more"), "{err}");
+        assert_eq!(rig.state.current(), before, "nothing added");
+        assert_eq!(rig.engine_tracks().len(), 63);
+        // Files read for one project don't land in the next.
+        let reading = rig.state.read_files(&[(rig.file("kick.wav"), None)]);
+        rig.state.clear();
+        assert!(rig.state.place(reading, None, 0.0).unwrap_err().contains("another project"));
     }
 
     #[test]

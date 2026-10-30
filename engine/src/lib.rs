@@ -51,7 +51,7 @@ pub use graph::Mixer;
 pub use peaks::{Peaks, PEAK_LEVELS};
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
-pub use track::{TrackId, TrackInfo, TrackMeter, TrackMix};
+pub use track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMix};
 pub use transport::{LoopRange, ProcessContext, TempoMap, TimeSignature, Transport, TransportShared};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -170,6 +170,7 @@ impl Engine {
         let shared = Arc::<Shared>::default();
         let mut mixer = Mixer::new();
         mixer.add_track_as(SAMPLER_TRACK, "Sampler").expect("the first track");
+        mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler).expect("the first track");
         let (device, sampler_link) = sampler::device(shared.sampler.clone(), 48_000);
         mixer.set_source(SAMPLER_TRACK, Some(Box::new(device))).expect("the Sampler's track");
         Self {
@@ -208,6 +209,7 @@ impl Engine {
         self.sampler_link = link;
         if self.mixer.track(SAMPLER_TRACK).is_none() {
             let _ = self.mixer.add_track_as(SAMPLER_TRACK, "Sampler");
+            let _ = self.mixer.set_kind(SAMPLER_TRACK, TrackKind::Sampler);
         }
         let _ = self.mixer.restore_source(SAMPLER_TRACK, Box::new(device));
     }
