@@ -286,8 +286,23 @@ impl Instance {
 
     // ---- activation -----------------------------------------------------------------------
 
-    /// Stops processing and deactivates (when needed).
+    /// Makes the current processor stale and waits (briefly) for a `process` call it may be in
+    /// the middle of, so the plugin is not stopped or reconfigured under it.
+    fn retire_processor(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.wait_for_process();
+    }
+
+    fn wait_for_process(&self) {
+        let t = Instant::now();
+        while self.in_process.load(Ordering::SeqCst) && t.elapsed() < SHUTDOWN_WAIT {
+            std::thread::yield_now();
+        }
+    }
+
+    /// Retires the current processor, then stops processing and deactivates (when needed).
     pub fn stop(&self) {
+        self.retire_processor();
         if self.processing.swap(false, Ordering::AcqRel) {
             // SAFETY: valid processor in the processing state.
             let _ = unsafe { self.processor.set_processing(0) };
@@ -376,8 +391,8 @@ impl Instance {
         // SAFETY: valid, active processor.
         self.guard("IAudioProcessor::setProcessing", unsafe { self.processor.set_processing(1) })?;
         self.processing.store(true, Ordering::Release);
-        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
-        Ok((layout, generation))
+        // `stop` above retired the previous processor; the new one belongs to this generation.
+        Ok((layout, self.generation.load(Ordering::SeqCst)))
     }
 
     /// Which parameter each MIDI controller drives (`IMidiMapping`): `[channel][controller]`,
@@ -402,13 +417,10 @@ impl Instance {
     /// Stops the plugin for good: waits (briefly) for a running `process`, then deactivates,
     /// disconnects and terminates. Safe to call twice.
     pub fn shutdown(&self) {
-        if self.dead.swap(true, Ordering::AcqRel) {
+        if self.dead.swap(true, Ordering::SeqCst) {
             return;
         }
-        let t = Instant::now();
-        while self.in_process.load(Ordering::Acquire) && t.elapsed() < SHUTDOWN_WAIT {
-            std::thread::yield_now();
-        }
+        self.wait_for_process();
         if self.is_failed() {
             return; // Never call a plugin that threw again; `Drop` leaks its objects.
         }
@@ -520,8 +532,7 @@ impl PluginController for Vst3Controller {
     }
 
     fn deactivate(&mut self) {
-        // A processor still running notices through the generation number.
-        self.inst.generation.fetch_add(1, Ordering::AcqRel);
+        // The running processor goes stale (and any block in progress finishes) first.
         self.inst.stop();
         *self.inst.host.to_processor.lock().unwrap_or_else(PoisonError::into_inner) = None;
         self.activated = false;
@@ -937,10 +948,10 @@ impl Plugin for Vst3Processor {
             Self::silence(block);
             return Err(ProcessError::Failed);
         }
-        // Tell `shutdown` a call is running, then look again: either it sees us and waits, or we
-        // see it and stop.
+        // Say a call is running, then look again: either `stop`/`shutdown` sees us and waits, or
+        // we see what it changed and do not call the plugin.
         inst.in_process.store(true, Ordering::SeqCst);
-        if inst.dead.load(Ordering::SeqCst) {
+        if inst.dead.load(Ordering::SeqCst) || inst.generation.load(Ordering::SeqCst) != self.generation {
             inst.in_process.store(false, Ordering::Release);
             Self::silence(block);
             return Err(ProcessError::Stale);
