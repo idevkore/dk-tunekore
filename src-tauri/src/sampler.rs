@@ -1,23 +1,29 @@
-//! The Sampler (Phase 2): the main window's pads, step sequencer, Library,
-//! projects and export.
+//! The Sampler (Phase 2): the main window's pads, step sequencer, Library
+//! and export, and its part of the project file (the `sampler` section,
+//! read and written through [`crate::project`]).
 //!
 //! The document (which sample is on which pad, its settings, the pattern,
 //! tempo) lives here, behind a mutex. Each change goes to the engine's
 //! atomics through the [`SamplerHandle`] and to every window as a
-//! `sampler:state` event, so the main window and the Analyzer agree.
+//! `sampler:state` event, so the main window and the Analyzer agree. The
+//! Sampler plays on the engine's first track and its transport: its tempo is
+//! the project's tempo.
 //! Lock order: the document, then the audio engine.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_analyzer::{decode_file, even, export_wav, onsets, peaks, slices, WavFormat, EXTENSIONS};
 use tunekore_engine::{render_pattern, render_song, resample, CHAIN_MAX, PadParams, SamplerHandle, SamplerShared, Track, MAX_STEPS, PADS, PREVIEW};
 
+use crate::project;
 use crate::Audio;
 
 /// Waveform resolution per pad.
@@ -34,10 +40,6 @@ const UNDO_LIMIT: usize = 200;
 const MERGE_WINDOW: Duration = Duration::from_millis(700);
 /// Decoded files kept in memory, so previews and reloads are instant.
 const CACHE_FILES: usize = 48;
-/// Project files end in `.tunek`.
-pub const PROJECT_EXT: &str = "tunek";
-const FORMAT: &str = "tunekore-project";
-const VERSION: u32 = 1;
 
 /// When a switch of pattern, or of song mode, made while playing lands.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -224,10 +226,8 @@ struct Doc {
     song_loop: bool,
     /// When a switch made while playing lands.
     switch: PatternSwitch,
-    path: Option<PathBuf>,
-    dirty: bool,
     history: History,
-    /// Bumped on every change, so autosave writes only when something changed.
+    /// Bumped on every change, so the project knows it has unsaved work.
     revision: u64,
 }
 
@@ -243,8 +243,6 @@ impl Default for Doc {
             song_mode: false,
             song_loop: true,
             switch: PatternSwitch::End,
-            path: None,
-            dirty: false,
             history: History::default(),
             revision: 0,
         }
@@ -296,7 +294,6 @@ impl Doc {
         // A recording take ("take:N") is one step however long it runs.
         let merge = matches!(&self.history.last, Some((k, t)) if k == key && (key.starts_with("take:") || now.duration_since(*t) < MERGE_WINDOW));
         self.history.last = Some((key.to_string(), now));
-        self.dirty = true;
         self.revision += 1;
         if merge {
             return;
@@ -318,11 +315,13 @@ pub struct SamplerState {
     handle: SamplerHandle,
     /// Counts recording takes, so each take undoes as one step.
     take: std::sync::atomic::AtomicU32,
+    /// The document's revision, readable without its lock (for the project).
+    revision: AtomicU64,
 }
 
 impl SamplerState {
     pub fn new(handle: SamplerHandle) -> Self {
-        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle, take: Default::default() };
+        let s = Self { doc: Mutex::default(), cache: Mutex::default(), handle, take: Default::default(), revision: AtomicU64::new(0) };
         s.apply_all(&s.doc.lock().unwrap());
         s
     }
@@ -355,9 +354,9 @@ impl SamplerState {
         self.handle.set_switch_now(doc.switch == PatternSwitch::Now);
     }
 
-    /// Whether the document has changes that aren't saved.
-    pub fn is_dirty(&self) -> bool {
-        self.doc.lock().unwrap().dirty
+    /// Lets the project see the document's latest revision.
+    fn note_revision(&self, doc: &Doc) {
+        self.revision.store(doc.revision, Ordering::Relaxed);
     }
 
     /// Puts `snap` back, reloading only the pads whose sample changed.
@@ -384,7 +383,6 @@ impl SamplerState {
         doc.song_mode = snap.song_mode;
         doc.song_loop = snap.song_loop;
         doc.switch = snap.switch;
-        doc.dirty = true;
         doc.revision += 1;
         doc.history.last = None;
         self.apply_all(doc);
@@ -463,7 +461,7 @@ struct PadView {
     ratchet: Vec<u8>,
 }
 
-fn view(doc: &Doc, live: &SamplerHandle) -> View {
+fn view(app: &AppHandle, doc: &Doc, live: &SamplerHandle) -> View {
     let pads = doc
         .pads
         .iter()
@@ -492,9 +490,9 @@ fn view(doc: &Doc, live: &SamplerHandle) -> View {
         tempo: doc.tempo,
         swing: doc.swing,
         steps: doc.steps,
-        project_name: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
-        project_path: doc.path.as_ref().map(|p| p.display().to_string()),
-        dirty: doc.dirty,
+        project_name: project::name(app),
+        project_path: project::path(app).map(|p| p.display().to_string()),
+        dirty: project::is_dirty(app),
         can_undo: !doc.history.undo.is_empty(),
         can_redo: !doc.history.redo.is_empty(),
         pattern: doc.current,
@@ -518,7 +516,9 @@ fn audio(app: &AppHandle) -> &'static Mutex<Audio> {
 
 /// Sends the document to every window, and returns it.
 fn publish(app: &AppHandle, doc: &Doc) -> View {
-    let v = view(doc, &state(app).handle);
+    let s = state(app);
+    s.note_revision(doc);
+    let v = view(app, doc, &s.handle);
     let _ = app.emit("sampler:state", &v);
     v
 }
@@ -562,14 +562,15 @@ pub fn load_pad(app: &AppHandle, pad: usize, path: &Path, settings: PadSettings)
     s.apply_pad(&doc, pad);
     // A run of loads (a Finder drop, a chop) undoes as one step.
     doc.checkpoint("load", before);
+    s.note_revision(&doc);
     Ok(())
 }
 
-/// Sends the current document to every window.
-pub fn publish_now(app: &AppHandle) {
+/// Sends the current document to every window, and returns it.
+pub fn publish_now(app: &AppHandle) -> View {
     let s = state(app);
     let doc = s.doc.lock().unwrap();
-    publish(app, &doc);
+    publish(app, &doc)
 }
 
 /// The first pad with nothing on it.
@@ -585,7 +586,7 @@ pub fn first_free_pad(app: &AppHandle) -> Option<usize> {
 pub fn sampler_state(app: AppHandle) -> View {
     let s = state(&app);
     let doc = s.doc.lock().unwrap();
-    view(&doc, &s.handle)
+    view(&app, &doc, &s.handle)
 }
 
 #[tauri::command]
@@ -830,7 +831,7 @@ pub fn sampler_copy_pattern(from: usize, to: usize, app: AppHandle) -> Result<Vi
 pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
     let s = state(&app);
     let mut doc = s.doc.lock().unwrap();
-    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&doc, &s.handle)) };
+    let Some(snap) = doc.history.undo.pop() else { return Ok(view(&app, &doc, &s.handle)) };
     let now = doc.snapshot();
     doc.history.redo.push(now);
     s.restore(&app, &mut doc, snap)?;
@@ -842,7 +843,7 @@ pub fn sampler_undo(app: AppHandle) -> Result<View, String> {
 pub fn sampler_redo(app: AppHandle) -> Result<View, String> {
     let s = state(&app);
     let mut doc = s.doc.lock().unwrap();
-    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&doc, &s.handle)) };
+    let Some(snap) = doc.history.redo.pop() else { return Ok(view(&app, &doc, &s.handle)) };
     let now = doc.snapshot();
     doc.history.undo.push(now);
     s.restore(&app, &mut doc, snap)?;
@@ -1058,34 +1059,33 @@ pub fn library_stop(app: AppHandle) {
     state(&app).handle.cut(PREVIEW);
 }
 
-// ---- Projects ----
+// ---- Projects: the Sampler's section of the file ----
 
+/// The Sampler's part of a project file, the `sampler` section. A version 1
+/// file had these fields at its top level, with the tempo, which now lives
+/// in the `transport` section.
 #[derive(Serialize, Deserialize)]
-struct ProjectFile {
-    format: String,
-    version: u32,
-    tempo: f32,
+#[serde(default)]
+struct SamplerFile {
     swing: f32,
     steps: usize,
     /// The pattern that was showing, 0 = A.
-    #[serde(default)]
     current: usize,
     /// Song mode's chain of patterns (0 = A), and its switches.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     chain: Vec<u8>,
-    #[serde(default)]
     song_mode: bool,
-    #[serde(default = "yes")]
     song_loop: bool,
     /// When a switch made while playing lands: "end" (of the pattern) or
     /// "now" (the next step). Projects from before it open with "end".
-    #[serde(default)]
     pattern_switch: PatternSwitch,
     pads: Vec<PadFile>,
 }
 
-fn yes() -> bool {
-    true
+impl Default for SamplerFile {
+    fn default() -> Self {
+        Self { swing: 0.0, steps: 16, current: 0, chain: Vec::new(), song_mode: false, song_loop: true, pattern_switch: PatternSwitch::End, pads: Vec::new() }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -1109,7 +1109,7 @@ struct PadFile {
     ratchet: Vec<Vec<u8>>,
 }
 
-fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
+fn to_file(doc: &Doc, project: &Path) -> SamplerFile {
     let base = project.parent().unwrap_or(Path::new(""));
     let pads = doc
         .pads
@@ -1151,10 +1151,7 @@ fn to_file(doc: &Doc, project: &Path) -> ProjectFile {
             }
         })
         .collect();
-    ProjectFile {
-        format: FORMAT.into(),
-        version: VERSION,
-        tempo: doc.tempo,
+    SamplerFile {
         swing: doc.swing,
         steps: doc.steps,
         current: doc.current,
@@ -1170,53 +1167,9 @@ fn pattern_bits(s: &str) -> u64 {
     s.chars().take(MAX_STEPS).enumerate().filter(|(_, c)| *c == 'x' || *c == 'X').fold(0, |b, (i, _)| b | (1u64 << i))
 }
 
-#[tauri::command]
-pub fn project_new(app: AppHandle) -> Result<View, String> {
-    let s = state(&app);
-    let mut doc = s.doc.lock().unwrap();
-    s.handle.set_playing(false);
-    let mut a = audio(&app).lock().unwrap();
-    for pad in 0..PADS {
-        s.handle.cut(pad);
-        a.engine.load_sample(pad, None)?;
-    }
-    drop(a);
-    *doc = Doc::default();
-    s.apply_all(&doc);
-    clear_autosave(&app);
-    Ok(publish(&app, &doc))
-}
-
-#[tauri::command]
-pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> {
-    let a = app.clone();
-    let view = spawn_blocking(move || {
-        let project = PathBuf::from(&path);
-        load_project(&a, &project, Some(project.clone()), false)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
-    clear_autosave(&app);
-    Ok(view)
-}
-
-/// Reads a project file into the document. `as_path` is the project it
-/// belongs to (the file itself, or the original project for a recovered
-/// autosave); `dirty` marks it unsaved. Blocking.
-fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: bool) -> Result<View, String> {
-    let text = std::fs::read_to_string(project).map_err(|e| format!("can't read {}: {e}", project.display()))?;
-    let mut file: ProjectFile = serde_json::from_str(&text).map_err(|e| format!("not a tuneKore project ({e})"))?;
-    if file.format != FORMAT {
-        return Err("not a tuneKore project".into());
-    }
-    if file.version > VERSION {
-        return Err("this project was saved by a newer tuneKore".into());
-    }
-    let s = state(a);
-    let base = project.parent().unwrap_or(Path::new("")).to_path_buf();
-    // Decode before taking the locks.
+/// The pads a file describes, with their samples decoded. Slow: no locks held.
+fn read_pads(s: &SamplerState, listed: Vec<PadFile>, base: &Path) -> Vec<Pad> {
     let mut pads: Vec<Pad> = Vec::with_capacity(PADS);
-    let listed = std::mem::take(&mut file.pads);
     for pf in listed.into_iter().chain(std::iter::repeat_with(PadFile::default)).take(PADS) {
         let mut patterns = [0u64; BANK];
         for (b, text) in pf.patterns.iter().take(BANK).enumerate() {
@@ -1253,17 +1206,30 @@ fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: 
         }
         pads.push(pad);
     }
+    pads
+}
+
+/// Replaces the document with `pads` and `file`'s settings, loading the
+/// samples into the engine. The tempo comes from the transport, which the
+/// project set first.
+fn replace_doc(app: &AppHandle, file: SamplerFile, pads: Vec<Pad>) -> Result<(), String> {
+    let s = state(app);
     let mut doc = s.doc.lock().unwrap();
     s.handle.set_playing(false);
-    let mut au = audio(a).lock().unwrap();
+    let mut au = audio(app).lock().unwrap();
+    // Every pad, even past a failure, so the document and the engine agree on the rest.
+    let mut failed = None;
     for (i, pad) in pads.iter().enumerate() {
         s.handle.cut(i);
-        au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone())))?;
+        if let Err(e) = au.engine.load_sample(i, pad.sample.as_ref().map(|x| (x.rate, x.data.clone()))) {
+            failed.get_or_insert(format!("pad {}: {e}", i + 1));
+        }
     }
     drop(au);
+    let revision = doc.revision + 1;
     *doc = Doc {
         pads,
-        tempo: file.tempo.clamp(40.0, 300.0),
+        tempo: s.handle.tempo().clamp(40.0, 300.0),
         swing: file.swing.clamp(0.0, 1.0),
         steps: file.steps.clamp(1, MAX_STEPS),
         current: file.current.min(BANK - 1),
@@ -1271,123 +1237,97 @@ fn load_project(a: &AppHandle, project: &Path, as_path: Option<PathBuf>, dirty: 
         song_mode: file.song_mode,
         song_loop: file.song_loop,
         switch: file.pattern_switch,
-        path: as_path,
-        dirty,
         history: History::default(),
-        revision: 1,
+        revision,
     };
     s.apply_all(&doc);
-    Ok(publish(a, &doc))
+    s.note_revision(&doc);
+    failed.map_or(Ok(()), Err)
+}
+
+/// The Sampler's section of the project file.
+struct SamplerSection;
+
+impl project::Section<AppHandle> for SamplerSection {
+    fn key(&self) -> &'static str {
+        "sampler"
+    }
+
+    fn save(&self, app: &AppHandle, file: &Path) -> Result<Value, String> {
+        let s = state(app);
+        let doc = s.doc.lock().unwrap();
+        serde_json::to_value(to_file(&doc, file)).map_err(|e| e.to_string())
+    }
+
+    fn read(&self, app: &AppHandle, value: Option<&Value>, file: &Path) -> Result<project::Apply<AppHandle>, String> {
+        let mut data: SamplerFile = match value {
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's Sampler part is damaged ({e})"))?,
+            None => SamplerFile::default(),
+        };
+        let base = file.parent().unwrap_or(Path::new("")).to_path_buf();
+        // Decode before taking any lock.
+        let pads = read_pads(&state(app), std::mem::take(&mut data.pads), &base);
+        Ok(Box::new(move |app| replace_doc(app, data, pads)))
+    }
+
+    fn clear(&self, app: &AppHandle) -> Result<(), String> {
+        replace_doc(app, SamplerFile::default(), (0..PADS).map(|_| Pad::default()).collect())?;
+        let s = state(app);
+        let mut doc = s.doc.lock().unwrap();
+        doc.tempo = 120.0;
+        s.apply_all(&doc);
+        s.note_revision(&doc);
+        Ok(())
+    }
+
+    fn revision(&self, app: &AppHandle) -> u64 {
+        state(app).revision.load(Ordering::Relaxed)
+    }
+}
+
+// The project commands answer with the Sampler's view, which the main window shows.
+
+/// Off the UI thread: emptying the pads waits for an open or save in progress.
+#[tauri::command]
+pub async fn project_new(app: AppHandle) -> Result<View, String> {
+    let a = app.clone();
+    let cleared = spawn_blocking(move || project::new_project(&a)).await.map_err(|e| e.to_string())?;
+    // Whatever cleared is what the windows show, even if a part didn't.
+    let view = publish_now(&app);
+    cleared.map(|()| view)
+}
+
+#[tauri::command]
+pub async fn project_open(path: String, app: AppHandle) -> Result<View, String> {
+    let a = app.clone();
+    let opened = spawn_blocking(move || {
+        let file = PathBuf::from(&path);
+        project::open(&a, &file, Some(file.clone()), false)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    // Even a project that opened in part is what the windows show now.
+    let view = publish_now(&app);
+    opened?;
+    project::clear_autosave(&app);
+    Ok(view)
 }
 
 /// Saves to `path` (as `.tunek`), or to the project's own file when `path` is `None`.
 #[tauri::command]
-pub fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String> {
-    let s = state(&app);
-    let mut doc = s.doc.lock().unwrap();
-    let mut project = path.map(PathBuf::from).or_else(|| doc.path.clone()).ok_or("choose where to save the project")?;
-    if project.extension().and_then(|e| e.to_str()) != Some(PROJECT_EXT) {
-        project.set_extension(PROJECT_EXT);
-    }
-    let json = serde_json::to_string_pretty(&to_file(&doc, &project)).map_err(|e| e.to_string())?;
-    let tmp = project.with_extension(format!("{PROJECT_EXT}.part"));
-    std::fs::write(&tmp, json + "\n").map_err(|e| format!("can't write {}: {e}", project.display()))?;
-    std::fs::rename(&tmp, &project).map_err(|e| e.to_string())?;
-    doc.path = Some(project);
-    doc.dirty = false;
-    clear_autosave(&app);
-    Ok(publish(&app, &doc))
-}
-
-// ---- Autosave and recovery ----
-
-/// How often unsaved work is written to the recovery file.
-const AUTOSAVE_EVERY: Duration = Duration::from_secs(20);
-
-fn autosave_dir(app: &AppHandle) -> Option<PathBuf> {
-    app.path().app_data_dir().ok().map(|d| d.join("autosave"))
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Recovery {
-    project_name: String,
-    project_path: Option<String>,
-    /// Unix seconds.
-    saved_at: u64,
-}
-
-/// Writes unsaved work to the app's data folder every 20 seconds while it
-/// changes, so a crash loses at most that much. Saving clears it.
-pub fn spawn_autosave(app: AppHandle) {
-    std::thread::spawn(move || {
-        let mut written = 0u64;
-        loop {
-            std::thread::sleep(AUTOSAVE_EVERY);
-            let Some(dir) = autosave_dir(&app) else { continue };
-            let file = dir.join("recovery.tunek");
-            let snapshot = {
-                let s = state(&app);
-                let doc = s.doc.lock().unwrap();
-                if !doc.dirty || doc.revision == written {
-                    None
-                } else {
-                    let meta = Recovery {
-                        project_name: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
-                        project_path: doc.path.as_ref().map(|p| p.display().to_string()),
-                        saved_at: std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map_or(0, |d| d.as_secs()),
-                    };
-                    Some((serde_json::to_string_pretty(&to_file(&doc, &file)), serde_json::to_string(&meta), doc.revision))
-                }
-            };
-            let Some((Ok(json), Ok(meta), rev)) = snapshot else { continue };
-            let write = || -> std::io::Result<()> {
-                std::fs::create_dir_all(&dir)?;
-                std::fs::write(dir.join("recovery.tunek.part"), json)?;
-                std::fs::rename(dir.join("recovery.tunek.part"), &file)?;
-                std::fs::write(dir.join("recovery.json"), meta)
-            };
-            if write().is_ok() {
-                written = rev;
-            }
-        }
-    });
-}
-
-/// Removes the recovery files: the work is saved, or the user chose to drop it.
-pub fn clear_autosave(app: &AppHandle) {
-    if let Some(dir) = autosave_dir(app) {
-        let _ = std::fs::remove_file(dir.join("recovery.tunek"));
-        let _ = std::fs::remove_file(dir.join("recovery.json"));
-    }
-}
-
-/// Unsaved work left by a session that didn't close normally, if any.
-#[tauri::command]
-pub fn autosave_check(app: AppHandle) -> Option<Recovery> {
-    let dir = autosave_dir(&app)?;
-    if !dir.join("recovery.tunek").exists() {
-        return None;
-    }
-    serde_json::from_str(&std::fs::read_to_string(dir.join("recovery.json")).ok()?).ok()
+pub async fn project_save(path: Option<String>, app: AppHandle) -> Result<View, String> {
+    let a = app.clone();
+    spawn_blocking(move || project::save(&a, path.map(PathBuf::from))).await.map_err(|e| e.to_string())??;
+    Ok(publish_now(&app))
 }
 
 /// Loads the unsaved work, marked unsaved, under its original project's name.
 #[tauri::command]
 pub async fn autosave_recover(app: AppHandle) -> Result<View, String> {
-    let meta = autosave_check(app.clone()).ok_or("there is nothing to recover")?;
-    let dir = autosave_dir(&app).ok_or("no data folder")?;
     let a = app.clone();
-    spawn_blocking(move || load_project(&a, &dir.join("recovery.tunek"), meta.project_path.map(PathBuf::from), true))
-        .await
-        .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub fn autosave_discard(app: AppHandle) {
-    clear_autosave(&app);
+    let recovered = spawn_blocking(move || project::recover(&a)).await.map_err(|e| e.to_string())?;
+    let view = publish_now(&app);
+    recovered.map(|()| view)
 }
 
 // ---- Export ----
@@ -1443,7 +1383,7 @@ fn render_job(app: &AppHandle, song: bool) -> Result<RenderJob, String> {
     Ok(RenderJob {
         samples: doc.pads.iter().map(|p| p.sample.clone()).collect(),
         shared,
-        project: doc.path.as_deref().map(file_stem).unwrap_or_else(|| "Untitled".into()),
+        project: project::name(app),
         names: doc.pads.iter().map(|p| p.sample.as_ref().map(|x| x.name.clone()).unwrap_or_default()).collect(),
         song,
     })
@@ -1518,7 +1458,7 @@ pub async fn project_collect(app: AppHandle) -> Result<View, String> {
     let (project, todo) = {
         let s = state(&app);
         let doc = s.doc.lock().unwrap();
-        let project = doc.path.clone().ok_or("save the project first, then collect its samples")?;
+        let project = project::path(&app).ok_or("save the project first, then collect its samples")?;
         let base = project.parent().unwrap_or(Path::new("")).to_path_buf();
         let todo: Vec<(usize, PathBuf)> = doc
             .pads
@@ -1562,7 +1502,7 @@ pub async fn project_collect(app: AppHandle) -> Result<View, String> {
             }
         }
     }
-    project_save(None, app)
+    project_save(None, app).await
 }
 
 /// Renders `loops` passes of the pattern to a 48 kHz WAV.
@@ -1681,6 +1621,53 @@ fn file_stem(path: &Path) -> String {
     path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sample".into())
 }
 
+/// The Sampler's part of the app: its section of the project file, and the
+/// thread that sends the step and pad flashes to the UI.
+pub fn setup(app: &AppHandle) {
+    project::register(app, SamplerSection);
+    spawn_tick(app.clone(), app.state::<SamplerHandle>().inner().clone());
+}
+
+/// The Sampler's commands, the Library's and the project commands that answer with the Sampler's view.
+pub fn commands() -> crate::Commands {
+    crate::commands![
+        sampler_state,
+        sampler_load,
+        sampler_clear,
+        sampler_move,
+        sampler_settings,
+        sampler_step,
+        sampler_clear_steps,
+        sampler_transport,
+        sampler_play,
+        sampler_trigger,
+        sampler_release,
+        sampler_export,
+        sampler_bounce,
+        sampler_export_stems,
+        project_collect,
+        sampler_chop,
+        sampler_undo,
+        sampler_pattern,
+        sampler_switch,
+        sampler_velocity,
+        sampler_step_extras,
+        sampler_song,
+        sampler_metronome,
+        sampler_record,
+        sampler_copy_pattern,
+        sampler_redo,
+        library_scan,
+        library_default,
+        library_preview,
+        library_stop,
+        project_new,
+        project_open,
+        project_save,
+        autosave_recover,
+    ]
+}
+
 fn file_name(path: &Path) -> String {
     path.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| path.display().to_string())
 }
@@ -1710,7 +1697,7 @@ mod tests {
         assert_eq!(file.pads[0].sample.as_deref(), Some("kick.wav"));
         assert_eq!(file.pads[1].sample.as_deref(), Some("/elsewhere/snare.wav"));
         let json = serde_json::to_string(&file).unwrap();
-        let back: ProjectFile = serde_json::from_str(&json).unwrap();
+        let back: SamplerFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pads.len(), PADS);
     }
 
@@ -1729,7 +1716,7 @@ mod tests {
         doc.tempo = 90.0;
         doc.checkpoint("transport", before);
         assert_eq!(doc.history.undo.len(), 2, "a different kind of edit is a new step");
-        assert!(doc.dirty);
+        assert_eq!(doc.revision, 5, "every edit counts, merged or not");
 
         doc.history.redo.push(doc.snapshot());
         let before = doc.snapshot();
@@ -1745,13 +1732,55 @@ mod tests {
         doc.switch = PatternSwitch::Now;
         let json = serde_json::to_string(&to_file(&doc, Path::new("/tmp/a.tunek"))).unwrap();
         assert!(json.contains(r#""pattern_switch":"now""#), "{json}");
-        let back: ProjectFile = serde_json::from_str(&json).unwrap();
+        let back: SamplerFile = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pattern_switch, PatternSwitch::Now);
 
         // A project saved before the switch existed has no such key.
-        let old = r#"{"format":"tunekore-project","version":1,"tempo":120,"swing":0,"steps":16,"pads":[]}"#;
-        let file: ProjectFile = serde_json::from_str(old).unwrap();
+        let old = r#"{"swing":0,"steps":16,"pads":[]}"#;
+        let file: SamplerFile = serde_json::from_str(old).unwrap();
         assert_eq!(file.pattern_switch, PatternSwitch::End);
+        assert!(file.song_loop, "and loops its song, as before");
+    }
+
+    #[test]
+    fn a_version_1_project_reads_as_the_sampler_section() {
+        let v1 = r#"{"format":"tunekore-project","version":1,"tempo":90,"swing":0.5,"steps":12,"current":2,
+            "chain":[0,1],"song_mode":true,"song_loop":false,"pattern_switch":"now",
+            "pads":[{"sample":"kick.wav","settings":{"gainDb":-3},"patterns":["x...x"],"velocity":[[128]]}]}"#;
+        let obj = crate::project::tests_parse(v1);
+        let file: SamplerFile = serde_json::from_value(obj["sampler"].clone()).unwrap();
+        assert_eq!((file.swing, file.steps, file.current), (0.5, 12, 2));
+        assert_eq!((file.chain.as_slice(), file.song_mode, file.song_loop), (&[0u8, 1][..], true, false));
+        assert_eq!(file.pattern_switch, PatternSwitch::Now);
+        assert_eq!(file.pads[0].sample.as_deref(), Some("kick.wav"));
+        assert_eq!(pattern_bits(&file.pads[0].patterns[0]), 0b1_0001);
+        assert_eq!(file.pads[0].velocity[0][0], 128);
+        assert_eq!(file.pads[0].settings.gain_db, -3.0);
+    }
+
+    #[test]
+    fn a_version_1_pad_keeps_its_chance_ratchets_filter_envelope_and_velocity() {
+        let v1 = r#"{"format":"tunekore-project","version":1,"tempo":120,"swing":0,"steps":16,
+            "pads":[{"sample":"/nowhere/kick.wav",
+              "settings":{"filter":1,"cutoff":900,"fenvAmount":2.5,"fenvDecay":0.4,"velCutoff":1.5,"velTime":0.25},
+              "patterns":["x.x.","","x"],
+              "velocity":[[255,100],[],[50]],
+              "chance":[[255,128]],
+              "ratchet":[[1,3],[2]]}]}"#;
+        let obj = crate::project::tests_parse(v1);
+        let file: SamplerFile = serde_json::from_value(obj["sampler"].clone()).unwrap();
+        let engine = tunekore_engine::Engine::new();
+        let state = SamplerState::new(engine.sampler());
+        let pads = read_pads(&state, file.pads, Path::new("/music"));
+        let p = &pads[0];
+        assert_eq!(p.missing.as_deref(), Some(Path::new("/nowhere/kick.wav")), "a sample not on disk is kept as missing");
+        assert_eq!((p.patterns[0], p.patterns[1], p.patterns[2]), (0b101, 0, 1));
+        assert_eq!((p.velocity(0, 1), p.velocity(2, 0), p.velocity(1, 0)), (100, 50, 255));
+        assert_eq!((p.chance(0, 1), p.chance(0, 0), p.chance(1, 1)), (128, 255, 255));
+        assert_eq!((p.ratchet(0, 1), p.ratchet(1, 0), p.ratchet(0, 0)), (3, 2, 1));
+        let s = p.settings;
+        assert_eq!((s.filter, s.cutoff, s.fenv_amount, s.fenv_decay, s.vel_cutoff, s.vel_time), (1, 900.0, 2.5, 0.4, 1.5, 0.25));
+        assert_eq!(pads.len(), PADS, "the rest are empty pads");
     }
 
     #[test]

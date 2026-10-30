@@ -28,6 +28,7 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.5 | Apache-2.0 OR MIT | Shell: windows, menus, IPC |
 | [tauri-plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | 2.8.3 | Apache-2.0 OR MIT | Shell: the Open and Export folder dialogs |
 | [tauri-plugin-window-state](https://github.com/tauri-apps/plugins-workspace) | 2.5.0 | Apache-2.0 OR MIT | Shell: reopens windows at the size, place and display they were left at |
+| [rtsan-standalone](https://github.com/realtime-sanitizer/rtsan-standalone-rs) | 0.3.0 | Apache-2.0 | Engine: RealtimeSanitizer on the audio callback in debug builds and the engine tests. Inert unless built with `RTSAN_ENABLE=1`; default features off, so it never downloads a prebuilt runtime. With it set, it builds compiler-rt's rtsan from llvm-project `llvmorg-20.1.1` (Apache-2.0 WITH LLVM-exception), for that build only. Brings rtsan-standalone-sys and rtsan-standalone-macros (Apache-2.0), and num_cpus and hermit-abi (MIT OR Apache-2.0) at build time. |
 | tauri-build | 2.7.4 | Apache-2.0 OR MIT | Shell: build step |
 | [tempfile](https://github.com/Stebalien/tempfile) | 3.27.0 | MIT OR Apache-2.0 | Tests only |
 

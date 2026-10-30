@@ -5,6 +5,25 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.12: one clock, tracks and the Timeline switch
+
+idevkore/dk-tunekore#34, PR #45
+
+- One beat clock in the engine (tempo, time signature, position, play, stop,
+  loop) that everything runs on, and tracks with volume, pan, mute, solo and a
+  meter, summed into the master. The Sampler is the first track and sounds
+  exactly as before.
+- A Sampler / Timeline switch in the main window: ⌘1 and ⌘2, the View menu,
+  or Tab when nothing has focus. The Timeline is a placeholder until #36.
+- Projects save as format v2, with a part for each feature. Older projects
+  open as one Sampler track; a file that can't be read changes nothing.
+- A tempo change while the pattern plays now lands at once, on the beat.
+- Steps stay on their exact frame however long the pattern runs.
+- Fixed: changing the audio output no longer replays the last pads hit, and a
+  new project no longer counts as unsaved before you change anything.
+- The engine's tests run under RealtimeSanitizer, which fails them if the
+  audio thread allocates, locks or blocks.
+
 ## 0.1.11: a plugin host
 
 idevkore/dk-tunekore#35, PR #46

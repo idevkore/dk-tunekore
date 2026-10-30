@@ -154,6 +154,94 @@ flowchart LR
 - **Long audio.** Files stream from disk with read-ahead. Short samples are
   cached in RAM.
 
+### The engine core and its seams (idevkore/dk-tunekore#34)
+
+Built 2026-10-29. Later features each add files of their own on these seams
+rather than edit the same ones.
+
+- **Transport** (`engine/src/transport.rs`). One beat clock. The control
+  side sets tempo, time signature, play, stop, seek and the loop on
+  `TransportShared` (atomics). The audio thread's `Transport` reads them once
+  per block and hands every device a `ProcessContext`: tempo, beats per
+  frame, the position in beats (quarter notes) and frames, the bar and where
+  it starts, the time signature, playing, started, jumped, and the loop. A
+  block is split where the loop wraps, so time runs straight inside one
+  context. A tempo change takes effect at the next block, from the beat
+  reached. Every beat-to-frame conversion goes through `TempoMap`, one tempo
+  and signature for now. The Timeline's tempo lane (every competitor has
+  tempo and meter changes along the song) makes it a list of changes by beat
+  without changing the transport's API: the transport already splits a
+  block at the map's next change, so each context keeps one tempo. Recording
+  (#38, #40) uses the loop range already there; its count-in belongs here
+  too, as a pre-roll before the start position.
+- **Tracks and the graph** (`engine/src/track.rs`, `engine/src/graph.rs`).
+  A track has an id (saved in projects; the Sampler's is 1), a name, a
+  source slot, a chain of devices after it, volume, pan, mute, solo and a
+  peak meter. Tracks sum into the master, then the master level and the
+  limiter. For now the tracks run one after another on the audio thread;
+  the worker pool comes later. The main thread's `Mixer` owns the track list
+  and the devices; while no output is open the devices sit there.
+- **Devices** (`engine/src/device.rs`). The `Device` trait: `prepare(rate,
+  max_frames)` on the main thread (it may allocate), `process(ctx, events,
+  buffers)` on the audio thread (real-time safe), `latency()`. A track runs
+  its source, then its chain, over the same stereo buffers and the same
+  `Events` list: a source adds sound (an instrument) or notes (a clip
+  player, the keyboard), and the devices after it read the notes and change
+  the sound.
+- **Snapshots** (`engine/src/snapshot.rs`). After each edit the `Mixer` puts
+  an immutable snapshot of the tracks in a one-slot, latest-wins mailbox,
+  with the devices to install alongside it (prepared on the main thread), so
+  the audio thread never runs a track list ahead of its devices and a burst
+  of edits can't fill anything. The audio thread takes the newest at the top
+  of a block; old snapshots and removed devices go back on a return queue to
+  be freed on the main thread. When the output closes, the graph is dropped
+  off the audio thread and sends every device home; the next output prepares
+  them again at its rate.
+- **The Sampler** is track 1, its source a `SamplerDevice`. Its sequencer
+  has no clock of its own: its pattern is laid on the beat grid from beat 0.
+  Each step's beat comes from the grid (its origin, whole passes, its place
+  in a pass) and its frame from the clock, so it stays sample-accurate
+  through tempo changes and long sessions, and finds its place after a loop
+  wrap or a seek. A
+  song that doesn't loop stops the transport at its end. Its output is byte
+  for byte what the Phase 2 engine rendered.
+- **Real-time checks.** The output callback runs inside RealtimeSanitizer's
+  real-time context in debug builds (`rtsan-standalone`, built from LLVM's
+  own source, no prebuilt download). It is inert unless the build sets
+  `RTSAN_ENABLE=1`; CI runs `RTSAN_ENABLE=1 cargo test -p tunekore-engine`
+  on macOS. Engine tests run audio-thread code through `testing::realtime`,
+  which also counts heap calls, so the checks mean something without RTSan.
+- **Projects** (`src-tauri/src/project.rs`). Format v2: one JSON object with
+  a section per module. Every section reads and checks its part before any
+  applies; a section that still fails leaves the project untitled and
+  unsaved, so Save can't write over the original. `transport` (tempo, time signature) and `tracks`
+  (ids, names, mix) belong to `project.rs`; the Sampler's part is `sampler`;
+  `timeline`, `plugins` and `midi` are kept for #36, #37 and #20 and written
+  as `null` until a module claims them. A module implements
+  `project::Section` (save, read then apply, clear, revision) in its own
+  file and calls `project::register` from its setup. Version 1 files open as
+  one Sampler track.
+- **Commands** (`src-tauri/src/lib.rs`). Each module lists its Tauri commands
+  with `commands![...]` in its own file and exposes `commands()` and
+  `setup()`; `lib.rs` routes each call by name. A new module adds three
+  lines, each in an alphabetical list of one line per module: its `mod`,
+  its `commands()` and its `setup`.
+- **The main window** (`src/App.tsx`) is a shell with the Sampler / Timeline
+  switch and the window's status line. ⌘1 is the Sampler and ⌘2 the
+  Timeline (Nate's decision, 2026-10-29), from the keyboard, the View menu
+  and the switch; ⌘3 is kept for the Clip Grid. Tab also flips between them,
+  but only while nothing has focus. The Sampler is
+  `src/sampler/SamplerView.tsx` and stays mounted behind the Timeline;
+  `src/timeline/Timeline.tsx` is the Timeline's.
+
+Where the next pieces go:
+
+| Work | Engine | Shell and UI |
+| --- | --- | --- |
+| Plugins in the app (#37) | `engine/src/plugin_device.rs`: a `Device` around the `plugins/` host. `prepare` sets up processing at the output's rate; `process` maps `ProcessContext` to the plugin's transport and `Events` to its notes; `latency` reports the plugin's. Put it in a track's source slot or chain through `Mixer`. | Its own module with `commands()` and a `plugins` section |
+| Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
+| MIDI learn (#20) | none needed | `midi.rs` (its `commands()` and `setup()` are there already) registers a `midi` section |
+
 ### Plugin hosting
 
 - **Scanning** runs in a helper process, so a plugin that crashes during the

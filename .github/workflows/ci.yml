@@ -63,6 +63,39 @@ jobs:
         if: runner.os == 'macOS'
         run: cargo test --workspace --locked
 
+      # The engine's tests again with RealtimeSanitizer built in: any
+      # allocation, free, lock or blocking call on the audio thread aborts
+      # them. Without a cached runtime, rtsan-standalone builds it from
+      # LLVM's source (git, cmake and make are on the runner). The runtime is
+      # copied out and cached before the tests run, so a failure later in
+      # the job doesn't throw the build away.
+      - name: RTSan runtime (restore)
+        id: rtsan-cache
+        if: runner.os == 'macOS'
+        uses: actions/cache/restore@v4
+        with:
+          path: .rtsan
+          key: rtsan-0.3.0-llvmorg-20.1.1-${{ runner.os }}-${{ runner.arch }}
+      - name: RTSan runtime (build)
+        if: runner.os == 'macOS' && steps.rtsan-cache.outputs.cache-hit != 'true'
+        env:
+          RTSAN_ENABLE: "1"
+        run: |
+          cargo test -p tunekore-engine --locked --no-run
+          mkdir -p .rtsan
+          cp target/debug/build/rtsan-standalone-sys-*/out/libclang_rt.rtsan_osx_dynamic.dylib .rtsan/
+      - name: RTSan runtime (save)
+        if: runner.os == 'macOS' && steps.rtsan-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .rtsan
+          key: rtsan-0.3.0-llvmorg-20.1.1-${{ runner.os }}-${{ runner.arch }}
+      - name: Engine tests under RealtimeSanitizer
+        if: runner.os == 'macOS'
+        env:
+          RTSAN_ENABLE: "1"
+        run: RTSAN_LIB_PATH="$PWD/.rtsan/libclang_rt.rtsan_osx_dynamic.dylib" cargo test -p tunekore-engine --locked
+
       - name: Build the app
         if: runner.os != 'macOS'
         run: cargo build --workspace --locked

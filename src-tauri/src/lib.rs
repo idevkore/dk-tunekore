@@ -1,6 +1,28 @@
+//! The Tauri shell: windows, menus and files around the engine.
+//!
+//! Each feature module brings its own Tauri commands as a [`Commands`] list,
+//! made with [`commands!`] in its own file, its own `setup`, and its own part
+//! of the project file as a [`project::Section`] it registers from that
+//! setup. Adding a module here takes three lines, each in an alphabetical
+//! list of one line per module: its `mod`, its `commands()` and its `setup`.
+
+/// A module's Tauri commands, for [`run`]'s router: `commands![a, b]` lists
+/// commands defined in the module where it is written, and
+/// `commands!(module => [a, b])` lists another module's.
+macro_rules! commands {
+    ($($name:ident),* $(,)?) => {
+        $crate::Commands::new(&[$(stringify!($name)),*], Box::new(tauri::generate_handler![$($name),*]))
+    };
+    ($module:ident => [$($name:ident),* $(,)?]) => {
+        $crate::Commands::new(&[$(stringify!($name)),*], Box::new(tauri::generate_handler![$($module::$name),*]))
+    };
+}
+pub(crate) use commands;
+
 mod analyzer;
 mod display;
 mod midi;
+mod project;
 mod recorder;
 mod sampler;
 
@@ -15,6 +37,35 @@ const TONE_GAIN: f32 = 0.2;
 /// Longer than the engine's 10 ms gain ramp, so the stream closes on silence.
 const RAMP_WAIT: Duration = Duration::from_millis(40);
 
+type Handler = Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync>;
+
+/// One module's commands: their names, and the handler that runs them.
+pub(crate) struct Commands {
+    names: &'static [&'static str],
+    handler: Handler,
+}
+
+impl Commands {
+    pub(crate) fn new(names: &'static [&'static str], handler: Handler) -> Self {
+        Self { names, handler }
+    }
+}
+
+/// Sends each call to the module whose list names it.
+fn router(modules: Vec<Commands>) -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
+    let mut seen = std::collections::HashSet::new();
+    for name in modules.iter().flat_map(|m| m.names) {
+        assert!(seen.insert(*name), "two modules have a command called {name}");
+    }
+    move |invoke| {
+        let name = invoke.message.command();
+        match modules.iter().position(|m| m.names.contains(&name)) {
+            Some(i) => (modules[i].handler)(invoke),
+            None => false,
+        }
+    }
+}
+
 /// The engine plus the device its stream is open on (`Some(None)` = system default).
 pub(crate) struct Audio {
     pub(crate) engine: Engine,
@@ -22,6 +73,10 @@ pub(crate) struct Audio {
 }
 
 impl Audio {
+    pub(crate) fn new(engine: Engine) -> Self {
+        Self { engine, open_device: None }
+    }
+
     fn fade_out_and_close(&mut self) {
         self.engine.set_tone(false, 440.0, 0.0);
         self.engine.player().set_playing(false);
@@ -42,8 +97,13 @@ impl Audio {
 
 type Shared<'a> = State<'a, &'static Mutex<Audio>>;
 
-fn audio(state: &Shared<'_>) -> &'static Mutex<Audio> {
+fn audio_state(state: &Shared<'_>) -> &'static Mutex<Audio> {
     *state.inner()
+}
+
+/// The engine, from anywhere with the app.
+pub(crate) fn audio(app: &tauri::AppHandle) -> &'static Mutex<Audio> {
+    *app.state::<&'static Mutex<Audio>>().inner()
 }
 
 /// Set once the user has said to quit without saving.
@@ -51,7 +111,7 @@ static QUIT_CONFIRMED: AtomicBool = AtomicBool::new(false);
 
 /// Whether quitting or closing the main window must ask first.
 fn must_ask(app: &tauri::AppHandle) -> bool {
-    !QUIT_CONFIRMED.load(Ordering::Relaxed) && app.state::<sampler::SamplerState>().is_dirty()
+    !QUIT_CONFIRMED.load(Ordering::Relaxed) && project::is_dirty(app)
 }
 
 /// Quits, after the UI has asked about unsaved changes.
@@ -59,7 +119,7 @@ fn must_ask(app: &tauri::AppHandle) -> bool {
 fn app_quit(app: tauri::AppHandle) {
     QUIT_CONFIRMED.store(true, Ordering::Relaxed);
     // The user chose to drop the unsaved work, so don't offer it back next time.
-    sampler::clear_autosave(&app);
+    project::clear_autosave(&app);
     app.exit(0);
 }
 
@@ -70,7 +130,7 @@ fn engine_version() -> &'static str {
 
 #[tauri::command]
 async fn list_outputs(state: Shared<'_>) -> Result<Vec<OutputDevice>, String> {
-    let audio = audio(&state);
+    let audio = audio_state(&state);
     spawn_blocking(move || audio.lock().unwrap().engine.list_outputs())
         .await
         .map_err(|e| e.to_string())?
@@ -80,7 +140,7 @@ async fn list_outputs(state: Shared<'_>) -> Result<Vec<OutputDevice>, String> {
 /// again with a new frequency, it retunes the running tone.
 #[tauri::command]
 async fn start_tone(device_id: Option<String>, frequency: f32, state: Shared<'_>) -> Result<(), String> {
-    let audio = audio(&state);
+    let audio = audio_state(&state);
     spawn_blocking(move || {
         let mut a = audio.lock().unwrap();
         if a.open_device.as_ref() != Some(&device_id) {
@@ -100,32 +160,32 @@ async fn start_tone(device_id: Option<String>, frequency: f32, state: Shared<'_>
 /// Stops the tone. The output stays open for the Sampler and the Analyzer.
 #[tauri::command]
 fn stop_tone(state: Shared<'_>) {
-    audio(&state).lock().unwrap().engine.set_tone(false, 440.0, 0.0);
+    audio_state(&state).lock().unwrap().engine.set_tone(false, 440.0, 0.0);
 }
 
 /// The master level in dB (-60 = off, up to +6). Everything is limited after it.
 #[tauri::command]
 fn set_master(db: f32, state: Shared<'_>) {
     let gain = if db <= -60.0 { 0.0 } else { 10f32.powf(db.min(6.0) / 20.0) };
-    audio(&state).lock().unwrap().engine.set_master(gain);
+    audio_state(&state).lock().unwrap().engine.set_master(gain);
 }
 
 #[tauri::command]
 fn master(state: Shared<'_>) -> f32 {
-    let g = audio(&state).lock().unwrap().engine.master();
+    let g = audio_state(&state).lock().unwrap().engine.master();
     if g <= 0.0 { -60.0 } else { 20.0 * g.log10() }
 }
 
 /// The output device in use (`None` = the system default), or `None` when closed.
 #[tauri::command]
 fn current_output(state: Shared<'_>) -> Option<Option<String>> {
-    audio(&state).lock().unwrap().open_device.clone()
+    audio_state(&state).lock().unwrap().open_device.clone()
 }
 
 /// Moves the output to another device (`None` = the system default).
 #[tauri::command]
 async fn set_output(device_id: Option<String>, state: Shared<'_>) -> Result<(), String> {
-    let audio = audio(&state);
+    let audio = audio_state(&state);
     spawn_blocking(move || {
         let mut a = audio.lock().unwrap();
         if a.open_device.as_ref() == Some(&device_id) {
@@ -159,8 +219,18 @@ fn spawn_meter(app: tauri::AppHandle, meter: Meter) {
             if g < 0.99 {
                 let _ = app.emit("limiter", 20.0 * g.max(1e-6).log10());
             }
+            // The output stream's errors, counted on the audio thread, logged here.
+            let errors = meter.take_stream_errors();
+            if errors > 0 {
+                eprintln!("audio output: {errors} stream error(s), such as a buffer underrun");
+            }
         }
     });
+}
+
+/// The shell's own commands: the engine, the output device, the tone, quitting.
+fn shell_commands() -> Commands {
+    commands![engine_version, app_quit, list_outputs, start_tone, stop_tone, current_output, set_master, master, set_output]
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -169,23 +239,35 @@ pub fn run() {
     let meter = engine.meter();
     let player = engine.player();
     let pads = engine.sampler();
-    let midi_state = midi::state();
     // One engine for the life of the app.
-    let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio { engine, open_device: None })));
+    let audio: &'static Mutex<Audio> = Box::leak(Box::new(Mutex::new(Audio::new(engine))));
+
+    // Every module's commands, one line each, in alphabetical order.
+    let commands = vec![
+        analyzer::commands(),
+        display::commands(),
+        midi::commands(),
+        project::commands(),
+        recorder::commands(),
+        sampler::commands(),
+        shell_commands(),
+    ];
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         // Windows reopen at the size, place and display they were left at.
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .manage(display::Zoom::default())
         .menu(display::menu)
         .on_menu_event(|app, event| display::on_menu(app, event.id().as_ref()))
-        .manage(audio)
-        .manage(player.clone())
         .manage(analyzer::Analyzer::default())
-        .manage(midi_state.clone())
+        .manage(audio)
+        .manage(display::Zoom::default())
+        .manage(midi::state())
+        .manage(pads.clone())
+        .manage(player)
+        .manage(project::Project::<tauri::AppHandle>::new())
         .manage(recorder::RecorderState::default())
-        .manage(sampler::SamplerState::new(pads.clone()))
+        .manage(sampler::SamplerState::new(pads))
         .on_window_event(|window, event| {
             // Closing the main window with unsaved changes asks first (the UI shows the question).
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -198,15 +280,15 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            let zoom = display::load(app.handle());
-            if (zoom - 1.0).abs() > 0.001 {
-                display::set(app.handle(), zoom);
-            }
             spawn_meter(app.handle().clone(), meter);
-            analyzer::spawn_position(app.handle().clone(), player);
-            midi::spawn(app.handle().clone(), pads.clone(), midi_state);
-            sampler::spawn_tick(app.handle().clone(), pads);
-            sampler::spawn_autosave(app.handle().clone());
+            // Each module's setup, one line each, in alphabetical order.
+            analyzer::setup(app.handle());
+            display::setup(app.handle());
+            midi::setup(app.handle());
+            project::setup(app.handle());
+            sampler::setup(app.handle());
+            // Last: every module has registered its part of the project.
+            project::ready(app.handle());
             // Open the default output now, so the pads play on the first click.
             std::thread::spawn(move || {
                 if let Err(e) = audio.lock().unwrap().ensure_open() {
@@ -216,71 +298,7 @@ pub fn run() {
             let _ = app.get_webview_window("main");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
-            engine_version,
-            app_quit,
-            list_outputs,
-            start_tone,
-            stop_tone,
-            current_output,
-            set_master,
-            master,
-            set_output,
-            analyzer::open_analyzer,
-            analyzer::analyzer_backends,
-            analyzer::analyzer_open,
-            analyzer::analyzer_separate,
-            analyzer::analyzer_cancel,
-            analyzer::analyzer_play,
-            analyzer::analyzer_seek,
-            analyzer::analyzer_track,
-            analyzer::analyzer_export,
-            analyzer::analyzer_to_pads,
-            analyzer::analyzer_tempo_key,
-            display::display_zoom,
-            display::set_display_zoom,
-            sampler::sampler_state,
-            sampler::sampler_load,
-            sampler::sampler_clear,
-            sampler::sampler_move,
-            sampler::sampler_settings,
-            sampler::sampler_step,
-            sampler::sampler_clear_steps,
-            sampler::sampler_transport,
-            sampler::sampler_play,
-            sampler::sampler_trigger,
-            sampler::sampler_release,
-            sampler::sampler_export,
-            sampler::sampler_bounce,
-            sampler::sampler_export_stems,
-            sampler::project_collect,
-            sampler::sampler_chop,
-            sampler::sampler_undo,
-            sampler::sampler_pattern,
-            sampler::sampler_switch,
-            sampler::sampler_velocity,
-            sampler::sampler_step_extras,
-            sampler::sampler_song,
-            sampler::sampler_metronome,
-            sampler::sampler_record,
-            sampler::sampler_copy_pattern,
-            sampler::sampler_redo,
-            sampler::library_scan,
-            sampler::library_default,
-            sampler::library_preview,
-            sampler::library_stop,
-            sampler::project_new,
-            sampler::project_open,
-            sampler::project_save,
-            sampler::autosave_check,
-            sampler::autosave_recover,
-            sampler::autosave_discard,
-            midi::midi_inputs,
-            recorder::input_devices,
-            recorder::sampling_start,
-            recorder::sampling_stop,
-            recorder::sampling_cancel,
-        ])
+        .invoke_handler(router(commands))
         .build(tauri::generate_context!())
         .expect("error while building tuneKore")
         .run(|app, event| {

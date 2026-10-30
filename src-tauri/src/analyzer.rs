@@ -511,3 +511,25 @@ fn with_log_tail(message: &str, log: &Path) -> String {
     let tail = lines[lines.len().saturating_sub(6)..].join("\n");
     format!("{message}\n\n{tail}")
 }
+
+/// The Analyzer's commands.
+pub fn commands() -> crate::Commands {
+    crate::commands![
+        open_analyzer,
+        analyzer_backends,
+        analyzer_open,
+        analyzer_separate,
+        analyzer_cancel,
+        analyzer_play,
+        analyzer_seek,
+        analyzer_track,
+        analyzer_export,
+        analyzer_to_pads,
+        analyzer_tempo_key,
+    ]
+}
+
+/// Sends the player's position to the Analyzer window.
+pub fn setup(app: &AppHandle) {
+    spawn_position(app.clone(), app.state::<Player>().inner().clone());
+}
