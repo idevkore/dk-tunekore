@@ -600,7 +600,10 @@ impl TimelineState {
                 Resend::Changed(before) => before.get(id) != doc.clips.get(id),
                 Resend::Stale => false,
             };
-            if rate > 0 && (changed || f.rate != rate) {
+            // A player at a new rate whose clips this edit didn't touch waits for
+            // the refeed, which resamples with the document free.
+            let stale = f.rate != rate && !matches!(what, Resend::Changed(_));
+            if rate > 0 && (changed || stale) {
                 f.feed.publish(self.build(doc.clips.get(id).map_or(&[][..], Vec::as_slice), rate));
                 f.rate = rate;
             }
