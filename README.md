@@ -53,7 +53,8 @@ tracks and audio clips, with MIDI clips and plugins on tracks next.
     track's foot to change its height. An arm button waits for recording.
   - **Clips:** drag samples from the Library or files from Finder onto a
     track (they play one after another), or below the tracks for a track
-    each, lined up. Move them (⌥ copies), trim either edge, loop one by
+    each, lined up; the Analyzer sends a stem, or all four, to new tracks at
+    bar 1. Move them (⌥ copies), trim either edge, loop one by
     dragging the top of its right edge, fade in and out from its top corners,
     set its gain, split at the playhead (⌘E), duplicate (⌘D) and delete (⌫).
     Drags snap to the grid (bar, beat, 1/8, 1/16 or off; hold ⌘ to ignore it).
@@ -64,10 +65,12 @@ tracks and audio clips, with MIDI clips and plugins on tracks next.
   - Clips aren't warped yet: they play at their own speed, so a clip's length
     in beats follows the tempo. Its files are decoded into memory.
   - Undo and redo cover the Timeline's edits; tracks, clips, the loop and the
-    view are saved in the project.
+    view are saved in the project, and collecting samples copies the clips'
+    files too.
 - **Analyzer:** open a song, split it into vocals, drums, bass and other,
   then play, solo, mute and export the stems, or send one to the pads, whole
-  or chopped at its hits from the playhead. It finds the song's tempo and key
+  or chopped at its hits from the playhead, or to the Timeline, one stem or
+  all four on tracks of their own. It finds the song's tempo and key
   (with its Camelot code) and can set the Sampler to that tempo. Separation runs on this Mac in a
   separate worker process, with Demucs. Its weights are research-only, so a
   model we may ship replaces it before release (see `docs/PLAN.md` section 6).

@@ -239,11 +239,15 @@ rather than edit the same ones.
   source is a `ClipPlayer`. A clip starts at a beat and plays a span of its
   file at the file's own speed (Warp, Phase 8, makes clips follow the
   tempo): `offset`, `content` (the span it loops over), `phase`, `length`
-  and fades in seconds. Where a clip is in its file is worked out from the
-  beat alone, as the Sampler's steps are, so it lands on the exact frame at
-  its edges, its own loop and the transport's loop wrap; a tempo change while
-  playing moves the clips under the playhead to where the new tempo puts
-  them. Each clip edge gets a 1.5 ms declick unless the next clip carries on
+  and fades in seconds. Where a clip is in its file is the time the tempo
+  map puts between its start beat and the beat playing (`clip::frames_into`,
+  through `TempoMap::frames_between`, the one place that conversion
+  happens), worked out from the beat alone as the Sampler's steps are, so it
+  lands on the exact frame at its edges, its own loop and the transport's
+  loop wrap. With one tempo for the song, a tempo change while playing moves
+  the clips under the playhead to where the new tempo puts them,
+  crossfaded; once the tempo lane makes the map a list of changes, unwarped
+  audio plays straight through a tempo ramp instead. Each clip edge gets a 1.5 ms declick unless the next clip carries on
   with the next sample of the same file (a split), and any jump (play, stop,
   seek, loop wrap, tempo change, an edit while playing) is crossfaded over
   the same time. The shell sends a track's clips to its player as a
