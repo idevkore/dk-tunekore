@@ -1,5 +1,8 @@
 //! Test-only VST3 plugin for soundcraft-vst3-host (two audio module classes):
 //!
+//! (From soundCraft, MIT OR Apache-2.0, kept with its wording as attribution; tuneKore added the
+//! third class. See `third_party/soundcraft/` for the licence and what changed.)
+//!
 //! - "Fixture Gain" (`Fx`): stereo or mono in → out × gain, with a separate edit controller
 //!   (connected through IConnectionPoint, synced through the component state). Params: 7 "Gain"
 //!   (plain 0..2, linear, units dB), 3 "Mode" (3 steps: A/B/C), 12 "Freq" (20..20000 Hz, log),

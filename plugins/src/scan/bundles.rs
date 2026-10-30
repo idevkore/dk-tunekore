@@ -1,5 +1,8 @@
 //! Finding VST3 plugins on disk (safe, pure `std::fs`), resolving bundles to their binaries and
-//! mapping VST3 sub-categories to SoundCraft categories.
+//! mapping VST3 sub-categories to our categories (instrument, effect or other).
+//!
+//! Derived from soundCraft's `vst3-host` (`scan.rs`), MIT OR Apache-2.0; see
+//! `third_party/soundcraft/`. What changed: the category mapping.
 
 use crate::Category;
 use std::path::{Path, PathBuf};
