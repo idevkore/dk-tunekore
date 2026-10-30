@@ -1,7 +1,7 @@
 //! Finding VST3 plugins on disk (safe, pure `std::fs`), resolving bundles to their binaries and
 //! mapping VST3 sub-categories to SoundCraft categories.
 
-use soundcraft_dsp::Category;
+use crate::Category;
 use std::path::{Path, PathBuf};
 
 /// Directory recursion limit while scanning (vendors nest folders, never deeply).
@@ -197,25 +197,12 @@ pub fn split_sub_categories(s: &str) -> Vec<String> {
     s.split('|').map(str::trim).filter(|t| !t.is_empty()).take(32).map(str::to_string).collect()
 }
 
-/// Maps VST3 sub-categories (`Fx|EQ`, `Instrument|Synth`, …) to a SoundCraft insert-menu category.
+/// Instrument or effect, from the VST3 sub-categories (`Fx|EQ`, `Instrument|Synth`, ...).
 pub fn category_from_sub_categories<S: AsRef<str>>(subs: &[S]) -> Category {
-    let has = |names: &[&str]| subs.iter().any(|f| names.iter().any(|n| f.as_ref().eq_ignore_ascii_case(n)));
     if is_instrument(subs) {
         Category::Instrument
-    } else if has(&["EQ", "Filter"]) {
-        Category::Eq
-    } else if has(&["Dynamics"]) {
-        Category::Dynamics
-    } else if has(&["Reverb"]) {
-        Category::Reverb
-    } else if has(&["Delay"]) {
-        Category::Delay
-    } else if has(&["Modulation"]) {
-        Category::Modulation
-    } else if has(&["Distortion"]) {
-        Category::Harmonic
-    } else if has(&["Pitch Shift"]) {
-        Category::PitchShift
+    } else if subs.iter().any(|f| f.as_ref().eq_ignore_ascii_case("Fx")) {
+        Category::Effect
     } else {
         Category::Other
     }
@@ -306,17 +293,11 @@ mod tests {
     #[test]
     fn sub_categories_map_to_categories() {
         let c = |s: &str| category_from_sub_categories(&split_sub_categories(s));
-        assert_eq!(c("Fx|Reverb"), Category::Reverb);
+        assert_eq!(c("Fx|Reverb"), Category::Effect);
         assert_eq!(c("Instrument|Synth"), Category::Instrument);
-        assert_eq!(c("Fx|Dynamics"), Category::Dynamics);
-        assert_eq!(c("Fx|EQ"), Category::Eq);
-        assert_eq!(c("Fx|Filter"), Category::Eq);
-        assert_eq!(c("Fx|Modulation"), Category::Modulation);
-        assert_eq!(c("Fx|Distortion"), Category::Harmonic);
-        assert_eq!(c("Fx|Pitch Shift"), Category::PitchShift);
-        assert_eq!(c("Fx|Delay"), Category::Delay);
-        assert_eq!(c("Fx"), Category::Other);
+        assert_eq!(c("Fx"), Category::Effect);
         assert_eq!(c(""), Category::Other);
+        assert_eq!(c("Analyzer"), Category::Other);
         assert_eq!(split_sub_categories(" Fx || Delay |"), vec!["Fx", "Delay"]);
         assert!(is_instrument(&split_sub_categories("Instrument|Sampler")));
         assert!(!is_instrument(&split_sub_categories("Fx|Instrument")));

@@ -14,8 +14,9 @@
 // one platform are needed on another.
 #![allow(clippy::unnecessary_cast)]
 
-use crate::{Vst3Error, scan};
-use soundcraft_dsp::Transport;
+use super::Vst3Error;
+use crate::scan::bundles as scan;
+use crate::Transport;
 use std::ffi::{c_char, c_int, c_void};
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
@@ -1302,11 +1303,11 @@ fn apply_transport(c: &mut sv::ProcessContext, t: &Transport) {
     let state = state as u32;
     c.state = state;
     c.tempo = t.tempo;
-    c.timeSigNumerator = i32::try_from(t.numerator).unwrap_or(4);
-    c.timeSigDenominator = i32::try_from(t.denominator).unwrap_or(4);
-    c.projectTimeSamples = t.samples;
-    c.projectTimeMusic = t.quarters;
-    c.barPositionMusic = t.bar_start;
+    c.timeSigNumerator = i32::try_from(t.time_sig_numerator).unwrap_or(4);
+    c.timeSigDenominator = i32::try_from(t.time_sig_denominator).unwrap_or(4);
+    c.projectTimeSamples = t.project_samples;
+    c.projectTimeMusic = t.project_beats;
+    c.barPositionMusic = t.bar_start_beats;
 }
 
 /// A live plugin: component + audio processor (+ edit controller) and the host objects.
@@ -2415,11 +2416,11 @@ mod tests {
         let t = Transport {
             playing: true,
             tempo: 90.0,
-            numerator: 3,
-            denominator: 4,
-            samples: 96_000,
-            quarters: 3.5,
-            bar_start: 3.0,
+            time_sig_numerator: 3,
+            time_sig_denominator: 4,
+            project_samples: 96_000,
+            project_beats: 3.5,
+            bar_start_beats: 3.0,
             ..Transport::default()
         };
         apply_transport(&mut c, &t);
