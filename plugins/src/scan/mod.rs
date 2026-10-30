@@ -13,7 +13,12 @@
 //! for p in cache.plugins() {
 //!     println!("{} ({}) {:?}", p.info.name, p.info.vendor, p.info.category);
 //! }
-//! // "Rescan" in the UI forces every plugin to be probed again.
+//! // The failed ones, with why (the blocklist the UI shows):
+//! for p in cache.failures() {
+//!     println!("{}: {:?}, {}", p.info.name, p.status, p.error.as_deref().unwrap_or(""));
+//! }
+//! // "Retry failed plugins" in the UI probes just those again; "Rescan" probes everything.
+//! let cache = scan::retry_failed(&ScanOptions::default())?;
 //! let cache = scan::rescan(&ScanOptions::default())?;
 //! # Ok::<(), scan::ScanError>(())
 //! ```
@@ -23,7 +28,7 @@ mod cache;
 pub mod probe;
 pub mod runner;
 
-pub use cache::{default_cache_path, ScanCache, ScanEntry, CACHE_VERSION};
+pub use cache::{default_cache_path, ScanCache, ScanEntry, ScanStatus, CACHE_VERSION};
 pub use runner::ScanOptions;
 
 use std::path::PathBuf;
@@ -72,6 +77,9 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
     if opts.force {
         cmd.arg("--force");
     }
+    if opts.retry_failed {
+        cmd.arg("--retry-failed");
+    }
     for p in &opts.search_paths {
         cmd.arg("--path").arg(p);
     }
@@ -103,4 +111,10 @@ pub fn scan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
 /// Like [`scan`], but probes every plugin again, whether or not it changed.
 pub fn rescan(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
     scan(&ScanOptions { force: true, ..opts.clone() })
+}
+
+/// Like [`scan`], but gives the plugins that failed last time another try (after the user fixed
+/// a licence, say). Plugins that loaded are taken from the cache as usual.
+pub fn retry_failed(opts: &ScanOptions) -> Result<ScanCache, ScanError> {
+    scan(&ScanOptions { retry_failed: true, ..opts.clone() })
 }

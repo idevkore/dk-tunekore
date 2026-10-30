@@ -5,7 +5,7 @@ mod common;
 
 use common::{bad_plugin, fixture_bundle, scratch_dir, Misbehaviour};
 use std::time::{Duration, Instant};
-use tunekore_plugins::scan::{self, ScanCache, ScanOptions};
+use tunekore_plugins::scan::{self, ScanCache, ScanOptions, ScanStatus};
 use tunekore_plugins::vst3;
 use tunekore_plugins::{Category, PluginError};
 
@@ -17,6 +17,7 @@ fn options(dir: &std::path::Path, cache: &std::path::Path) -> ScanOptions {
         timeout: Duration::from_secs(3),
         jobs: 4,
         force: false,
+        retry_failed: false,
         scanner: Some(env!("CARGO_BIN_EXE_tunekore-scan").into()),
         total_timeout: Duration::from_secs(120),
     }
@@ -82,6 +83,12 @@ fn the_scan_survives_a_crash_a_hang_and_exceptions_and_reports_each() {
     assert_eq!(gain.params, 7);
 
     let err = |name: &str| cache.find(name).unwrap_or_else(|| panic!("no entry for {name}")).error.clone().unwrap_or_else(|| panic!("{name} should have failed"));
+    let status = |name: &str| cache.find(name).unwrap().status;
+    assert_eq!(status("Fixture Synth"), ScanStatus::Ok);
+    assert_eq!(status("Bad Plugin"), ScanStatus::Failed, "threw an exception: caught, a plain failure");
+    assert_eq!(status("ThrowsEarly"), ScanStatus::Failed);
+    assert_eq!(status("Aborts"), ScanStatus::Crashed);
+    assert_eq!(status("Hangs"), ScanStatus::TimedOut);
     let e = err("Bad Plugin");
     // Two bundles produce a plugin called Bad Plugin (initialize throws); the others never get that far.
     assert!(e.contains("boom from initialize"), "{e}");
@@ -105,6 +112,13 @@ fn a_second_scan_reuses_the_cache_and_a_rescan_does_not() {
     let second = scan::scan(&opts).unwrap();
     assert!(t.elapsed() < Duration::from_secs(2), "took {:?}", t.elapsed());
     assert_eq!(second.entries, first.entries);
+    // Retrying the failures probes the four bad bundles again (the hang costs its timeout) and
+    // nothing else.
+    let t = Instant::now();
+    let retried = scan::retry_failed(&opts).unwrap();
+    assert!(t.elapsed() >= Duration::from_secs(3), "the hang was retried: {:?}", t.elapsed());
+    assert_eq!(retried.failures().count(), 4);
+    assert_eq!(retried.plugins().count(), 3);
     // A rescan on demand probes everything again.
     let t = Instant::now();
     let third = scan::rescan(&opts).unwrap();

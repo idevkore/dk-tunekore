@@ -8,6 +8,7 @@
 //!         --timeout SECONDS      how long one plugin may take to load (default 60)
 //!         --jobs N               plugins probed at once (default 4)
 //!         --force                probe every plugin again, even if it has not changed
+//!         --retry-failed         probe the plugins that failed last time again
 //!         --quiet                no progress lines
 //!
 //! It starts one copy of itself per plugin bundle (`--probe BUNDLE --result FILE`, an internal
@@ -35,8 +36,9 @@ fn main() -> ExitCode {
                 "--timeout" => opts.timeout = Duration::from_secs(value("seconds")?.parse().map_err(|_| "--timeout needs a whole number of seconds")?),
                 "--jobs" => opts.jobs = value("a number")?.parse().map_err(|_| "--jobs needs a number")?,
                 "--force" => opts.force = true,
+                "--retry-failed" => opts.retry_failed = true,
                 "--quiet" => quiet = true,
-                "--help" | "-h" => return Err("usage: tunekore-scan [--cache FILE] [--path DIR]... [--no-default-paths] [--timeout SECONDS] [--jobs N] [--force] [--quiet]".into()),
+                "--help" | "-h" => return Err("usage: tunekore-scan [--cache FILE] [--path DIR]... [--no-default-paths] [--timeout SECONDS] [--jobs N] [--force] [--retry-failed] [--quiet]".into()),
                 other => return Err(format!("unknown option {other}")),
             }
             Ok(())

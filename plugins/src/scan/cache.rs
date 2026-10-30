@@ -5,7 +5,24 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The cache format's version: a file with another number is ignored and scanned again.
-pub const CACHE_VERSION: u32 = 1;
+pub const CACHE_VERSION: u32 = 2;
+
+/// How a plugin's probe went. Anything but `Ok` is a plugin the engine skips and the UI can show
+/// as failed, with [`ScanEntry::error`] saying why. A failed plugin is not probed again until
+/// its file changes or a scan asks to retry failures (`ScanOptions::retry_failed`, or a
+/// rescan).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanStatus {
+    /// It loaded.
+    Ok,
+    /// It refused to load, threw an exception, or is not a plugin we can use.
+    Failed,
+    /// Its probe process died (a crash, an abort, an exit) while loading it.
+    Crashed,
+    /// It did not finish loading within the timeout, and its probe was killed.
+    TimedOut,
+}
 
 /// One plugin the scan found, or one bundle it could not read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -19,6 +36,7 @@ pub struct ScanEntry {
     pub params: u32,
     /// How long the probe took to load the plugin, in milliseconds.
     pub load_ms: u32,
+    pub status: ScanStatus,
     /// Why the plugin cannot be used: it threw, crashed, hung or refused to load. `None` if it
     /// loaded.
     pub error: Option<String>,
@@ -30,7 +48,7 @@ pub struct ScanEntry {
 impl ScanEntry {
     /// Whether the engine can put this on a track.
     pub fn usable(&self) -> bool {
-        self.error.is_none() && matches!(self.info.category, Category::Instrument | Category::Effect)
+        self.status == ScanStatus::Ok && matches!(self.info.category, Category::Instrument | Category::Effect)
     }
 }
 
@@ -58,9 +76,10 @@ impl ScanCache {
         self.entries.iter().filter(|e| e.usable())
     }
 
-    /// The bundles that did not load, with why.
+    /// The plugins (or bundles) that did not load, with their status and why: the blocklist the
+    /// UI shows.
     pub fn failures(&self) -> impl Iterator<Item = &ScanEntry> {
-        self.entries.iter().filter(|e| e.error.is_some())
+        self.entries.iter().filter(|e| e.status != ScanStatus::Ok)
     }
 
     pub fn find(&self, name: &str) -> Option<&ScanEntry> {
@@ -122,6 +141,7 @@ mod tests {
             buses: BusLayout { audio_outputs: vec![BusInfo { name: "Out".into(), channels: 2, kind: BusKind::Main, active: true }], event_inputs: 1, ..BusLayout::default() },
             params: 12,
             load_ms: 40,
+            status: if error.is_some() { ScanStatus::TimedOut } else { ScanStatus::Ok },
             error: error.map(str::to_string),
             stamp: "1:2".into(),
         }
@@ -133,12 +153,14 @@ mod tests {
         let json = serde_json::to_value(&cache).unwrap();
         let e = &json["entries"][0];
         assert_eq!(e["name"], "Alpha", "sorted by name");
-        for key in ["name", "vendor", "version", "category", "class_id", "path", "buses", "error", "format"] {
+        for key in ["name", "vendor", "version", "category", "class_id", "path", "buses", "status", "error", "format"] {
             assert!(e.get(key).is_some(), "missing {key}: {e}");
         }
         assert_eq!(e["category"], "instrument");
         assert_eq!(e["buses"]["audio_outputs"][0]["channels"], 2);
         assert_eq!(e["error"], "timed out after 60 s");
+        assert_eq!(e["status"], "timed_out");
+        assert_eq!(json["entries"][1]["status"], "ok");
         assert!(json["entries"][1]["error"].is_null());
         let back: ScanCache = serde_json::from_value(json).unwrap();
         assert_eq!(back, cache);

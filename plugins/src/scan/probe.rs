@@ -4,7 +4,7 @@
 //! and some plugins crash, hang or throw while doing it.
 
 use super::bundles;
-use super::cache::ScanEntry;
+use super::cache::{ScanEntry, ScanStatus};
 use crate::plugin::{BusLayout, Category, Format, PluginInfo};
 use crate::vst3;
 use std::path::Path;
@@ -22,7 +22,7 @@ pub fn stamp(bundle: &Path) -> String {
 }
 
 /// The entry for a bundle that could not be read at all.
-pub fn failed_entry(bundle: &Path, error: String) -> ScanEntry {
+pub fn failed_entry(bundle: &Path, status: ScanStatus, error: String) -> ScanEntry {
     let name = bundle.file_stem().map_or_else(|| bundle.display().to_string(), |s| s.to_string_lossy().into_owned());
     ScanEntry {
         info: PluginInfo {
@@ -38,6 +38,7 @@ pub fn failed_entry(bundle: &Path, error: String) -> ScanEntry {
         buses: BusLayout::default(),
         params: 0,
         load_ms: 0,
+        status,
         error: Some(error),
         stamp: stamp(bundle),
     }
@@ -54,10 +55,10 @@ pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
     let stamp = stamp(bundle);
     let infos = match vst3::classes(bundle) {
         Ok(i) => i,
-        Err(e) => return vec![failed_entry(bundle, e.to_string())],
+        Err(e) => return vec![failed_entry(bundle, ScanStatus::Failed, e.to_string())],
     };
     if infos.is_empty() {
-        return vec![failed_entry(bundle, "no audio plugins in this bundle".into())];
+        return vec![failed_entry(bundle, ScanStatus::Failed, "no audio plugins in this bundle".into())];
     }
     infos
         .into_iter()
@@ -69,6 +70,7 @@ pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
                         buses: c.default_layout().clone(),
                         params: c.params().len() as u32,
                         load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32,
+                        status: ScanStatus::Ok,
                         error: None,
                         stamp: stamp.clone(),
                         info,
@@ -76,7 +78,7 @@ pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
                     std::mem::forget(c);
                     entry
                 }
-                Err(e) => ScanEntry { buses: BusLayout::default(), params: 0, load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32, error: Some(e.to_string()), stamp: stamp.clone(), info },
+                Err(e) => ScanEntry { buses: BusLayout::default(), params: 0, load_ms: t.elapsed().as_millis().min(u128::from(u32::MAX)) as u32, status: ScanStatus::Failed, error: Some(e.to_string()), stamp: stamp.clone(), info },
             }
         })
         .collect()

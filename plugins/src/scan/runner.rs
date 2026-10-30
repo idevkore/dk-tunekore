@@ -6,7 +6,7 @@
 
 use super::bundles;
 use super::cache::ScanCache;
-use super::cache::ScanEntry;
+use super::cache::{ScanEntry, ScanStatus};
 use super::probe::{failed_entry, stamp};
 use std::collections::HashMap;
 use std::fs::File;
@@ -33,6 +33,8 @@ pub struct ScanOptions {
     pub jobs: usize,
     /// Probe everything again, ignoring what the cache holds.
     pub force: bool,
+    /// Probe the plugins that failed last time again (and only those, unless they changed).
+    pub retry_failed: bool,
     /// The `tunekore-scan` program. `None` looks next to the running program, then in
     /// `TUNEKORE_SCAN`.
     pub scanner: Option<PathBuf>,
@@ -49,6 +51,7 @@ impl Default for ScanOptions {
             timeout: Duration::from_secs(60),
             jobs: std::thread::available_parallelism().map_or(2, |n| n.get().min(4)),
             force: false,
+            retry_failed: false,
             scanner: None,
             total_timeout: Duration::from_secs(30 * 60),
         }
@@ -77,7 +80,7 @@ pub fn run(opts: &ScanOptions, exe: &Path, progress: &(dyn Fn(&str) + Sync)) -> 
     for b in &found {
         let now = stamp(b);
         match reused.remove(b) {
-            Some(old) if !now.is_empty() && old.iter().all(|e| e.stamp == now) => {
+            Some(old) if !now.is_empty() && old.iter().all(|e| e.stamp == now) && !(opts.retry_failed && old.iter().any(|e| e.status != ScanStatus::Ok)) => {
                 progress(&format!("{}: unchanged, {} plugin(s) from the cache", b.display(), old.len()));
                 entries.extend(old);
             }
@@ -144,7 +147,7 @@ fn probe_in_child(exe: &Path, bundle: &Path, timeout: Duration, work: &Path, n: 
     }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return vec![failed_entry(bundle, format!("cannot start the probe: {e}"))],
+        Err(e) => return vec![failed_entry(bundle, ScanStatus::Failed, format!("cannot start the probe: {e}"))],
     };
     let started = Instant::now();
     let (status, timed_out) = loop {
@@ -156,7 +159,7 @@ fn probe_in_child(exe: &Path, bundle: &Path, timeout: Duration, work: &Path, n: 
                 break (None, true);
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return vec![failed_entry(bundle, format!("cannot wait for the probe: {e}"))],
+            Err(e) => return vec![failed_entry(bundle, ScanStatus::Failed, format!("cannot wait for the probe: {e}"))],
         }
     };
     // The probe writes its answer before it exits, so an answer is good even if the exit was not
@@ -167,16 +170,16 @@ fn probe_in_child(exe: &Path, bundle: &Path, timeout: Duration, work: &Path, n: 
     {
         return entries;
     }
-    let why = if timed_out {
-        format!("timed out: the plugin did not finish loading in {} s", timeout.as_secs())
+    let (kind, why) = if timed_out {
+        (ScanStatus::TimedOut, format!("timed out: the plugin did not finish loading in {} s", timeout.as_secs()))
     } else {
         match status {
-            Some(st) => describe_exit(st),
-            None => "the probe ended without a result".into(),
+            Some(st) => (ScanStatus::Crashed, describe_exit(st)),
+            None => (ScanStatus::Crashed, "the probe ended without a result".into()),
         }
     };
     let tail = stderr_tail(&errlog);
-    vec![failed_entry(bundle, if tail.is_empty() { why } else { format!("{why} (last output: {tail})") })]
+    vec![failed_entry(bundle, kind, if tail.is_empty() { why } else { format!("{why} (last output: {tail})") })]
 }
 
 fn kill_group(child: &mut std::process::Child) {
