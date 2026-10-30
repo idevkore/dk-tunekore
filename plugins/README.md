@@ -87,9 +87,18 @@ a time, each in its own process group, and kills a probe after the timeout
 found to a file. A probe that crashed, aborted, hung or threw becomes an entry
 with the reason, and the scan goes on. The cache (`plugin-cache.json` in
 `~/Library/Application Support/tuneKore/` by default) lists name, vendor,
-version, category, class id, buses, parameter count, load time, path, error
-and a stamp of the binary. Unchanged bundles are not probed again;
-`scan::rescan` probes everything.
+version, category, class id, buses, parameter count, load time, path, status
+(`ok`, `failed`, `crashed`, `timed_out`), error and a stamp of the binary.
+`ScanCache::plugins()` gives the ones that loaded and `failures()` the
+blocklist. Unchanged bundles are not probed again, failed ones included;
+`scan::retry_failed` gives the failures another try and `scan::rescan` probes
+everything.
+
+**Parameters** (`PluginController::params`) carry id, name, short name,
+units, range (`min`, `max` in the plugin's own units), default, step count, and
+whether each is automatable, hidden, read-only or the bypass. Values at the
+interface are normalized; `param_text` gives the plugin's own text. Plugins
+without a mapping (many JUCE ones) report a 0 to 1 range.
 
 **State** is the component's state and the controller's state in one blob
 (`TKV3`, two length-prefixed parts). A bare component state also loads.

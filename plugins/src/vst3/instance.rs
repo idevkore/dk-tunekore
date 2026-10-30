@@ -563,11 +563,21 @@ impl PluginController for Vst3Controller {
             use sv::ParameterInfo_::ParameterFlags_ as f;
             let flags = info.flags;
             let d = info.defaultNormalizedValue;
+            let plain = |n: f64, fallback: f64| {
+                // SAFETY: valid controller.
+                match self.inst.soft("IEditController::normalizedParamToPlain", unsafe { c.normalized_to_plain(info.id, n) }) {
+                    Ok(v) if v.is_finite() => v,
+                    _ => fallback,
+                }
+            };
+            let (min, max) = (plain(0.0, 0.0), plain(1.0, 1.0));
             self.params.push(ParamInfo {
                 id: info.id,
                 name: read_c16(&info.title),
                 short_name: read_c16(&info.shortTitle),
                 units: read_c16(&info.units),
+                min,
+                max,
                 default: if d.is_finite() { d.clamp(0.0, 1.0) } else { 0.0 },
                 step_count: info.stepCount.max(0) as u32,
                 automatable: flags & f::kCanAutomate != 0,

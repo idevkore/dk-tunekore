@@ -122,7 +122,7 @@ fn run() {
         let visible: Vec<ParamInfo> = c.params().iter().filter(|p| !p.hidden).take(a.list_params).cloned().collect();
         for p in visible {
             let v = c.param_value(p.id).unwrap_or(p.default);
-            println!("param {:>10}  {:<32} {:.3} = {}", p.id, p.name, v, c.param_text(p.id, v).unwrap_or_default());
+            println!("param {:>10}  {:<24} {:.3} = {:<16} range {}..{} {}{}", p.id, p.name, v, c.param_text(p.id, v).unwrap_or_default(), p.min, p.max, p.units, if p.automatable { "" } else { " (not automatable)" });
         }
         return;
     }

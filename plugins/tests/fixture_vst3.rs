@@ -52,6 +52,13 @@ fn an_effect_has_buses_parameters_latency_and_changes_the_audio() {
     assert_eq!(ids, vec![3, 7, 9, 11, 12, 13, 14], "hidden and bypass parameters are listed, flagged");
     let gain = c.params().iter().find(|p| p.id == 7).unwrap();
     assert_eq!((gain.name.as_str(), gain.step_count, gain.automatable, gain.hidden), ("Gain", 0, true, false));
+    assert_eq!((gain.units.as_str(), gain.min, gain.max, gain.default), ("dB", 0.0, 2.0, 0.5), "range in the plugin's own units");
+    let freq = c.params().iter().find(|p| p.id == 12).unwrap();
+    assert!((freq.min - 20.0).abs() < 1e-6 && (freq.max - 20_000.0).abs() < 1e-3, "{freq:?}");
+    let level = c.params().iter().find(|p| p.id == 13).unwrap();
+    assert_eq!((level.min, level.max), (0.0, 1.0), "no mapping: 0 to 1, and the text has the value");
+    let mode = c.params().iter().find(|p| p.id == 3).unwrap();
+    assert_eq!((mode.step_count, mode.min, mode.max), (2, 0.0, 2.0), "a three-way choice");
     assert!(c.params().iter().find(|p| p.id == 9).unwrap().hidden);
     assert!(c.params().iter().find(|p| p.id == 11).unwrap().is_bypass);
 

@@ -336,7 +336,12 @@ pub struct ParamInfo {
     pub name: String,
     pub short_name: String,
     pub units: String,
-    /// Normalized.
+    /// The value at normalized 0 and 1, in the parameter's own units (`units`): its range. A
+    /// plugin without a mapping (many JUCE plugins) reports 0 and 1, and its real value is then
+    /// only in its text ([`PluginController::param_text`]).
+    pub min: f64,
+    pub max: f64,
+    /// The default value, normalized.
     pub default: f64,
     /// 0 for a continuous parameter; otherwise the value moves in this many steps (1 is a
     /// switch).
