@@ -11,6 +11,8 @@
 //! - [`device`]: the [`Device`] trait that sources and effects implement.
 //! - [`clip`]: the Timeline's audio clips, played by a [`ClipPlayer`] in an
 //!   audio track's source slot; [`peaks`]: their waveforms.
+//! - [`plugin_device`]: a hosted plugin (VST3, through `tunekore_plugins`)
+//!   as an instrument in a source slot or an effect in a chain.
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`,
 //! `load_clip`, the track calls) come from one thread at a time; callers
@@ -28,6 +30,7 @@ mod limiter;
 mod input;
 pub mod peaks;
 mod player;
+pub mod plugin_device;
 mod resample;
 mod sampler;
 pub mod snapshot;
@@ -49,6 +52,9 @@ pub use sampler::{
 pub use device::{Buffers, Device, Event, Events};
 pub use graph::Mixer;
 pub use peaks::{Peaks, PEAK_LEVELS};
+pub use plugin_device::{plugin_device, Activated, PluginDevice, PluginLink, Role as PluginRole};
+/// The plugin host the engine runs plugins through.
+pub use tunekore_plugins as plugins;
 pub use resample::resample;
 pub use tone::{Tone, ToneControl};
 pub use track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMix};

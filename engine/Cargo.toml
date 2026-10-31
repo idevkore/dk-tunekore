@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 cpal = "0.18.2"
 rtrb = "0.4.0"
+# The plugin host: VST3 plugins behind format-free traits (#35, #37).
+tunekore-plugins = { path = "../plugins" }
 rubato = "5.0.1"
 serde = { version = "1", features = ["derive"] }
 # RealtimeSanitizer: inert unless built with RTSAN_ENABLE=1. Without the
