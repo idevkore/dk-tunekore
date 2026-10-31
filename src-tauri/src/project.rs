@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tunekore_engine::{track::TRACK_SLOTS, TrackId, TrackKind, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::Audio;
@@ -723,10 +723,42 @@ fn set_aside(dir: &Path, stamp: u64) {
     }
 }
 
+/// Project files the system asked the app to open (a double-click in the
+/// Finder, a file dropped on the Dock icon, a path on the command line),
+/// waiting for the main window to open them. The UI may not be listening
+/// yet when they arrive at launch, so they wait here until it asks.
+#[derive(Default)]
+pub struct Opened(Mutex<Vec<PathBuf>>);
+
+/// Whether `path` is a project file, by its extension.
+fn is_project_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case(PROJECT_EXT))
+}
+
+/// Queues the project files among `paths` for the main window, and tells it.
+pub fn files_opened(app: &AppHandle, paths: impl IntoIterator<Item = PathBuf>) {
+    let files: Vec<PathBuf> = paths.into_iter().filter(|p| is_project_file(p)).collect();
+    if files.is_empty() {
+        return;
+    }
+    if let Some(opened) = app.try_state::<Opened>() {
+        lock(&opened.0).extend(files);
+        let _ = app.emit_to("main", "app:open-files", ());
+    }
+}
+
+/// The project files waiting to open, oldest first. Asking empties the queue.
+#[tauri::command]
+pub fn opened_files(app: AppHandle) -> Vec<String> {
+    app.try_state::<Opened>()
+        .map(|o| std::mem::take(&mut *lock(&o.0)).into_iter().map(|p| p.display().to_string()).collect())
+        .unwrap_or_default()
+}
+
 /// This file's commands. The Sampler answers new, open, save and recover,
 /// since the UI wants its view back from them.
 pub fn commands() -> crate::Commands {
-    crate::commands![autosave_check, autosave_discard, autosave_resume]
+    crate::commands![autosave_check, autosave_discard, autosave_resume, opened_files]
 }
 
 /// Registers the core sections, first, and starts autosave.
@@ -736,6 +768,9 @@ pub fn setup(app: &AppHandle) {
     p.register_core(TracksSection::new(crate::audio(app)));
     p.register_core(TrackIdsSection(crate::audio(app)));
     spawn_autosave(app.clone());
+    // Windows and Linux pass the file to open as an argument; macOS sends
+    // it as an event (see `run` in lib.rs).
+    files_opened(app, std::env::args_os().skip(1).map(PathBuf::from));
 }
 
 /// Once every module has registered: what is there now is the saved, empty
@@ -754,6 +789,15 @@ pub fn tests_parse(text: &str) -> Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_project_files_open_from_the_finder() {
+        assert!(is_project_file(Path::new("/music/beat.tunek")));
+        assert!(is_project_file(Path::new("/music/BEAT.TUNEK")));
+        assert!(!is_project_file(Path::new("/music/kick.wav")));
+        assert!(!is_project_file(Path::new("-psn_0_12345")), "macOS's own launch argument");
+        assert!(!is_project_file(Path::new("/music/tunek")));
+    }
 
     /// A module's section for the tests: its state is a JSON value.
     struct Fake {

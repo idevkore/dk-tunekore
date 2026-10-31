@@ -192,6 +192,9 @@ export const onChopped = (handler: (folder: string) => void): Promise<UnlistenFn
 /** The window is closing or the app quitting with unsaved changes: ask, then call `quitApp`. */
 export const onConfirmQuit = (handler: () => void): Promise<UnlistenFn> => listen("app:confirm-quit", () => handler());
 export const quitApp = () => invoke<void>("app_quit");
+/// Project files the system asked tuneKore to open (a double-click in the Finder), oldest first.
+export const openedFiles = () => invoke<string[]>("opened_files");
+export const onOpenFiles = (handler: () => void): Promise<UnlistenFn> => listen("app:open-files", () => handler());
 
 export interface Recovery {
   projectName: string;

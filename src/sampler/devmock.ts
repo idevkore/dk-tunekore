@@ -196,6 +196,8 @@ export function installMocks() {
           return 0;
         case "autosave_check":
           return null;
+        case "opened_files":
+          return [];
         case "sampler_undo":
         case "sampler_redo":
           return publish();

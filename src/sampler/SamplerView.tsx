@@ -107,8 +107,10 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   }, [take, fail]);
 
   // After a crash: offer the unsaved work the last session left behind.
+  // A file opened from the Finder waits for the answer (see below).
+  const recoveryAnswered = useRef<Promise<unknown>>(Promise.resolve());
   useEffect(() => {
-    api
+    recoveryAnswered.current = api
       .autosaveCheck()
       .then(async (r) => {
         if (!r) return;
@@ -229,6 +231,21 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
     },
     [keepChanges, take, fail, say],
   );
+
+  // A .tunek file double-clicked in the Finder: at launch it is already
+  // waiting; later the Rust side says one arrived. One project is open at a
+  // time, so the newest file wins.
+  useEffect(() => {
+    const openWaiting = () =>
+      void recoveryAnswered.current
+        .catch(() => {})
+        .then(api.openedFiles)
+        .then((files) => (files.length > 0 ? openPath(files[files.length - 1]) : undefined))
+        .catch(fail);
+    const off = subscribe(api.onOpenFiles(openWaiting));
+    openWaiting();
+    return off;
+  }, [openPath, fail]);
 
   const doOpen = useCallback(async () => {
     const f = await open({ title: "Open a project", filters: [{ name: "tuneKore project", extensions: [api.PROJECT_EXT] }] }).catch(() => null);

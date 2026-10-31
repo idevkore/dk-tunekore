@@ -264,6 +264,36 @@ struct Snapshot {
     switch: PatternSwitch,
 }
 
+impl Snapshot {
+    /// Whether `other` holds the same project. Samples compare by identity:
+    /// the same loaded sample, not the same sound.
+    fn same(&self, other: &Snapshot) -> bool {
+        let pads = self.pads.len() == other.pads.len()
+            && self.pads.iter().zip(&other.pads).all(|(a, b)| {
+                let sample = match (&a.sample, &b.sample) {
+                    (Some(x), Some(y)) => Arc::ptr_eq(x, y),
+                    (None, None) => true,
+                    _ => false,
+                };
+                sample
+                    && a.missing == b.missing
+                    && a.settings == b.settings
+                    && a.patterns == b.patterns
+                    && a.velocity == b.velocity
+                    && a.chance == b.chance
+                    && a.ratchet == b.ratchet
+            });
+        pads && self.tempo == other.tempo
+            && self.swing == other.swing
+            && self.steps == other.steps
+            && self.current == other.current
+            && self.chain == other.chain
+            && self.song_mode == other.song_mode
+            && self.song_loop == other.song_loop
+            && self.switch == other.switch
+    }
+}
+
 #[derive(Default)]
 struct History {
     undo: Vec<Snapshot>,
@@ -284,6 +314,16 @@ impl Doc {
             song_mode: self.song_mode,
             song_loop: self.song_loop,
             switch: self.switch,
+        }
+    }
+
+    /// Like [`checkpoint`](Self::checkpoint), but only when the edit changed
+    /// something: leaving the tempo box, or picking the length or pattern
+    /// already set, is not an edit, so it neither marks the project unsaved
+    /// nor adds an undo step.
+    fn commit(&mut self, key: &str, before: Snapshot) {
+        if !self.snapshot().same(&before) {
+            self.checkpoint(key, before);
         }
     }
 
@@ -533,7 +573,7 @@ fn edit(app: &AppHandle, key: &str, f: impl FnOnce(&SamplerState, &mut Doc) -> R
     let mut doc = s.doc.lock().unwrap();
     let before = doc.snapshot();
     f(&s, &mut doc)?;
-    doc.checkpoint(key, before);
+    doc.commit(key, before);
     Ok(publish(app, &doc))
 }
 
@@ -1809,6 +1849,34 @@ mod tests {
         doc.swing = 0.5;
         doc.checkpoint("swing", before);
         assert!(doc.history.redo.is_empty(), "a new edit drops the redo steps");
+    }
+
+    #[test]
+    fn an_edit_that_changes_nothing_is_not_an_edit() {
+        let mut doc = Doc::default();
+        doc.pads[0].sample = Some(Arc::new(Sample { path: "/k.wav".into(), name: "k".into(), rate: 48_000, data: Arc::new(vec![vec![0.0; 4]]), peaks: vec![] }));
+        let revision = doc.revision;
+
+        // Leaving the tempo box: the same tempo, swing and length sent back.
+        let before = doc.snapshot();
+        doc.tempo = 120.0;
+        doc.steps = 16;
+        doc.commit("transport", before);
+        assert_eq!(doc.revision, revision, "the project stays saved");
+        assert!(doc.history.undo.is_empty(), "and there's nothing to undo");
+
+        let before = doc.snapshot();
+        doc.tempo = 121.0;
+        doc.commit("transport", before);
+        assert_eq!(doc.revision, revision + 1, "a new tempo is an edit");
+        assert_eq!(doc.history.undo.len(), 1);
+
+        // The same sound loaded again is a different sample.
+        let before = doc.snapshot();
+        let again = doc.pads[0].sample.as_deref().map(|s| Sample { path: s.path.clone(), name: s.name.clone(), rate: s.rate, data: s.data.clone(), peaks: s.peaks.clone() });
+        doc.pads[0].sample = again.map(Arc::new);
+        doc.commit("load", before);
+        assert_eq!(doc.revision, revision + 2);
     }
 
     #[test]
