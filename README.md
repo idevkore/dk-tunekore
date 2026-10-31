@@ -1,7 +1,16 @@
+[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
+
+CI: the last build and test run on `main`. CI runs by hand for now (see
+`.github/workflows/ci.yml`), so the badge shows the latest run started.
+
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/tunekore-logo-color.svg">
   <img alt="tuneKore" src="brand/tunekore-logo-color-on-light.svg" width="420">
 </picture>
+
+[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
+
+CI: whether `main` builds and passes its tests on macOS, Windows and Linux.
 
 tuneKore is a lightweight DAW in the style of Ableton Live, built by devKore to
 host our own instruments, effects and tools alongside the plugins we already
@@ -10,11 +19,11 @@ only: VST3 and CLAP plugins, no legacy formats. The main window has two
 views on one beat clock, the Sampler and the Timeline (⌘1 and ⌘2); the
 Analyzer splits a song into stems and sends them to the Sampler's pads.
 
-[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
-
-CI: builds and tests the engine, the Analyzer, the stem worker and the app on
-macOS, and compiles and links them on Windows and Linux, for every push to
-`main` and every pull request.
+CI (`.github/workflows/ci.yml`) builds and tests the engine, the Analyzer, the
+stem worker and the app on macOS, and compiles and links them on Windows and
+Linux, for every push to `main` and every pull request. A pull request into
+`main` needs CI to pass and a code owner's approval (`.github/CODEOWNERS`);
+report security problems privately, as `SECURITY.md` says.
 
 Status: the Sampler (Phase 2, the MVP) is in; the Timeline (Phase 4) has
 tracks and audio clips, with MIDI clips and plugins on tracks next.

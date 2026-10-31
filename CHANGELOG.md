@@ -5,7 +5,7 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
-## 0.1.15: open projects from the Finder
+## 0.1.17: open projects from the Finder
 
 idevkore/dk-tunekore#51
 
@@ -16,6 +16,37 @@ idevkore/dk-tunekore#51
 - Fixed: a project you only looked at no longer asks to be saved when you
   quit. Clicking into the tempo box and out again, or picking the length or
   pattern already set, no longer counts as a change or adds an undo step.
+
+## 0.1.16: 64-step patterns
+
+idevkore/dk-tunekore#60
+
+- The Steps picker now goes up to 64: four bars in one pattern, enough for a
+  four-chord progression with one chord to a bar. The engine already played
+  64; the picker stopped at 32.
+- A pattern longer than 32 steps shows two bars of the grid at a time. Pick
+  Bars 1–2 or Bars 3–4 beside the Steps picker; the page that is playing has
+  a lime foot, and Follow (on by default) turns the page to keep the
+  playhead in view. The arrow keys move on to the next page, and the velocity
+  lane and the right-click step editor work on every step.
+- Engine tests play a 64-step pattern through two passes (with velocity,
+  chance and a ratchet on the last bar), switch patterns on the bar and on the
+  next step, cut a 64-step pattern short, render a song of 64-step patterns,
+  and run it all on the audio thread without allocating (also under RTSAN).
+  A project test saves and reads back a pattern that uses all 64 steps.
+
+## 0.1.15: colour themes
+
+idevkore/dk-tunekore#56
+
+- Pick a colour theme from the new button beside the view switch: tuneKore
+  (the default, unchanged), Dracula, Nord, Gruvbox Dark and Tokyo Night, or
+  the light Solarized Light, GitHub Light and Gruvbox Light. It applies at
+  once and is remembered for the next launch.
+- Every colour in the window comes from the theme, the Timeline's lanes,
+  ruler and clips included. On a light theme, clips take a tint of their
+  track's colour, waveforms are shaded darker, and the logo's TUNE is in ink.
+- Text in each theme reads at 4.5:1 or better against its backgrounds.
 
 ## 0.1.14: the Timeline, with tracks and audio clips
 

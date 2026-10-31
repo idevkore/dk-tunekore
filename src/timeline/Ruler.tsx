@@ -4,6 +4,7 @@
 // the strip, a click or a drag moves the playhead. Both snap to the grid
 // unless ⌘ (Ctrl on Windows and Linux) is held.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useTheme } from "../theme/theme";
 import { beatToX, drawRuler, LOOP_STRIP, RULER_HEIGHT, xToBeat } from "./draw";
 import { ignoresGrid, snapBeat } from "./edits";
 
@@ -41,12 +42,13 @@ export default function Ruler({ width, scroll, zoom, signature, loop, step, onLo
   latest.current = { zoom, onZoom, onPan };
 
   useEffect(() => setShown(null), [loop]);
+  const theme = useTheme();
 
   useLayoutEffect(() => {
     const ctx = canvas.current?.getContext("2d");
     if (!ctx || width <= 0) return;
     drawRuler(ctx, { width, dpr: window.devicePixelRatio || 1, scroll, zoom, signature, loop: shown ?? loop });
-  }, [width, scroll, zoom, signature, loop, shown]);
+  }, [width, scroll, zoom, signature, loop, shown, theme]);
 
   useEffect(() => {
     const c = canvas.current;

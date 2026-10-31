@@ -6,6 +6,7 @@
 // undoable edit, and the preview stays until the new state arrives.
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { ClipView, Edit, SourceView } from "./api";
+import { useTheme } from "../theme/theme";
 import { beatToX, CLIP_HEAD, drawLanes, xToBeat, type Ghost, type Lane } from "./draw";
 import { clipEnd, ignoresGrid, loopEnd, secondsPerBeat, setFade, snapBeat, toInput, trimEnd, trimStart } from "./edits";
 import { onPeaks } from "./peaks";
@@ -75,6 +76,8 @@ export default function Lanes(props: Props) {
   }, [lanes]);
 
   useEffect(() => onPeaks(() => setRedraw((n) => n + 1)), []);
+  // A new colour theme: draw again with its colours.
+  const theme = useTheme();
 
   useLayoutEffect(() => {
     const ctx = canvas.current?.getContext("2d");
@@ -96,7 +99,7 @@ export default function Lanes(props: Props) {
       ghost: preview?.ghost ?? props.ghost,
       hover,
     });
-  }, [lanes, preview, width, height, scroll, zoom, scrollTop, tempo, props.end, props.signature, props.sources, props.selected, props.loop, props.ghost, hover, redraw]);
+  }, [lanes, preview, width, height, scroll, zoom, scrollTop, tempo, props.end, props.signature, props.sources, props.selected, props.loop, props.ghost, hover, redraw, theme]);
 
   // Wheel: ⌘ or Ctrl (and pinch) zooms around the pointer, sideways (or ⇧) scrolls in time.
   useEffect(() => {
