@@ -12,7 +12,8 @@ MIT). Update this file in the same PR that adds a dependency.
 ## Engine, Analyzer and app shell (Rust), direct dependencies
 
 One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
-(`tunekore-analyzer`) and `src-tauri/` (`tunekore`).
+(`tunekore-analyzer`), `plugins/` (`tunekore-plugins`, below) and
+`src-tauri/` (`tunekore`).
 
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
@@ -28,6 +29,8 @@ One Cargo workspace: `engine/` (`tunekore-engine`), `analyzer/`
 | [tauri](https://github.com/tauri-apps/tauri) | 2.12.5 | Apache-2.0 OR MIT | Shell: windows, menus, IPC |
 | [tauri-plugin-dialog](https://github.com/tauri-apps/plugins-workspace) | 2.8.3 | Apache-2.0 OR MIT | Shell: the Open and Export folder dialogs |
 | [tauri-plugin-window-state](https://github.com/tauri-apps/plugins-workspace) | 2.5.0 | Apache-2.0 OR MIT | Shell: reopens windows at the size, place and display they were left at |
+| [objc2](https://github.com/madsmtm/objc2), objc2-foundation | 0.6.5, 0.3.2 | MIT | Shell, macOS: the windows plugin editors open in (already in the lockfile through Tauri) |
+| objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | Shell, macOS: the same |
 | [rtsan-standalone](https://github.com/realtime-sanitizer/rtsan-standalone-rs) | 0.3.0 | Apache-2.0 | Engine: RealtimeSanitizer on the audio callback in debug builds and the engine tests. Inert unless built with `RTSAN_ENABLE=1`; default features off, so it never downloads a prebuilt runtime. With it set, it builds compiler-rt's rtsan from llvm-project `llvmorg-20.1.1` (Apache-2.0 WITH LLVM-exception), for that build only. Brings rtsan-standalone-sys and rtsan-standalone-macros (Apache-2.0), and num_cpus and hermit-abi (MIT OR Apache-2.0) at build time. |
 | tauri-build | 2.7.4 | Apache-2.0 OR MIT | Shell: build step |
 | [tempfile](https://github.com/Stebalien/tempfile) | 3.27.0 | MIT OR Apache-2.0 | Tests only |
@@ -51,9 +54,10 @@ offers LGPL-2.1-or-later as one of three choices; we use it as MIT.
 
 ## Plugin host (Rust, `plugins/`), direct dependencies
 
-`plugins/` (`tunekore-plugins`) is its own Cargo workspace with its own
-`Cargo.lock` until #37 joins it to the main one; `npm run licenses` and CI
-don't read that lockfile yet.
+`plugins/` (`tunekore-plugins`) joined the root workspace and its lockfile in
+#37, so `npm run licenses` and CI check it with everything else. The engine
+and the shell use it. Its test plugin (`plugins/tests/fixture`) is still a
+workspace of its own, built only by the tests and never shipped.
 
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
@@ -67,7 +71,7 @@ don't read that lockfile yet.
 | objc2-app-kit | 0.3.2 | Zlib OR Apache-2.0 OR MIT | macOS: plugin editor windows |
 | [cc](https://github.com/rust-lang/cc-rs) | 1.10.0 | MIT OR Apache-2.0 | Build: compiles the C++ shim that catches exceptions thrown by plugins |
 
-Its lockfile has 32 crates. The rest are MIT or Apache-2.0 (or both), Zlib,
+It brought 32 crates when it had its own lockfile. The rest are MIT or Apache-2.0 (or both), Zlib,
 Unlicense OR MIT (`memchr`) and Unicode-3.0 (`unicode-ident`, build only):
 com-scrape-types, crossbeam-utils, objc2-encode, objc2-core-foundation,
 dispatch2, bitflags, cfg-if, itoa, memchr, proc-macro2, quote, syn,

@@ -289,7 +289,7 @@ Where the next pieces go:
 
 | Work | Engine | Shell and UI |
 | --- | --- | --- |
-| Plugins in the app (#37) | `engine/src/plugin_device.rs`: a `Device` around the `plugins/` host. `prepare` sets up processing at the output's rate; `process` maps `ProcessContext` to the plugin's transport and `Events` to its notes; `latency` reports the plugin's. Put it in a track's source slot or chain through `Mixer`. | Its own module with `commands()` and a `plugins` section |
+| Plugins in the app (#37, built) | `engine/src/plugin_device.rs`: a `PluginDevice` runs a plugin's audio half as an instrument (source slot), an effect (chain), or a pad's instrument (the Sampler track's chain, ahead of its effects). `prepare` only records the rate and asks the main thread, through the device's `PluginLink`, for a plugin activated at it; the link hands it over and takes back the old one. `process` maps `ProcessContext` to the plugin's transport and `Events` (plus live notes from the link) to its notes. The Sampler sends a plugin pad's hits as notes on the pad's channel (`SamplerShared::set_plugin_pad`). `Mixer::move_in_chain` reorders effects. | `src-tauri/src/plugins/`: the document of devices (main thread only), commands, editor windows, the `plugins` section, MIDI targets `plugin.<device>.<param>`, and the live-note route for a MIDI controller. `src/plugins/`: the device chain under the Timeline's tracks, the plugin picker, a pad's plugin in the Sampler's Inspector. |
 | Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
 | MIDI learn (#20, built) | none needed | `midi.rs` and `midi/`: the mappings are the `midi` section. Targets are ids such as `sampler.pad.selected.cutoff`, `sampler.pad.3.level`, `transport.tempo`, `master.level` and `track.1.volume`. A module adds its own by implementing `midi::Targets` for its prefix (`plugin.<id>.<param>` for #37) and calling `midi::register_targets` from its setup. |
 
@@ -311,12 +311,52 @@ Where the next pieces go:
   the test list ships as VST3.
 - **C++ exceptions** thrown by a plugin are caught by a small C++ shim around
   each plugin call, since Rust can't catch them.
-- **Editors** open in their own native windows, as in Live. They float over the
-  main window, and their titles follow the track name.
+- **Editors** open in their own native windows, as in Live: one per plugin,
+  several at once, floating over the main window and hidden while tuneKore
+  isn't the active app, titled "Track · Plugin" (renames follow). A window
+  isn't reopened when a project opens.
+- **In the app (#37, built 2026-10-30).** A plugin's controller (state,
+  parameters, editor) lives on the main thread, as VST3 asks; Tauri runs the
+  module's synchronous commands there, and other threads (saving, autosave,
+  the engine asking for a new rate, MIDI learn) queue work for it. Nothing
+  waits for the main thread while holding the engine's lock, and the
+  module's document is only ever locked on the main thread, after which it
+  may take the engine's (never the other way). A plugin dialog can run the
+  event loop inside a plugin call, so work that finds the document busy is
+  queued again rather than waited for.
+  - Where plugins go: an **instrument track** has a plugin instrument in its
+    source slot (the Timeline's "+ Instrument"); effects go in any track's
+    chain, the Sampler's included; a **Sampler pad** can play a plugin
+    instrument instead of its sample. Its steps play C3 plus the pad's pitch
+    for a step, by hand for as long as it is held, at the pad's level and pan,
+    with its choke group and mute. Its sample stays loaded. The Sampler's
+    export, bounce and stems leave plugin pads out until export renders the
+    graph (#44).
+  - The **device chain** shows under the Timeline's tracks for the selected
+    track (a clip's inspector takes its place while a clip is selected):
+    on/off, the plugin's window, move along the chain, remove, Reload for a
+    plugin that is missing or failed.
+  - A **MIDI controller's keys** play the selected instrument track's plugin
+    while the Timeline shows, with pitch bend, pressure and the control
+    changes MIDI learn doesn't use; otherwise notes 36 to 51 play the pads. A
+    held note ends on the plugin it started on.
+  - **Saved** in the project's `plugins` section: each device's id (never
+    reused in a project), track, role, pad, plugin (format, name, vendor,
+    version, class id, path) and state (base64 of `save_state`, with values
+    set from the UI flushed to the processor first). A plugin that won't load
+    when a project opens stays as a missing device with its state, written
+    back unchanged; one moved to another folder is found by its class id.
+  - Every plugin is activated on its **main stereo bus**. Kontakt's other
+    outputs and Solid Bus Comp's sidechain wait for the Mixer (#43).
+  - **Quitting** takes every plugin off its track, closes the output and runs
+    `vst3::shutdown()`.
+  - `TUNEKORE_PLUGINS_CHECK=<report>` in a debug build runs the section 5
+    test list inside the running app (see `src-tauri/src/plugins/check.rs`).
 - **Automation.** Each plugin parameter can be automated sample-accurately in
   VST3 and CLAP.
 - **macOS signing.** We ship a notarized Developer ID build, not through the
-  Mac App Store, since the sandbox would block plugins. Entitlements needed:
+  Mac App Store, since the sandbox would block plugins. Entitlements needed
+  (`src-tauri/Entitlements.plist`, since #37):
   - `com.apple.security.cs.disable-library-validation`: required to load other
     developers' plugins.
   - `allow-unsigned-executable-memory` and `allow-jit`: some plugins need them.
@@ -433,6 +473,17 @@ tracks.
 instrument (Jup-8 V4), Kontakt 7 (multiple outputs), Guitar Rig 7 (effect),
 Solid Bus Comp (sidechain), Splice Instrument, Astra and Beatmaker (synced to
 the host's clock), Splice Bridge.
+
+In the app (#37, 2026-10-30, the debug check in `src-tauri/src/plugins/check.rs`):
+Serum 2, Serum, Analog Lab V, Jup-8 V4, Kontakt 7 and Guitar Rig 7 (on Serum
+2's track) load, open and close their editors, and come back on their tracks
+after save, new and reopen; Serum 2 also plays from a Sampler pad, and the app
+quits cleanly. Serum 2, Serum, Jup-8 V4 and Guitar Rig 7 play and keep their
+sound. On this Mac the Arturia plugins are not activated: they refuse to save
+their state ("Plugin not activated : cannot get state", from the plugin), so
+they reopen at their defaults, and Analog Lab V stays silent. Activate them in
+Arturia Software Center to test those. Kontakt 7 plays once an instrument is
+loaded in its window; Kontakt 7 and Guitar Rig 7 run as demos here.
 
 **Splice** support comes in three layers:
 

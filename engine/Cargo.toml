@@ -1,6 +1,6 @@
 [package]
 name = "tunekore-engine"
-version = "0.1.17"
+version = "0.1.18"
 description = "tuneKore's audio engine"
 edition.workspace = true
 rust-version.workspace = true

@@ -2,11 +2,11 @@
 
 tuneKore's plugin host: it scans for plugins, loads them, runs them, saves and
 restores their state, and opens their editors. VST3 today; CLAP (#39) goes
-behind the same traits. Issue: idevkore/dk-tunekore#35. The engine and app use
-it from the plugins-in-the-app work (#37).
+behind the same traits. Issue: idevkore/dk-tunekore#35.
 
-This crate is its own Cargo workspace until #37 joins it to the root one, so
-CI does not build it yet.
+It is part of the root Cargo workspace (since #37). The engine runs a
+plugin's audio half as a track device (`engine/src/plugin_device.rs`), and the
+app keeps its controller, editor window and state (`src-tauri/src/plugins/`).
 
 ## Use
 
@@ -38,7 +38,7 @@ vst3::shutdown();
 | `src/scan/` | Bundle discovery, the probe, the scanner's orchestration and the JSON cache |
 | `src/bin/tunekore-scan.rs` | The scanner helper program |
 | `src/offline.rs`, `src/wav.rs` | Offline rendering and a small WAV writer, for tests, examples and later bounces |
-| `src/editor_window.rs` | A small floating macOS window for an editor (the app's own windows come in #37) |
+| `src/editor_window.rs` | A small floating macOS window for an editor, for the examples and tests (the app has its own, `src-tauri/src/plugins/window.rs`) |
 | `examples/` | `render` (play notes through a plugin to a WAV) and `editor` (open a plugin's editor) |
 | `tests/` | Tests against the fixture plugin, a misbehaving C++ plugin, the allocation counter, and the installed plugins |
 | `third_party/soundcraft/` | Licence, NOTICE and a record of the soundCraft code this started from |
@@ -143,13 +143,13 @@ handler, Serum 2 crashes there (see the function's notes).
 ## Run
 
 ```bash
-cargo test --locked                  # tests that need installed plugins skip when CI is set
-cargo clippy --all-targets
-cargo run --release --bin tunekore-scan -- --cache /tmp/plugins.json
-cargo run --release --example render -- /Library/Audio/Plug-Ins/VST3/Serum2.vst3 --out /tmp/serum2.wav --state-check
-cargo run --release --example render -- "/Library/Audio/Plug-Ins/VST3/Guitar Rig 7.vst3" --input sine
-cargo run --release --example render -- "/Library/Audio/Plug-Ins/VST3/Kontakt 7.vst3" --all-buses
-cargo run --release --example editor -- /Library/Audio/Plug-Ins/VST3/Serum2.vst3 --seconds 10
+cargo test -p tunekore-plugins --locked   # tests that need installed plugins skip when CI is set
+cargo clippy -p tunekore-plugins --all-targets
+cargo run --release -p tunekore-plugins --bin tunekore-scan -- --cache /tmp/plugins.json
+cargo run --release -p tunekore-plugins --example render -- /Library/Audio/Plug-Ins/VST3/Serum2.vst3 --out /tmp/serum2.wav --state-check
+cargo run --release -p tunekore-plugins --example render -- "/Library/Audio/Plug-Ins/VST3/Guitar Rig 7.vst3" --input sine
+cargo run --release -p tunekore-plugins --example render -- "/Library/Audio/Plug-Ins/VST3/Kontakt 7.vst3" --all-buses
+cargo run --release -p tunekore-plugins --example editor -- /Library/Audio/Plug-Ins/VST3/Serum2.vst3 --seconds 10
 ```
 
 The tests build two test plugins: soundCraft's fixture (Rust, `tests/fixture`,
