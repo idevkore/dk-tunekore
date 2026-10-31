@@ -18,9 +18,11 @@ interface Props {
   /** Whether a song chain exists, to offer exporting the whole song. */
   hasSong: boolean;
   onError: (e: unknown) => void;
+  /** The pads (from 0) that play a plugin: exports leave them out for now. */
+  pluginPads?: number[];
 }
 
-export default function ExportDialog({ name, steps, tempo, disabled, onClose, onDone, onBounce, onError, hasSong }: Props) {
+export default function ExportDialog({ name, steps, tempo, disabled, onClose, onDone, onBounce, onError, hasSong, pluginPads = [] }: Props) {
   const [loops, setLoops] = useState(4);
   const [song, setSong] = useState(hasSong);
   const [busy, setBusy] = useState(false);
@@ -95,6 +97,12 @@ export default function ExportDialog({ name, steps, tempo, disabled, onClose, on
         Stems are one WAV per pad, all the same length, to line up in another DAW. Bounce puts the
         mix on the next empty pad, to chop, pitch or reverse like any sample.
       </p>
+      {pluginPads.length > 0 && (
+        <p className="small export-note" role="note">
+          {pluginPads.length === 1 ? `Pad ${pluginPads[0] + 1} plays a plugin` : `Pads ${pluginPads.map((p) => p + 1).join(", ")} play plugins`}, and
+          exports and bounces leave plugin pads out for now: they render the Sampler's samples only.
+        </p>
+      )}
       <div className="dialog-foot">
         <button className="btn small" onClick={onClose}>Cancel</button>
         <button

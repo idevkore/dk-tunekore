@@ -676,6 +676,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
           onClose={() => setExportOpen(false)}
           onDone={(p) => say(`Exported ${p}.`)}
           hasSong={view.chain.length > 0}
+          pluginPads={(devices?.devices ?? []).filter((d) => d.role === "pad").map((d) => d.pad).sort((a, b) => a - b)}
           onBounce={(loops, song) =>
             api
               .bounce(loops, song)

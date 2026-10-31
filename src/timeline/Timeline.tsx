@@ -659,8 +659,8 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
         <button className="btn small" onClick={split} disabled={empty} title={`Split the selected clips, or every clip, at the playhead (${mod}E)`}>
           Split
         </button>
-        <button className="btn small" onClick={() => void addTrack()} title="Add an empty audio track">
-          + Track
+        <button className="btn small" onClick={() => void addTrack()} title="Add an empty audio track, for clips">
+          + Audio
         </button>
         <button className="btn small" onClick={() => setPickInstrument(true)} title="Add an instrument track with a plugin instrument on it">
           + Instrument

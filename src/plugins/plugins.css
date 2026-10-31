@@ -48,3 +48,4 @@
 /* A pad that plays a plugin (the Sampler's Inspector) */
 .insp-plugin .dc-card { width: auto; }
 .pane-head-btns { display: flex; gap: 6px; }
+.export-note { color: var(--warn); line-height: 1.45; }
