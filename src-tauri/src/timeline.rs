@@ -1499,6 +1499,18 @@ pub fn add_tracks(app: &AppHandle, files: &[(PathBuf, String)], start: f64) -> R
     Ok(publish(app, v))
 }
 
+/// Another module added or removed a track (the plugins' instrument
+/// tracks): the Timeline lists it, and every window shows it.
+pub fn tracks_changed(app: &AppHandle) {
+    let s = shared(app);
+    let v = {
+        let mut doc = lock(&s.doc);
+        s.adopt(&mut doc);
+        s.view(&doc)
+    };
+    publish(app, v);
+}
+
 /// Copies the files clips play from outside the project's folder into
 /// `folder` (the Sampler's "<project> Samples" beside the project file) and
 /// points the clips there. The Sampler's Collect calls it before it saves. Blocking.

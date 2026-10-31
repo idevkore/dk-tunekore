@@ -22,6 +22,7 @@ pub(crate) use commands;
 mod analyzer;
 mod display;
 mod midi;
+mod plugins;
 mod project;
 mod recorder;
 mod sampler;
@@ -248,6 +249,7 @@ pub fn run() {
         analyzer::commands(),
         display::commands(),
         midi::commands(),
+        plugins::commands(),
         project::commands(),
         recorder::commands(),
         sampler::commands(),
@@ -288,6 +290,7 @@ pub fn run() {
             analyzer::setup(app.handle());
             display::setup(app.handle());
             midi::setup(app.handle());
+            plugins::setup(app.handle());
             project::setup(app.handle());
             sampler::setup(app.handle());
             timeline::setup(app.handle());
@@ -312,8 +315,12 @@ pub fn run() {
                     api.prevent_exit();
                     let _ = app.emit_to("main", "app:confirm-quit", ());
                 }
-                // Don't leave a stem worker running after the app quits.
-                tauri::RunEvent::Exit => app.state::<analyzer::Analyzer>().cancel_job(),
+                tauri::RunEvent::Exit => {
+                    // Don't leave a stem worker running after the app quits.
+                    app.state::<analyzer::Analyzer>().cancel_job();
+                    // Every plugin goes, then the plugin modules' exit code runs.
+                    plugins::quit(app);
+                }
                 // A .tunek file double-clicked in the Finder or dropped on the Dock icon,
                 // at launch or while running: the main window opens it.
                 #[cfg(target_os = "macos")]

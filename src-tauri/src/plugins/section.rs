@@ -1,0 +1,339 @@
+//! The project's `plugins` section: every device, its plugin and its state.
+//!
+//! ```json
+//! "plugins": {
+//!   "nextId": 4,
+//!   "devices": [
+//!     { "id": 1, "track": 2, "role": "instrument", "bypass": false,
+//!       "plugin": { "format": "vst3", "name": "Serum 2", "vendor": "Xfer Records",
+//!                   "version": "2.1.5", "classId": "…", "path": "/Library/Audio/Plug-Ins/VST3/Serum2.vst3" },
+//!       "state": "<base64 of the plugin's own state>" }
+//!   ]
+//! }
+//! ```
+//!
+//! A track's effects are listed in chain order. Ids are never reused within
+//! a project (`nextId`), so a MIDI mapping to a removed plugin's parameter
+//! can't land on a new one. A plugin that won't load when the project opens
+//! stays listed as missing, with its state, and is written back as it was.
+
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{AppHandle, Emitter, Manager};
+use tunekore_engine::plugins::{vst3, Category, Format, PluginInfo};
+use tunekore_engine::{TrackId, TrackKind};
+
+use super::{base64, kind_of, lock, make_device, placeholder, publish, refresh_params, remove_at, with_doc, Doc, Loaded, Plugins, Role};
+use crate::project::{Apply, Section};
+
+/// The most bytes one plugin's state may decode to (Kontakt's can be large).
+const MAX_STATE: usize = 256 << 20;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginFile {
+    pub format: Format,
+    pub name: String,
+    #[serde(default)]
+    pub vendor: String,
+    #[serde(default)]
+    pub version: String,
+    pub class_id: String,
+    pub path: PathBuf,
+}
+
+impl PluginFile {
+    fn of(info: &PluginInfo) -> Self {
+        Self { format: info.format, name: info.name.clone(), vendor: info.vendor.clone(), version: info.version.clone(), class_id: info.class_id.clone(), path: info.path.clone() }
+    }
+
+    fn info(&self, role: Role) -> PluginInfo {
+        PluginInfo {
+            format: self.format,
+            name: self.name.clone(),
+            vendor: self.vendor.clone(),
+            version: self.version.clone(),
+            category: match role {
+                Role::Instrument => Category::Instrument,
+                Role::Effect => Category::Effect,
+            },
+            sub_categories: Vec::new(),
+            class_id: self.class_id.clone(),
+            path: self.path.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeviceFile {
+    pub id: u64,
+    pub track: TrackId,
+    pub role: Role,
+    pub plugin: PluginFile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default)]
+    pub bypass: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginsFile {
+    #[serde(default)]
+    pub next_id: u64,
+    #[serde(default)]
+    pub devices: Vec<DeviceFile>,
+}
+
+/// A device read from a file, its state decoded and checked.
+struct Read {
+    file: DeviceFile,
+    state: Option<Vec<u8>>,
+}
+
+/// Reads and checks the section; changes nothing.
+fn read_file(value: Option<&Value>) -> Result<(u64, Vec<Read>), String> {
+    let file: PluginsFile = match value {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("the project's plugins are damaged ({e})"))?,
+        None => PluginsFile::default(),
+    };
+    let mut ids: Vec<u64> = file.devices.iter().map(|d| d.id).collect();
+    ids.sort_unstable();
+    if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
+        return Err(format!("the project has two plugins numbered {}", w[0]));
+    }
+    for t in file.devices.iter().filter(|d| d.role == Role::Instrument).map(|d| d.track) {
+        if file.devices.iter().filter(|d| d.role == Role::Instrument && d.track == t).count() > 1 {
+            return Err(format!("the project puts two instruments on track {}", t.0));
+        }
+    }
+    let next = file.next_id.max(ids.last().map_or(1, |i| i + 1));
+    let mut out = Vec::with_capacity(file.devices.len());
+    for d in file.devices {
+        let state = match &d.state {
+            Some(s) => {
+                let bytes = base64::decode(s).ok_or_else(|| format!("{}'s saved sound is damaged", d.plugin.name))?;
+                if bytes.len() > MAX_STATE {
+                    return Err(format!("{}'s saved sound is too large", d.plugin.name));
+                }
+                Some(bytes)
+            }
+            None => None,
+        };
+        out.push(Read { file: d, state });
+    }
+    Ok((next, out))
+}
+
+/// Writes the document as the section, on the main thread.
+fn write(doc: &mut Doc) -> PluginsFile {
+    let devices = doc
+        .slots
+        .iter_mut()
+        .map(|s| {
+            let state = super::state_of(s).map(|b| base64::encode(&b));
+            DeviceFile { id: s.id, track: s.track, role: s.role, plugin: PluginFile::of(&s.info), state, bypass: s.bypass }
+        })
+        .collect();
+    PluginsFile { next_id: doc.next_id.max(1), devices }
+}
+
+/// Finds a moved plugin: the same class at another path, from the scan.
+fn relocate(app: &AppHandle, f: &PluginFile) -> Option<PathBuf> {
+    let state = app.state::<Plugins>();
+    let c = lock(&state.catalog);
+    let found = c.cache.as_ref()?.plugins().find(|e| e.info.class_id.eq_ignore_ascii_case(&f.class_id) && e.info.format == f.format).map(|e| e.info.path.clone());
+    found
+}
+
+/// Main thread: empties the document and the tracks of plugins.
+fn clear_all(app: &AppHandle, doc: &mut Doc) {
+    while !doc.slots.is_empty() {
+        if remove_at(app, doc, 0).is_err() {
+            doc.slots.remove(0);
+        }
+    }
+}
+
+/// Main thread: puts the file's devices on their tracks. A plugin that
+/// won't load stays as a missing device. Returns the names that didn't load.
+fn apply(app: &AppHandle, doc: &mut Doc, next: u64, devices: Vec<Read>) -> Vec<String> {
+    clear_all(app, doc);
+    doc.next_id = next;
+    let tracks = lock(crate::audio(app)).engine.tracks();
+    let rate = super::engine_rate(app);
+    let mut missing = Vec::new();
+    for Read { file, state } in devices {
+        let Some(track) = tracks.iter().find(|t| t.id == file.track) else {
+            missing.push(format!("{} (its track is gone)", file.plugin.name));
+            continue;
+        };
+        if file.role == Role::Instrument && track.kind != TrackKind::Instrument {
+            missing.push(format!("{} (its track isn't an instrument track)", file.plugin.name));
+            continue;
+        }
+        let mut info = file.plugin.info(file.role);
+        let mut slot = placeholder(file.id, file.track, file.role, info.clone());
+        slot.bypass = file.bypass;
+        slot.saved = state.clone();
+        let loaded = vst3::load(&info).or_else(|first| match relocate(app, &file.plugin) {
+            Some(p) if p != info.path => {
+                info.path = p;
+                vst3::load(&info)
+            }
+            _ => Err(first),
+        });
+        match loaded {
+            Ok(mut controller) => {
+                slot.info = info.clone();
+                if let Some(s) = &state {
+                    if let Err(e) = controller.load_state(s) {
+                        slot.error = Some(format!("its saved sound didn't load: {e}"));
+                    }
+                }
+                if kind_of(controller.info()) != file.role && file.role == Role::Instrument {
+                    slot.error = Some("it isn't an instrument any more".into());
+                }
+                match make_device(app, file.id, file.role, &mut *controller, rate) {
+                    Ok((device, link)) => {
+                        link.set_bypass(file.bypass);
+                        let index = doc.chain_index_at(file.track, doc.slots.len());
+                        let put = {
+                            let mut a = lock(crate::audio(app));
+                            let mixer = a.engine.mixer();
+                            match file.role {
+                                Role::Instrument => mixer.set_source(file.track, Some(device)),
+                                Role::Effect => mixer.insert(file.track, index, device),
+                            }
+                        };
+                        match put {
+                            Ok(()) => slot.loaded = Some(Loaded { controller, link }),
+                            Err(e) => {
+                                slot.error = Some(e);
+                                missing.push(file.plugin.name.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        slot.error = Some(e);
+                        missing.push(file.plugin.name.clone());
+                    }
+                }
+            }
+            Err(e) => {
+                slot.error = Some(e.to_string());
+                missing.push(file.plugin.name.clone());
+            }
+        }
+        doc.slots.push(slot);
+        let last = doc.slots.len() - 1;
+        refresh_params(app, &mut doc.slots[last]);
+    }
+    missing
+}
+
+/// The `plugins` section of the project.
+pub struct PluginsSection {
+    revision: Arc<AtomicU64>,
+}
+
+impl PluginsSection {
+    pub fn new(revision: Arc<AtomicU64>) -> Self {
+        Self { revision }
+    }
+}
+
+impl Section<AppHandle> for PluginsSection {
+    fn key(&self) -> &'static str {
+        "plugins"
+    }
+
+    /// Asks every plugin for its state, on the main thread.
+    fn save(&self, app: &AppHandle, _: &Path) -> Result<Value, String> {
+        let file = with_doc(app, |_, d| write(d))?;
+        serde_json::to_value(file).map_err(|e| e.to_string())
+    }
+
+    fn read(&self, _: &AppHandle, value: Option<&Value>, _: &Path) -> Result<Apply<AppHandle>, String> {
+        let (next, devices) = read_file(value)?;
+        Ok(Box::new(move |app| {
+            let missing = with_doc(app, move |app, d| {
+                let missing = apply(app, d, next, devices);
+                app.state::<Plugins>().live.set_focus(None);
+                publish(app, d);
+                missing
+            })?;
+            if !missing.is_empty() {
+                let _ = app.emit("plugins:missing", &missing);
+            }
+            Ok(())
+        }))
+    }
+
+    fn clear(&self, app: &AppHandle) -> Result<(), String> {
+        with_doc(app, |app, d| {
+            clear_all(app, d);
+            d.next_id = 1;
+            app.state::<Plugins>().live.set_focus(None);
+            publish(app, d);
+        })
+    }
+
+    fn revision(&self, _: &AppHandle) -> u64 {
+        self.revision.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn device(id: u64, track: u32, role: &str) -> Value {
+        json!({ "id": id, "track": track, "role": role, "plugin": { "format": "vst3", "name": "Serum 2", "classId": "ABC", "path": "/Library/Audio/Plug-Ins/VST3/Serum2.vst3" }, "state": "Zm9v" })
+    }
+
+    #[test]
+    fn reads_devices_and_their_state() {
+        let (next, read) = read_file(Some(&json!({ "nextId": 2, "devices": [device(5, 2, "instrument"), device(6, 2, "effect")] }))).unwrap();
+        assert_eq!(next, 7, "past the highest id");
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].state.as_deref(), Some(&b"foo"[..]));
+        assert_eq!(read[1].file.role, Role::Effect);
+        assert!(!read[0].file.bypass);
+        assert_eq!(read_file(None).map(|(n, r)| (n, r.len())), Ok((1, 0)), "a project from before plugins");
+    }
+
+    #[test]
+    fn a_damaged_section_opens_nothing() {
+        assert!(read_file(Some(&json!({ "devices": [device(1, 2, "instrument"), device(1, 3, "instrument")] }))).is_err(), "the same id twice");
+        assert!(read_file(Some(&json!({ "devices": [device(1, 2, "instrument"), device(2, 2, "instrument")] }))).is_err(), "two instruments on one track");
+        let mut bad = device(1, 2, "effect");
+        bad["state"] = json!("not base64!");
+        assert!(read_file(Some(&json!({ "devices": [bad] }))).is_err());
+        assert!(read_file(Some(&json!({ "devices": [{ "id": 1 }] }))).is_err());
+    }
+
+    #[test]
+    fn writes_back_what_it_reads() {
+        let f = PluginsFile {
+            next_id: 3,
+            devices: vec![DeviceFile {
+                id: 2,
+                track: TrackId(4),
+                role: Role::Effect,
+                plugin: PluginFile { format: Format::Vst3, name: "Guitar Rig 7".into(), vendor: "Native Instruments".into(), version: "7".into(), class_id: "X".into(), path: "/a.vst3".into() },
+                state: Some(base64::encode(b"state")),
+                bypass: true,
+            }],
+        };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v["devices"][0]["plugin"]["classId"], "X");
+        assert_eq!(serde_json::from_value::<PluginsFile>(v).unwrap(), f);
+    }
+}
