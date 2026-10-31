@@ -189,6 +189,11 @@ mod mac {
             }
         }
 
+        /// Whether the user closed it (the module may not have heard yet).
+        pub fn is_closed(&self) -> bool {
+            self.delegate.ivars().closed.get()
+        }
+
         /// Where its top left corner is now.
         pub fn place(&self) -> Place {
             let f = self.window.frame();
@@ -253,6 +258,9 @@ mod other {
         pub fn raise(&self) {}
         pub fn place(&self) -> Place {
             Place { x: 0.0, y: 0.0 }
+        }
+        pub fn is_closed(&self) -> bool {
+            true
         }
         pub fn close(self) {}
     }

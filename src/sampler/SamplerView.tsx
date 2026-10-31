@@ -23,6 +23,11 @@ import MidiDot from "./MidiDot";
 import ExportDialog from "./ExportDialog";
 import StatusBar, { type Message } from "../StatusBar";
 import { Learnable, MidiLearn } from "../midi/learn";
+import PluginPicker from "../plugins/PluginPicker";
+import { DeviceCard } from "../plugins/DeviceChain";
+import * as plugins from "../plugins/api";
+import type { CatalogEntry, PluginsView } from "../plugins/api";
+import "../plugins/plugins.css";
 import { SWING, TEMPO } from "../midi/api";
 
 type Drag =
@@ -78,6 +83,9 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
   const libraryRoot = useRef<string | null>(null);
 
   const say = useCallback((text: string, error = false) => setMessage({ text, error }), [setMessage]);
+  // The plugins pads play, and the list to pick one from.
+  const [devices, setDevices] = useState<PluginsView | null>(null);
+  const [pickPad, setPickPad] = useState<number | null>(null);
   const fail = useCallback((e: unknown) => say(String(e), true), [say]);
   const take = useCallback((v: View) => {
     live.current = null;
@@ -102,7 +110,9 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
       // Hidden behind the Timeline, the meter needn't redraw 30 times a second.
       subscribe(onMeter((peak) => activeRef.current && setLevel((prev) => Math.max(peak, prev * 0.8)))),
       subscribe(onLimiter(() => setLimiting(true))),
+      subscribe(plugins.onState(setDevices)),
     ];
+    plugins.state().then(setDevices).catch(() => {});
     return () => offs.forEach((off) => off());
   }, [take, fail]);
 
@@ -547,6 +557,7 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
         <div className="center">
           <div className="top-row">
             <Pads
+              plugins={Object.fromEntries((devices?.devices ?? []).filter((d) => d.role === "pad").map((d) => [d.pad, d.name]))}
               pads={view.pads}
               selected={selected}
               played={tick.played}
@@ -558,6 +569,12 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
             />
             <Inspector
               pad={pad}
+              onPlugin={() => setPickPad(selected)}
+              plugin={(() => {
+                const d = plugins.padPlugin(devices, selected);
+                const run = (p: Promise<PluginsView>, failure?: string) => p.then(setDevices).catch((e) => say(failure ? `${failure}: ${e}` : String(e), true));
+                return d && <DeviceCard device={d} owner={`pad ${selected + 1}`} run={run} />;
+              })()}
               onSettings={(s: PadSettings) => void api.setSettings(selected, s).then(take).catch(fail)}
               onLoadFile={(f) => loadSample(selected, f)}
               onClear={() => void api.clearPad(selected).then(take).catch(fail)}
@@ -619,6 +636,27 @@ export default function SamplerView({ active, switcher, message, onMessage: setM
         </div>
       </main>
 
+      {pickPad !== null && (
+        <PluginPicker
+          kind="instrument"
+          title={`Instrument for pad ${pickPad + 1}`}
+          onPick={(p: CatalogEntry) => {
+            const pad = pickPad;
+            setPickPad(null);
+            say(`Loading ${p.name}…`);
+            plugins.afterPaint(() =>
+              plugins
+                .add(p, null, undefined, pad)
+                .then((v) => {
+                  setDevices(v);
+                  say(`Pad ${pad + 1} plays ${p.name}`);
+                })
+                .catch((e) => say(`${p.name} didn't load: ${e}`, true)),
+            );
+          }}
+          onClose={() => setPickPad(null)}
+        />
+      )}
       <StatusBar message={message} onDismiss={() => setMessage(null)}>
         <kbd>Space</kbd> play · <kbd>1</kbd>–<kbd>V</kbd> pads · <kbd>↑</kbd><kbd>↓</kbd> browse · <kbd>Enter</kbd> load on pad {selected + 1} · <kbd>/</kbd> search · <kbd>{mod}2</kbd> Timeline
       </StatusBar>

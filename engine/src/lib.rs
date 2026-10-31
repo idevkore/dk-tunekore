@@ -52,7 +52,7 @@ pub use sampler::{
 pub use device::{Buffers, Device, Event, Events};
 pub use graph::Mixer;
 pub use peaks::{Peaks, PEAK_LEVELS};
-pub use plugin_device::{plugin_device, Activated, PluginDevice, PluginLink, Role as PluginRole};
+pub use plugin_device::{plugin_device, plugin_device_for_pad, Activated, PadGains, PluginDevice, PluginLink, Role as PluginRole};
 /// The plugin host the engine runs plugins through.
 pub use tunekore_plugins as plugins;
 pub use resample::resample;

@@ -55,7 +55,15 @@ pub enum Role {
     Instrument,
     /// In the chain: changes the sound in place.
     Effect,
+    /// In the Sampler track's chain, ahead of its effects: plays the notes
+    /// of one pad (the Sampler sends them on the pad's channel) and adds its
+    /// sound at the pad's level and pan.
+    Pad(u8),
 }
+
+/// A pad's level and pan as left and right gains, read on the audio thread
+/// (atomics only).
+pub type PadGains = Box<dyn Fn() -> [f32; 2] + Send + Sync>;
 
 /// A plugin activated for the device, and the rate it was activated at.
 pub struct Activated {
@@ -156,12 +164,24 @@ pub struct PluginDevice {
     /// Notes held, a bit per key for each channel, so they can be released.
     held: [u128; 16],
     was_bypassed: bool,
+    /// A pad device's gains, and the ones it ended the last block at.
+    gains: Option<PadGains>,
+    last_gains: [f32; 2],
 }
 
 /// A device for a plugin in `role`, and the link the main thread keeps.
 /// `request` asks for a plugin activated at the link's rate (see
 /// [`PluginLink`]); it must not block. Off the audio thread: it allocates.
 pub fn plugin_device(role: Role, request: Box<dyn Fn() + Send + Sync>) -> (PluginDevice, Arc<PluginLink>) {
+    plugin_device_with(role, None, request)
+}
+
+/// A device that plays pad `pad`'s notes at `gains` (see [`Role::Pad`]).
+pub fn plugin_device_for_pad(pad: u8, gains: PadGains, request: Box<dyn Fn() + Send + Sync>) -> (PluginDevice, Arc<PluginLink>) {
+    plugin_device_with(Role::Pad(pad), Some(gains), request)
+}
+
+fn plugin_device_with(role: Role, gains: Option<PadGains>, request: Box<dyn Fn() + Send + Sync>) -> (PluginDevice, Arc<PluginLink>) {
     let (returns, returned) = RingBuffer::new(RETURNS);
     let (live_tx, live) = RingBuffer::new(LIVE_EVENTS);
     let link = Arc::new(PluginLink {
@@ -189,6 +209,8 @@ pub fn plugin_device(role: Role, request: Box<dyn Fn() + Send + Sync>) -> (Plugi
         param_out: OutBuf::with_capacity(OUT_EVENTS),
         held: [0; 16],
         was_bypassed: false,
+        last_gains: gains.as_ref().map_or([1.0; 2], |g| g()),
+        gains,
     };
     (device, link)
 }
@@ -279,7 +301,8 @@ impl PluginDevice {
         self.held = [0; 16];
     }
 
-    /// Gathers this block's notes: live ones first (at its start), then the track's.
+    /// Gathers this block's notes: live ones first (at its start), then the
+    /// track's (a pad device's: its pad's only, on channel 1).
     fn gather(&mut self, events: &Events) {
         self.events.clear();
         if self.link.role == Role::Instrument {
@@ -289,11 +312,21 @@ impl PluginDevice {
                 self.events.push(e);
             }
         }
+        let pad = match self.link.role {
+            Role::Pad(p) => Some(p),
+            _ => None,
+        };
         for e in events.as_slice() {
             if self.events.len() == self.events.capacity() {
                 break;
             }
-            let pe = to_plugin(e);
+            let mut pe = to_plugin(e);
+            if let Some(p) = pad {
+                match &mut pe.kind {
+                    EventKind::NoteOn { channel, .. } | EventKind::NoteOff { channel, .. } if *channel == p => *channel = 0,
+                    _ => continue,
+                }
+            }
             self.note(&pe.kind);
             self.events.push(pe);
         }
@@ -343,7 +376,8 @@ impl Device for PluginDevice {
         if n == 0 {
             return;
         }
-        let instrument = self.link.role == Role::Instrument;
+        // An instrument or a pad adds its sound; an effect changes the track's.
+        let instrument = self.link.role != Role::Effect;
         self.gather(events);
         if self.link.bypass.load(Ordering::Relaxed) {
             // An instrument switched off lets go of its notes first, so none hang when it comes back.
@@ -377,7 +411,17 @@ impl Device for PluginDevice {
         }
         let n_out = self.current.as_ref().map_or(0, |a| a.plugin.layout().output_channels());
         let (l, r) = if n_out >= 2 { (&self.scratch_out[0][..n], &self.scratch_out[1][..n]) } else { (&self.scratch_out[0][..n], &self.scratch_out[0][..n]) };
-        if instrument {
+        if let Some(gains) = &self.gains {
+            // A pad: at its level and pan, moved across the block so a change never clicks.
+            let (from, to) = (self.last_gains, gains());
+            let step = [(to[0] - from[0]) / n as f32, (to[1] - from[1]) / n as f32];
+            for i in 0..n {
+                let k = (i + 1) as f32;
+                audio.left[i] += l[i] * (from[0] + step[0] * k);
+                audio.right[i] += r[i] * (from[1] + step[1] * k);
+            }
+            self.last_gains = to;
+        } else if instrument {
             audio.left[..n].iter_mut().zip(l).for_each(|(d, s)| *d += s);
             audio.right[..n].iter_mut().zip(r).for_each(|(d, s)| *d += s);
         } else {
@@ -648,6 +692,44 @@ mod tests {
         link.collect();
         let (out, _) = block(&mut d, &ctx, &mut ev, 0.1);
         assert!(out.iter().all(|&x| (x - 0.2).abs() < 1e-6));
+    }
+
+    #[test]
+    fn a_pad_device_plays_only_its_pads_notes_at_the_pads_level() {
+        let (_, request) = requests();
+        let gains = Arc::new(AtomicU64::new(0));
+        let g = gains.clone();
+        let read = Box::new(move || {
+            let bits = g.load(Ordering::Relaxed);
+            [f32::from_bits(bits as u32), f32::from_bits((bits >> 32) as u32)]
+        });
+        let set = |l: f32, r: f32| gains.store(u64::from(l.to_bits()) | (u64::from(r.to_bits()) << 32), Ordering::Relaxed);
+        set(1.0, 0.5);
+        let (mut d, link) = plugin_device_for_pad(3, read, request);
+        d.prepare(RATE, MAX_FRAMES);
+        let s = Arc::new(Seen::default());
+        link.give(fake(false, s.clone()), RATE);
+        let ctx = ProcessContext::stopped(RATE, 32);
+        let mut ev = Events::with_capacity(8);
+        ev.push(Event::NoteOn { frame: 0, channel: 2, key: 61, velocity: 1.0 });
+        let mut l = vec![0.0; 32];
+        let mut r = vec![0.0; 32];
+        let (_, allocs) = realtime(|| d.process(&ctx, &mut ev, Buffers { left: &mut l, right: &mut r }));
+        assert_eq!(allocs, 0);
+        assert!(l.iter().chain(&r).all(|&x| x == 0.0), "another pad's note: silent");
+        ev.clear();
+        ev.push(Event::NoteOn { frame: 4, channel: 3, key: 62, velocity: 1.0 });
+        let (_, allocs) = realtime(|| d.process(&ctx, &mut ev, Buffers { left: &mut l, right: &mut r }));
+        assert_eq!(allocs, 0);
+        assert_eq!(s.last.load(Ordering::Relaxed), pack(4, &EventKind::NoteOn { channel: 0, key: 62, velocity: 1.0, note_id: -1 }), "its own, on channel 1");
+        assert_eq!((l[31], r[31]), (0.5, 0.25), "the plugin's 0.5 at the pad's level and pan");
+        // A level change ramps across the next block.
+        set(0.0, 0.0);
+        l.fill(0.0);
+        r.fill(0.0);
+        ev.clear();
+        d.process(&ctx, &mut ev, Buffers { left: &mut l, right: &mut r });
+        assert!(l[0] > 0.0 && l[0] < 0.5 && l[31] == 0.0, "{} .. {}", l[0], l[31]);
     }
 
     #[test]

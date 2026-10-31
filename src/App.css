@@ -196,6 +196,7 @@ kbd { font: 10.5px/1 "Geist Mono", ui-monospace, Menlo, monospace; padding: 2px 
 .pad-wave { flex: 1; min-height: 0; width: 100%; }
 .pad-empty { display: grid; place-items: center; font-size: 18px; color: var(--pad-empty); }
 .pad.missing .pad-empty { font-size: 11px; color: var(--warn); }
+.pad-plugin { display: grid; place-items: center; color: var(--wave); }
 .pad-name { font-size: 11.5px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pad-flash { position: absolute; inset: 0; background: var(--lime); opacity: 0; animation: flash 220ms ease-out; pointer-events: none; }
 @keyframes flash { from { opacity: 0.32; } to { opacity: 0; } }

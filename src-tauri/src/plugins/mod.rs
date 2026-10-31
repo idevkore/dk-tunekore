@@ -40,7 +40,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tunekore_engine::graph::MAX_FRAMES;
 use tunekore_engine::plugins::scan::{self, ScanCache, ScanOptions, ScanStatus};
 use tunekore_engine::plugins::{vst3, BusSelection, Category, ChannelTable, ControllerEvent, EditorSize, OutBuf, PluginController, PluginInfo, ProcessBlock, ProcessSetup, Transport};
-use tunekore_engine::{plugin_device, Device, PluginLink, PluginRole, TrackId, TrackInfo, TrackKind};
+use tunekore_engine::{plugin_device, plugin_device_for_pad, Device, Mixer, PluginLink, PluginRole, SamplerHandle, TrackId, TrackInfo, TrackKind, PADS, SAMPLER_TRACK};
 
 pub use live::{control_live, has_focus as live_has_focus, play_live};
 use window::{EditorWindow, Place, WindowEvent};
@@ -121,15 +121,9 @@ pub enum Role {
     Instrument,
     /// An effect in a track's chain.
     Effect,
-}
-
-impl Role {
-    fn engine(self) -> PluginRole {
-        match self {
-            Role::Instrument => PluginRole::Instrument,
-            Role::Effect => PluginRole::Effect,
-        }
-    }
+    /// The instrument a Sampler pad plays ([`Slot::pad`]): in the Sampler
+    /// track's chain, ahead of its effects.
+    Pad,
 }
 
 /// A plugin that loaded: its controller and the link to its device.
@@ -144,6 +138,8 @@ struct Slot {
     id: u64,
     track: TrackId,
     role: Role,
+    /// The pad (0..16) a `Pad` device plays.
+    pad: u8,
     info: PluginInfo,
     /// `None` while the plugin is missing (it didn't load).
     loaded: Option<Loaded>,
@@ -161,6 +157,39 @@ struct Slot {
 }
 
 impl Slot {
+    /// Whether its device sits in the track's chain (an effect, or a pad's
+    /// instrument) rather than its source slot.
+    fn in_chain(&self) -> bool {
+        self.role != Role::Instrument
+    }
+
+    fn engine_role(&self) -> PluginRole {
+        match self.role {
+            Role::Instrument => PluginRole::Instrument,
+            Role::Effect => PluginRole::Effect,
+            Role::Pad => PluginRole::Pad(self.pad),
+        }
+    }
+
+    /// Puts `device` in its place on the track: the source slot, or `index` in the chain.
+    fn put(&self, mixer: &mut Mixer, device: Box<dyn Device>, index: usize) -> Result<(), String> {
+        match self.role {
+            Role::Instrument => mixer.set_source(self.track, Some(device)),
+            _ => mixer.insert(self.track, index, device),
+        }
+    }
+
+    /// Takes its device off the track (it was at `index` in the chain).
+    fn take(&self, mixer: &mut Mixer, index: usize) -> Result<(), String> {
+        if mixer.track(self.track).is_none() {
+            return Ok(());
+        }
+        match self.role {
+            Role::Instrument => mixer.set_source(self.track, None),
+            _ => mixer.remove(self.track, index),
+        }
+    }
+
     fn status(&self) -> &'static str {
         match &self.loaded {
             None => "missing",
@@ -187,11 +216,21 @@ impl Doc {
         self.chain_index_at(self.slots[i].track, i)
     }
 
-    /// Where an effect at document place `at` on `track` goes in the
-    /// engine's chain: after the loaded effects before it (a missing one has
-    /// no device there).
+    /// Where a device at document place `at` on `track` goes in the engine's
+    /// chain: after the loaded chain devices before it (a missing one has no
+    /// device there). On the Sampler's track the pads' instruments come
+    /// first, then the effects.
     fn chain_index_at(&self, track: TrackId, at: usize) -> usize {
-        self.slots[..at.min(self.slots.len())].iter().filter(|o| o.track == track && o.role == Role::Effect && o.loaded.is_some()).count()
+        self.slots[..at.min(self.slots.len())].iter().filter(|o| o.track == track && o.in_chain() && o.loaded.is_some()).count()
+    }
+
+    /// The document place for a new pad device: after the Sampler track's other pads, before its effects.
+    fn pad_place(&self) -> usize {
+        self.slots.iter().position(|s| s.track == SAMPLER_TRACK && s.role == Role::Effect).unwrap_or(self.slots.len())
+    }
+
+    fn pad_device(&self, pad: u8) -> Option<usize> {
+        self.slots.iter().position(|s| s.role == Role::Pad && s.pad == pad)
     }
 
     /// The document places of `track`'s effects, in order.
@@ -264,6 +303,8 @@ pub struct DeviceView {
     id: u64,
     track: u32,
     role: Role,
+    /// The pad a `pad` device plays, 0..16.
+    pad: u8,
     name: String,
     vendor: String,
     /// `ok`, `missing` or `failed`.
@@ -298,6 +339,7 @@ fn view(state: &Plugins, doc: &mut Doc) -> PluginsView {
                 id: s.id,
                 track: s.track.0,
                 role: s.role,
+                pad: s.pad,
                 name: s.info.name.clone(),
                 vendor: s.info.vendor.clone(),
                 status,
@@ -504,10 +546,16 @@ fn requester(app: &AppHandle, id: u64) -> Box<dyn Fn() + Send + Sync> {
     })
 }
 
-/// Makes a device for `controller`, activated at `rate` (0: not yet; the
-/// device asks once it is prepared). Main thread.
-fn make_device(app: &AppHandle, id: u64, role: Role, controller: &mut dyn PluginController, rate: u32) -> Result<(Box<dyn Device>, Arc<PluginLink>), String> {
-    let (mut device, link) = plugin_device(role.engine(), requester(app, id));
+/// Makes a device in `role` for `controller`, activated at `rate` (0: not
+/// yet; the device asks once it is prepared). Main thread.
+fn make_device(app: &AppHandle, id: u64, role: PluginRole, controller: &mut dyn PluginController, rate: u32) -> Result<(Box<dyn Device>, Arc<PluginLink>), String> {
+    let (mut device, link) = match role {
+        PluginRole::Pad(pad) => {
+            let pads = app.state::<SamplerHandle>().inner().clone();
+            plugin_device_for_pad(pad, Box::new(move || pads.pad_gains(usize::from(pad))), requester(app, id))
+        }
+        _ => plugin_device(role, requester(app, id)),
+    };
     if rate > 0 {
         let p = controller.activate(&setup_at(rate)).map_err(|e| e.to_string())?;
         device.install(p, rate);
@@ -571,9 +619,14 @@ fn title(track: &str, plugin: &str) -> String {
 fn open_editor(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
     let track = track_name(app, doc.slots[i].track);
     let s = &mut doc.slots[i];
-    if let Some(w) = &s.window {
-        w.raise();
-        return Ok(());
+    match &s.window {
+        Some(w) if !w.is_closed() => {
+            w.raise();
+            return Ok(());
+        }
+        // Closed by the user a moment ago, before the module heard: done with it first.
+        Some(_) => close_editor(s),
+        None => {}
     }
     let Some(l) = &mut s.loaded else { return Err(format!("{} isn't loaded", s.info.name)) };
     if !l.controller.has_editor() {
@@ -617,6 +670,10 @@ fn window_event(app: &AppHandle, doc: &mut Doc, id: u64, e: WindowEvent) {
     let s = &mut doc.slots[i];
     match e {
         WindowEvent::Closed => {
+            // Heard late: a window opened since is not the one that closed.
+            if !s.window.as_ref().is_some_and(EditorWindow::is_closed) {
+                return;
+            }
             // The window is closing itself: the editor goes first, then our hold on it.
             if let Some(l) = &mut s.loaded {
                 l.controller.close_editor();
@@ -648,6 +705,11 @@ pub struct PluginRef {
     pub class_id: String,
 }
 
+/// Marks pad `pad` as playing a plugin (its hits become notes) or its sample.
+fn mark_pad(app: &AppHandle, pad: u8, on: bool) {
+    app.state::<SamplerHandle>().set_plugin_pad(usize::from(pad), on);
+}
+
 fn kind_of(info: &PluginInfo) -> Role {
     match info.category {
         Category::Instrument => Role::Instrument,
@@ -665,10 +727,7 @@ fn restore_lost(app: &AppHandle, doc: &mut Doc, tracks: &[TrackInfo]) {
         .filter(|(_, s)| s.loaded.is_some())
         .filter(|(i, s)| {
             let Some(t) = tracks.iter().find(|t| t.id == s.track) else { return false };
-            match s.role {
-                Role::Instrument => !t.has_source,
-                Role::Effect => doc.chain_index(*i) >= t.chain,
-            }
+            if s.in_chain() { doc.chain_index(*i) >= t.chain } else { !t.has_source }
         })
         .map(|(i, _)| i)
         .collect();
@@ -686,8 +745,9 @@ fn reinstall(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
     let rate = engine_rate(app);
     let index = doc.chain_index(i);
     let s = &mut doc.slots[i];
+    let role = s.engine_role();
     let Some(l) = &mut s.loaded else { return Ok(()) };
-    let (device, link) = make_device(app, s.id, s.role, &mut *l.controller, rate)?;
+    let (device, link) = make_device(app, s.id, role, &mut *l.controller, rate)?;
     link.set_bypass(s.bypass);
     app.state::<Plugins>().live.retarget(s.track, &l.link, &link);
     l.link = link;
@@ -695,7 +755,7 @@ fn reinstall(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
     let mixer = a.engine.mixer();
     match s.role {
         Role::Instrument => mixer.restore_source(s.track, device)?,
-        Role::Effect => mixer.insert(s.track, index, device)?,
+        _ => mixer.insert(s.track, index, device)?,
     }
     Ok(())
 }
@@ -706,51 +766,84 @@ fn engine_rate(app: &AppHandle) -> u32 {
     if a.engine.is_open() { a.engine.output_rate() } else { 0 }
 }
 
-/// Main thread: loads `info` and puts it on a track. An instrument goes on
-/// `track` (an instrument track, replacing its instrument) or on a new
-/// instrument track named after it; an effect goes in `track`'s chain at
-/// `index` (the end by default).
-fn add(app: &AppHandle, doc: &mut Doc, info: PluginInfo, track: Option<TrackId>, index: Option<usize>) -> Result<u64, String> {
-    let role = kind_of(&info);
+/// Where a plugin goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// An instrument, on a new instrument track named after it.
+    NewTrack,
+    /// An instrument track's instrument (replacing the one there), or an
+    /// effect in a track's chain at a place (the end by default).
+    Track(TrackId, Option<usize>),
+    /// The instrument a Sampler pad plays (replacing the one there).
+    Pad(u8),
+}
+
+/// Main thread: loads `info` and puts it where `target` says.
+fn add(app: &AppHandle, doc: &mut Doc, info: PluginInfo, target: Target) -> Result<u64, String> {
+    let kind = kind_of(&info);
     let tracks = lock(crate::audio(app)).engine.tracks();
-    let target = match (role, track) {
-        (Role::Effect, None) => return Err("choose a track for the effect".into()),
-        (_, Some(t)) => {
+    let (role, track, pad) = match target {
+        Target::Pad(p) => {
+            if usize::from(p) >= PADS {
+                return Err(format!("there is no pad {}", p + 1));
+            }
+            if kind != Role::Instrument {
+                return Err("a pad plays an instrument; put effects on the Sampler's track".into());
+            }
+            (Role::Pad, Some(SAMPLER_TRACK), p)
+        }
+        Target::NewTrack if kind != Role::Instrument => return Err("choose a track for the effect".into()),
+        Target::NewTrack => {
+            if tracks.len() >= tunekore_engine::track::TRACK_SLOTS {
+                return Err(format!("tuneKore runs at most {} tracks", tunekore_engine::track::TRACK_SLOTS));
+            }
+            (Role::Instrument, None, 0)
+        }
+        Target::Track(t, _) => {
             let Some(found) = tracks.iter().find(|x| x.id == t) else { return Err(format!("there is no track {}", t.0)) };
-            if role == Role::Instrument && found.kind != TrackKind::Instrument {
+            if kind == Role::Instrument && found.kind != TrackKind::Instrument {
                 return Err(match found.kind {
                     TrackKind::Sampler => "an instrument goes on an instrument track or a pad, not on the Sampler's track".into(),
                     _ => "an instrument goes on an instrument track; audio tracks play clips".into(),
                 });
             }
-            Some(t)
+            (kind, Some(t), 0)
         }
-        (Role::Instrument, None) => None,
     };
-    if tracks.len() >= tunekore_engine::track::TRACK_SLOTS && target.is_none() {
-        return Err(format!("tuneKore runs at most {} tracks", tunekore_engine::track::TRACK_SLOTS));
-    }
     let mut controller = vst3::load(&info).map_err(|e| e.to_string())?;
+    // A pad's instrument goes in place of the one it had.
+    if role == Role::Pad {
+        if let Some(old) = doc.pad_device(pad) {
+            remove_at(app, doc, old)?;
+        }
+    }
     let id = doc.take_id();
+    let engine_role = match role {
+        Role::Instrument => PluginRole::Instrument,
+        Role::Effect => PluginRole::Effect,
+        Role::Pad => PluginRole::Pad(pad),
+    };
     let rate = engine_rate(app);
-    let (device, link) = make_device(app, id, role, &mut *controller, rate)?;
+    let (device, link) = make_device(app, id, engine_role, &mut *controller, rate)?;
 
-    // Where it goes in the document: an effect at `index` among its track's effects.
-    let at = match (role, target) {
-        (Role::Effect, Some(t)) => {
+    // Its place in the document: an effect at `index` among its track's
+    // effects, a pad's instrument after the other pads', an instrument last.
+    let at = match (role, track, target) {
+        (Role::Effect, Some(t), Target::Track(_, index)) => {
             let effects = doc.effects(t);
             match index {
                 Some(n) if n < effects.len() => effects[n],
                 _ => effects.last().map_or(doc.slots.len(), |&i| i + 1),
             }
         }
+        (Role::Pad, _, _) => doc.pad_place(),
         _ => doc.slots.len(),
     };
     let mut replaced = None;
     let track = {
         let mut a = lock(crate::audio(app));
         let mixer = a.engine.mixer();
-        match (role, target) {
+        match (role, track) {
             (Role::Instrument, None) => {
                 let t = mixer.add_track(&info.name)?;
                 mixer.set_kind(t, TrackKind::Instrument)?;
@@ -762,17 +855,21 @@ fn add(app: &AppHandle, doc: &mut Doc, info: PluginInfo, track: Option<TrackId>,
                 mixer.set_source(t, Some(device))?;
                 t
             }
-            (Role::Effect, Some(t)) => {
+            (_, Some(t)) => {
                 mixer.insert(t, doc.chain_index_at(t, at), device)?;
                 t
             }
-            (Role::Effect, None) => unreachable!(),
+            (_, None) => return Err("choose a track for the effect".into()),
         }
     };
     let state = app.state::<Plugins>();
+    let mut at = at;
     if let Some(old) = replaced {
         // Its device is gone from the track already (replaced in the source slot).
         let mut s = doc.slots.remove(old);
+        if old < at {
+            at -= 1;
+        }
         close_editor(&mut s);
         state.params.forget(s.id);
         if let Some(l) = &s.loaded {
@@ -780,18 +877,23 @@ fn add(app: &AppHandle, doc: &mut Doc, info: PluginInfo, track: Option<TrackId>,
         }
         drop(s);
     }
+    if role == Role::Pad {
+        mark_pad(app, pad, true);
+    }
     let at = at.min(doc.slots.len());
-    let slot = Slot { loaded: Some(Loaded { controller, link }), ..placeholder(id, track, role, info) };
+    let slot = Slot { pad, loaded: Some(Loaded { controller, link }), ..placeholder(id, track, role, info) };
     doc.slots.insert(at, slot);
     let i = doc.find(id)?;
     refresh_params(app, &mut doc.slots[i]);
     state.edited();
-    crate::timeline::tracks_changed(app);
+    if target == Target::NewTrack {
+        crate::timeline::tracks_changed(app);
+    }
     Ok(id)
 }
 
 fn placeholder(id: u64, track: TrackId, role: Role, info: PluginInfo) -> Slot {
-    Slot { id, track, role, info, loaded: None, saved: None, error: None, bypass: false, window: None, place: None, title: String::new() }
+    Slot { id, track, role, pad: 0, info, loaded: None, saved: None, error: None, bypass: false, window: None, place: None, title: String::new() }
 }
 
 /// Main thread: takes slot `i` off its track and drops its plugin here.
@@ -799,16 +901,12 @@ fn remove_at(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
     if doc.slots[i].loaded.is_some() {
         let index = doc.chain_index(i);
         let s = &doc.slots[i];
-        let mut a = lock(crate::audio(app));
-        let mixer = a.engine.mixer();
-        if mixer.track(s.track).is_some() {
-            match s.role {
-                Role::Instrument => mixer.set_source(s.track, None)?,
-                Role::Effect => mixer.remove(s.track, index)?,
-            }
-        }
+        s.take(lock(crate::audio(app)).engine.mixer(), index)?;
     }
     let mut s = doc.slots.remove(i);
+    if s.role == Role::Pad {
+        mark_pad(app, s.pad, false);
+    }
     close_editor(&mut s);
     let state = app.state::<Plugins>();
     state.params.forget(s.id);
@@ -841,6 +939,15 @@ fn poll(app: &AppHandle, doc: &mut Doc) {
     let mut events = Vec::new();
     for i in 0..doc.slots.len() {
         let s = &mut doc.slots[i];
+        // Its track was deleted (in the Timeline): its window goes; the plugin
+        // waits, unsaved, in case an undo brings the track back.
+        if !names.contains_key(&s.track) {
+            if s.window.is_some() {
+                close_editor(s);
+                changed = true;
+            }
+            continue;
+        }
         let Some(l) = &mut s.loaded else { continue };
         l.link.collect();
         events.clear();
@@ -932,13 +1039,19 @@ pub fn plugins_scan(mode: ScanMode, app: AppHandle) {
     spawn_scan(&app, mode);
 }
 
-/// Adds a plugin from the list: see [`add`].
+/// Adds a plugin from the list: on `pad` (0..16) when given, else on
+/// `track` (an effect at `index`), else on a new instrument track. See [`add`].
 #[tauri::command]
-pub fn plugins_add(plugin: PluginRef, track: Option<u32>, index: Option<usize>, app: AppHandle) -> Result<PluginsView, String> {
+pub fn plugins_add(plugin: PluginRef, track: Option<u32>, index: Option<usize>, pad: Option<u8>, app: AppHandle) -> Result<PluginsView, String> {
     let info = find_info(&app, Path::new(&plugin.path), &plugin.class_id)?;
     let state = app.state::<Plugins>();
     let mut d = doc(&state)?;
-    let r = add(&app, &mut d, info, track.map(track_id), index);
+    let target = match (pad, track) {
+        (Some(p), _) => Target::Pad(p),
+        (None, Some(t)) => Target::Track(track_id(t), index),
+        (None, None) => Target::NewTrack,
+    };
+    let r = add(&app, &mut d, info, target);
     let v = publish(&app, &mut d);
     r.map(|_| v)
 }
@@ -1052,14 +1165,7 @@ fn reload(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
         let index = doc.chain_index(i);
         let s = &mut doc.slots[i];
         close_editor(s);
-        {
-            let mut a = lock(crate::audio(app));
-            let mixer = a.engine.mixer();
-            match s.role {
-                Role::Instrument => mixer.set_source(s.track, None)?,
-                Role::Effect => mixer.remove(s.track, index)?,
-            }
-        }
+        s.take(lock(crate::audio(app)).engine.mixer(), index)?;
         if let Some(l) = s.loaded.take() {
             app.state::<Plugins>().live.forget(&l.link);
         }
@@ -1075,7 +1181,7 @@ fn reload(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
         }
     }
     let rate = engine_rate(app);
-    let (device, link) = make_device(app, s.id, s.role, &mut *controller, rate)?;
+    let (device, link) = make_device(app, s.id, s.engine_role(), &mut *controller, rate)?;
     link.set_bypass(s.bypass);
     if s.role == Role::Instrument {
         app.state::<Plugins>().live.focus_if(s.track, &link);
@@ -1084,13 +1190,9 @@ fn reload(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
     s.error = None;
     let index = doc.chain_index(i);
     let s = &mut doc.slots[i];
-    {
-        let mut a = lock(crate::audio(app));
-        let mixer = a.engine.mixer();
-        match s.role {
-            Role::Instrument => mixer.set_source(s.track, Some(device))?,
-            Role::Effect => mixer.insert(s.track, index, device)?,
-        }
+    s.put(lock(crate::audio(app)).engine.mixer(), device, index)?;
+    if s.role == Role::Pad {
+        mark_pad(app, s.pad, true);
     }
     refresh_params(app, s);
     Ok(())

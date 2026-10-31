@@ -64,7 +64,12 @@ export function installMocks() {
         const p = catalog.plugins.find((x) => x.path === ref.path && x.classId === ref.classId);
         if (!p) throw new Error("no such plugin");
         let track = a.track as number | null;
-        if (track === null) {
+        const pad = (a.pad as number | null) ?? null;
+        if (pad !== null) {
+          if (p.kind !== "instrument") throw new Error("a pad plays an instrument; put effects on the Sampler's track");
+          track = 1;
+          v.devices = v.devices.filter((x) => !(x.role === "pad" && x.pad === pad));
+        } else if (track === null) {
           if (p.kind !== "instrument") throw new Error("choose a track for the effect");
           // A new instrument track, through the Timeline's mock.
           const tl = (await inner("timeline_track_add")) as { tracks: { id: number }[] };
@@ -74,7 +79,8 @@ export function installMocks() {
         const d: DeviceView = {
           id: nextId++,
           track,
-          role: p.kind === "instrument" ? "instrument" : "effect",
+          role: pad !== null ? "pad" : p.kind === "instrument" ? "instrument" : "effect",
+          pad: pad ?? 0,
           name: p.name,
           vendor: p.vendor,
           status: "ok",

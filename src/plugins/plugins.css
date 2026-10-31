@@ -44,3 +44,7 @@
 .dc-actions { margin-top: auto; display: flex; align-items: center; gap: 6px; }
 .dc-actions .btn.on { border-color: var(--violet); color: var(--violet-soft); }
 .dc-latency { margin-left: auto; font-size: 10.5px; color: var(--faint); }
+
+/* A pad that plays a plugin (the Sampler's Inspector) */
+.insp-plugin .dc-card { width: auto; }
+.pane-head-btns { display: flex; gap: 6px; }

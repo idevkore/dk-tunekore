@@ -27,9 +27,9 @@ use std::time::{Duration, Instant};
 
 use tauri::{AppHandle, Manager};
 use tunekore_engine::plugins::EventKind;
-use tunekore_engine::{PluginLink, TrackId};
+use tunekore_engine::{PluginLink, SamplerHandle, TrackId, SAMPLER_TRACK};
 
-use super::{add, close_editor, lock, open_editor, with_doc, Plugins, Role};
+use super::{add, close_editor, lock, open_editor, with_doc, Plugins, Role, Target};
 use crate::project;
 
 /// The test list, in order, and whether each is an instrument.
@@ -54,7 +54,9 @@ pub fn start(app: &AppHandle) {
 
 /// What the check knows about one plugin on a track.
 struct Placed {
-    name: &'static str,
+    name: String,
+    /// The Sampler pad it plays, for a pad's instrument.
+    pad: Option<usize>,
     id: u64,
     track: TrackId,
     link: Arc<PluginLink>,
@@ -72,13 +74,31 @@ fn wait_for(what: &str, limit: Duration, mut ready: impl FnMut() -> bool) -> Res
     Ok(())
 }
 
-/// Plays a chord into `link` for a moment and returns the track's peak.
-fn play(app: &AppHandle, track: TrackId, link: &PluginLink) -> f32 {
+/// What the check plays a plugin through.
+enum Through<'a> {
+    /// Its link's live notes (an instrument, or the instrument before an effect).
+    Link(&'a PluginLink),
+    /// Pressing its Sampler pad.
+    Pad(usize),
+}
+
+/// Plays a chord (or holds a pad) for a moment and returns the track's peak.
+fn play(app: &AppHandle, track: TrackId, through: Through<'_>) -> f32 {
     let meter = lock(crate::audio(app)).engine.track_meter(track);
     let Some(meter) = meter else { return 0.0 };
     meter.take_peak();
+    let pads = app.state::<SamplerHandle>().inner().clone();
+    let link = match through {
+        Through::Link(l) => Some(l),
+        Through::Pad(p) => {
+            pads.trigger_velocity(p, 0.8);
+            None
+        }
+    };
     for key in [48, 52, 55, 60] {
-        link.send_live(EventKind::NoteOn { channel: 0, key, velocity: 0.8, note_id: -1 });
+        if let Some(link) = link {
+            link.send_live(EventKind::NoteOn { channel: 0, key, velocity: 0.8, note_id: -1 });
+        }
     }
     let mut peak = 0.0f32;
     let until = Instant::now() + Duration::from_millis(1500);
@@ -86,8 +106,14 @@ fn play(app: &AppHandle, track: TrackId, link: &PluginLink) -> f32 {
         std::thread::sleep(Duration::from_millis(50));
         peak = peak.max(meter.take_peak());
     }
-    for key in [48, 52, 55, 60] {
-        link.send_live(EventKind::NoteOff { channel: 0, key, velocity: 0.0, note_id: -1 });
+    match (through, link) {
+        (_, Some(link)) => {
+            for key in [48, 52, 55, 60] {
+                link.send_live(EventKind::NoteOff { channel: 0, key, velocity: 0.0, note_id: -1 });
+            }
+        }
+        (Through::Pad(p), None) => pads.release(p),
+        _ => {}
     }
     std::thread::sleep(Duration::from_millis(300));
     peak
@@ -133,7 +159,11 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
             continue;
         }
         let t0 = Instant::now();
-        let id = match with_doc(app, move |app, d| add(app, d, info, track, None))? {
+        let target = match track {
+            Some(t) => Target::Track(t, None),
+            None => Target::NewTrack,
+        };
+        let id = match with_doc(app, move |app, d| add(app, d, info, target))? {
             Ok(id) => id,
             Err(e) => {
                 out.push(format!("{name}: LOAD FAILED: {e}"));
@@ -143,11 +173,31 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
         let loaded = t0.elapsed().as_secs_f64();
         let (link, param, track) = handles(app, id)?;
         wait_for(&format!("{name} getting ready"), Duration::from_secs(10), || link.is_ready())?;
+        // A moment to settle, as anyone takes before playing (some load their sound in the background).
+        std::thread::sleep(Duration::from_millis(700));
         // An effect is heard through the instrument before it.
         let source = if instrument { link.clone() } else { placed[0].link.clone() };
-        let peak = play(app, track, &source);
+        let peak = play(app, track, Through::Link(&source));
         out.push(format!("{name}: loaded in {loaded:.1} s on track {}, {} after a chord: peak {peak:.3}", track.0, if peak > 0.001 { "PLAYS" } else { "SILENT" }));
-        placed.push(Placed { name, id, track, link, param });
+        placed.push(Placed { name: name.to_string(), pad: None, id, track, link, param });
+    }
+
+    // An instrument on a Sampler pad: Serum 2 on pad 1, played by pressing the pad.
+    let serum = {
+        let c = lock(&state.catalog);
+        c.cache.as_ref().and_then(|cache| cache.plugins().find(|e| e.info.name == "Serum 2").map(|e| e.info.clone()))
+    };
+    if let Some(info) = serum {
+        match with_doc(app, move |app, d| add(app, d, info, Target::Pad(0)))? {
+            Ok(id) => {
+                let (link, param, _) = handles(app, id)?;
+                wait_for("Serum 2 on pad 1 getting ready", Duration::from_secs(10), || link.is_ready())?;
+                let peak = play(app, SAMPLER_TRACK, Through::Pad(0));
+                out.push(format!("Serum 2 on pad 1: {} when the pad is pressed: peak {peak:.3}", if peak > 0.001 { "PLAYS" } else { "SILENT" }));
+                placed.push(Placed { name: "Serum 2 on pad 1".into(), pad: Some(0), id, track: SAMPLER_TRACK, link, param });
+            }
+            Err(e) => out.push(format!("Serum 2 on pad 1: LOAD FAILED: {e}")),
+        }
     }
 
     // Mark a parameter on each, note every parameter's value and whether the
@@ -234,9 +284,13 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
         let mut heard = "not played".to_string();
         if let Some(link) = link {
             let ready = wait_for("ready", Duration::from_secs(10), || link.is_ready()).is_ok();
-            let source = if role == Role::Instrument { Some(link.clone()) } else { first_instrument(app, track) };
-            if let (true, Some(src)) = (ready, source) {
-                let peak = play(app, track, &src);
+            let peak = match (ready, role, p.pad) {
+                (false, _, _) => None,
+                (true, Role::Pad, Some(pad)) => Some(play(app, track, Through::Pad(pad))),
+                (true, Role::Instrument, _) => Some(play(app, track, Through::Link(&link))),
+                (true, _, _) => first_instrument(app, track).map(|src| play(app, track, Through::Link(&src))),
+            };
+            if let Some(peak) = peak {
                 heard = format!("{} (peak {peak:.3})", if peak > 0.001 { "PLAYS" } else { "SILENT" });
             }
         }
@@ -244,7 +298,7 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
     }
 
     // Editors, Kontakt's last.
-    let mut order: Vec<&Placed> = placed.iter().filter(|p| p.name != "Kontakt 7").collect();
+    let mut order: Vec<&Placed> = placed.iter().filter(|p| p.name != "Kontakt 7" && p.pad.is_none()).collect();
     order.extend(placed.iter().filter(|p| p.name == "Kontakt 7"));
     for p in order {
         let id = p.id;

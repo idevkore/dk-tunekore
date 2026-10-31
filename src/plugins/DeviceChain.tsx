@@ -55,7 +55,7 @@ export default function DeviceChain({ track, plugins, onPlugins, onMessage }: Pr
       <div className="dc-row" role="list">
         {track.kind === "instrument" ? (
           instrument ? (
-            <Card device={instrument} trackName={track.name} run={run} onMessage={onMessage} />
+            <DeviceCard device={instrument} owner={track.name} run={run} />
           ) : (
             <button className="dc-add dc-slot" role="listitem" onClick={() => setPicking({ kind: "instrument" })} disabled={busy !== null}>
               + Instrument
@@ -67,7 +67,7 @@ export default function DeviceChain({ track, plugins, onPlugins, onMessage }: Pr
           </div>
         )}
         {effects.map((d, i) => (
-          <Card key={d.id} device={d} trackName={track.name} run={run} onMessage={onMessage} place={{ index: i, count: effects.length }} />
+          <DeviceCard key={d.id} device={d} owner={track.name} run={run} place={{ index: i, count: effects.length }} />
         ))}
         <button className="dc-add" onClick={() => setPicking({ kind: "effect" })} disabled={busy !== null} title="Add an effect at the end of the chain">
           + Effect
@@ -82,19 +82,20 @@ export default function DeviceChain({ track, plugins, onPlugins, onMessage }: Pr
 
 type CardProps = {
   device: DeviceView;
-  trackName: string;
+  /** What it is on, for screen readers: a track's name, "pad 3". */
+  owner: string;
   run: (p: Promise<PluginsView>, failure?: string) => void;
-  onMessage: (text: string, error?: boolean) => void;
   /** An effect's place in the chain. */
   place?: { index: number; count: number };
 };
 
-function Card({ device: d, trackName, run, place }: CardProps) {
+/** One plugin: on/off, its window, remove, Reload when it is missing or failed; an effect's moves. */
+export function DeviceCard({ device: d, owner, run, place }: CardProps) {
   const ok = d.status === "ok";
   const off = d.bypass || !ok;
   const status = d.status === "missing" ? "Missing" : d.status === "failed" ? "Failed" : d.bypass ? "Off" : null;
   return (
-    <div className={`dc-card${off ? " off" : ""}${ok ? "" : " bad"}`} role="listitem" aria-label={`${d.name} on ${trackName}`}>
+    <div className={`dc-card${off ? " off" : ""}${ok ? "" : " bad"}`} role="listitem" aria-label={`${d.name} on ${owner}`}>
       <div className="dc-card-top">
         <button
           className={`dc-power${d.bypass ? "" : " on"}`}

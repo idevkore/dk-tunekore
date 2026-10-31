@@ -4,7 +4,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export { subscribe } from "../timeline/api";
 
-export type Role = "instrument" | "effect";
+export type Role = "instrument" | "effect" | "pad";
 export type Kind = "instrument" | "effect" | "other";
 
 /** A plugin on a track. */
@@ -12,6 +12,8 @@ export interface DeviceView {
   id: number;
   track: number;
   role: Role;
+  /** The pad a "pad" device plays, from 0. */
+  pad: number;
   name: string;
   vendor: string;
   /** "missing": it didn't load (its state is kept); "failed": it threw while playing and is off. */
@@ -59,9 +61,12 @@ export type ScanMode = "update" | "rescan" | "retry";
 export const state = () => invoke<PluginsView>("plugins_state");
 export const catalog = () => invoke<CatalogView>("plugins_catalog");
 export const scan = (mode: ScanMode) => invoke<void>("plugins_scan", { mode });
-/** An instrument with no track makes a new instrument track; an effect goes at `index` (the end by default). */
-export const add = (plugin: CatalogEntry, track: number | null, index?: number) =>
-  invoke<PluginsView>("plugins_add", { plugin: { path: plugin.path, classId: plugin.classId }, track, index: index ?? null });
+/**
+ * Adds a plugin: on `pad` (from 0) when given; else on `track` (an effect at
+ * `index`, the end by default); else an instrument on a new instrument track.
+ */
+export const add = (plugin: CatalogEntry, track: number | null, index?: number, pad?: number) =>
+  invoke<PluginsView>("plugins_add", { plugin: { path: plugin.path, classId: plugin.classId }, track, index: index ?? null, pad: pad ?? null });
 export const remove = (id: number) => invoke<PluginsView>("plugins_remove", { id });
 export const removeTrack = (track: number) => invoke<PluginsView>("plugins_remove_track", { track });
 export const bypass = (id: number, on: boolean) => invoke<PluginsView>("plugins_bypass", { id, on });
@@ -94,6 +99,16 @@ export function afterPaint(f: () => void) {
   };
   requestAnimationFrame(() => requestAnimationFrame(go));
   setTimeout(go, 100);
+}
+
+/** The plugin a pad plays, if any. */
+export const padPlugin = (v: PluginsView | null, pad: number) => v?.devices.find((d) => d.role === "pad" && d.pad === pad) ?? null;
+
+/** A MIDI note's name as tuneKore shows them, C3 being 60. */
+export function noteName(n: number): string {
+  const names = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
+  const k = Math.max(0, Math.min(127, Math.round(n)));
+  return `${names[k % 12]}${Math.floor(k / 12) - 2}`;
 }
 
 /** A track's devices: its instrument, then its effects in chain order. */

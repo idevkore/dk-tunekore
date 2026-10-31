@@ -28,7 +28,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 
-use crate::device::{Buffers, Device, Events};
+use crate::device::{Buffers, Device, Event, Events};
 use crate::transport::{ProcessContext, Transport, TransportShared, EDGE_FRAMES};
 use crate::Track;
 
@@ -84,6 +84,13 @@ const CHOKE_SHIFT: u32 = 8;
 const CHOKE_MASK: u32 = 0xF;
 /// Choke groups a pad can join, 1..=8. 0 is none.
 const CHOKE_GROUPS: u8 = 8;
+
+/// The note a pad that plays a plugin sends at pitch 0: C3.
+const PAD_NOTE: f32 = 60.0;
+/// Notes a block can send to the pads' plugins; more are dropped (a note-off never is).
+const PAD_NOTES: usize = 512;
+/// No note sounding on a pad.
+const NO_KEY: u8 = u8::MAX;
 
 /// A step's velocity is stored as 0..=255; this is full velocity.
 const VEL_MAX: u8 = 255;
@@ -434,6 +441,8 @@ pub struct SamplerShared {
     switch_now: AtomicBool,
     /// The bank the sequencer read for its last step, or NO_BANK. Written by the audio thread.
     play_bank: AtomicU32,
+    /// Pads (a bit each) that play a plugin instrument instead of their sample (#37).
+    plugin_pads: AtomicU32,
 }
 
 impl Default for SamplerShared {
@@ -456,6 +465,7 @@ impl Default for SamplerShared {
             chain_pos: AtomicU32::new(NO_POS),
             switch_now: AtomicBool::new(false),
             play_bank: AtomicU32::new(NO_BANK),
+            plugin_pads: AtomicU32::new(0),
         }
     }
 }
@@ -700,6 +710,33 @@ impl SamplerShared {
     /// How many hits have been written into the pattern. Re-read the patterns when it changes.
     pub fn recorded(&self) -> u32 {
         self.recorded.load(Ordering::Acquire)
+    }
+
+    /// Makes `pad` play a plugin instrument instead of its sample, or its
+    /// sample again. Its hits then go out as notes on the Sampler's track
+    /// (channel = the pad, key C3 plus its pitch), for the plugin device there
+    /// that plays them ([`crate::plugin_device`]). Its sample stays loaded.
+    pub fn set_plugin_pad(&self, pad: usize, on: bool) {
+        if pad < PADS {
+            if on {
+                self.plugin_pads.fetch_or(1 << pad, Ordering::Release);
+            } else {
+                self.plugin_pads.fetch_and(!(1 << pad), Ordering::Release);
+            }
+        }
+    }
+
+    pub fn is_plugin_pad(&self, pad: usize) -> bool {
+        pad < PADS && self.plugin_pads.load(Ordering::Acquire) & (1 << pad) != 0
+    }
+
+    /// A pad's level and pan as left and right gains, as its voices use them:
+    /// for the plugin that plays it. Any thread.
+    pub fn pad_gains(&self, pad: usize) -> [f32; 2] {
+        let Some(c) = self.pads.get(pad) else { return [0.0; 2] };
+        let gain = f32::from_bits(c.gain.load(Ordering::Relaxed));
+        let pan = f32::from_bits(c.pan.load(Ordering::Relaxed));
+        [gain * (1.0 - pan).min(1.0), gain * (1.0 + pan).min(1.0)]
     }
 
     /// Plays a slot now, as if its pad were pressed. Pair with [`release`](Self::release).
@@ -1131,6 +1168,18 @@ pub struct Sampler {
     ratchet_gap: [f64; PADS],
     ratchet_vel: [f32; PADS],
     ratchet_active: u32,
+    /// Notes this piece sent to plugin pads, in frame order (see
+    /// [`SamplerShared::set_plugin_pad`]). Allocated once.
+    notes: Vec<Event>,
+    /// The frame of this piece that hits land on now.
+    frame_now: u32,
+    /// The key each plugin pad is sounding, or NO_KEY.
+    note_key: [u8; PADS],
+    /// Frames left of each sequencer note; a bit per pad in `note_timed`.
+    note_left: [f64; PADS],
+    note_timed: u32,
+    /// Plugin pads sounding while held by hand.
+    note_held: u32,
 }
 
 /// Which bank a step reads: the chain entry playing (NO_POS outside a song),
@@ -1194,8 +1243,12 @@ impl Device for SamplerDevice {
         self.sampler.sync_counters(&self.shared);
     }
 
-    fn process(&mut self, ctx: &ProcessContext, _events: &mut Events, audio: Buffers<'_>) {
+    fn process(&mut self, ctx: &ProcessContext, events: &mut Events, audio: Buffers<'_>) {
         self.sampler.process(ctx, &self.shared, audio.left, audio.right);
+        // Notes for the pads that play plugins, for their devices after it on the track.
+        for e in self.sampler.notes() {
+            events.push(*e);
+        }
     }
 }
 
@@ -1270,6 +1323,12 @@ impl Sampler {
             ratchet_gap: [0.0; PADS],
             ratchet_vel: [1.0; PADS],
             ratchet_active: 0,
+            notes: Vec::with_capacity(PAD_NOTES),
+            frame_now: 0,
+            note_key: [NO_KEY; PADS],
+            note_left: [0.0; PADS],
+            note_timed: 0,
+            note_held: 0,
         }
     }
 
@@ -1328,6 +1387,11 @@ impl Sampler {
         self.own_clock = clock;
     }
 
+    /// The notes the last piece sent to pads that play a plugin, in frame order.
+    pub fn notes(&self) -> &[Event] {
+        &self.notes
+    }
+
     /// One piece of a block on the engine's transport: adds the pads and the
     /// sequencer into `left` and `right`. Real-time safe: no allocation,
     /// locks, logging or I/O.
@@ -1344,6 +1408,17 @@ impl Sampler {
     /// click)` takes each frame's pads and metronome click.
     fn run(&mut self, ctx: &ProcessContext, shared: &SamplerShared, mut out: impl FnMut(usize, f32, f32, f32)) {
         self.take_samples();
+        self.notes.clear();
+        self.frame_now = 0;
+        // Plugin pads let go by hand since the last piece end their notes now.
+        let mut held = self.note_held;
+        while held != 0 {
+            let pad = held.trailing_zeros() as usize;
+            held &= held - 1;
+            if !shared.pads[pad].held.load(Ordering::Acquire) {
+                self.note_off(pad);
+            }
+        }
         self.bpf = ctx.beats_per_frame;
         self.fpb = ctx.frames_per_beat();
         self.eps = ctx.beats_per_frame * EDGE_FRAMES;
@@ -1398,6 +1473,10 @@ impl Sampler {
         self.tune_filters(shared);
 
         for frame in 0..ctx.frames {
+            self.frame_now = frame as u32;
+            if self.note_timed != 0 {
+                self.count_notes();
+            }
             if playing {
                 if frame as f64 >= self.next_at && !self.fire_step(shared, steps) {
                     // A song that doesn't loop reached its end, on this frame:
@@ -1709,6 +1788,16 @@ impl Sampler {
                 v.release(Some(fast));
             }
         }
+        // Plugin pads in the group end their notes too.
+        for pad in 0..PADS {
+            if pad == slot || self.note_key[pad] == NO_KEY {
+                continue;
+            }
+            let flags = shared.pads[pad].flags.load(Ordering::Relaxed);
+            if ((flags >> CHOKE_SHIFT) & CHOKE_MASK) as u8 == group {
+                self.note_off(pad);
+            }
+        }
     }
 
     /// Retunes every sounding voice's filter from its pad, once per block, so
@@ -1745,6 +1834,10 @@ impl Sampler {
     /// `vel` (0..1) scales its gain.
     fn start(&mut self, shared: &SamplerShared, slot: usize, hold: Hold, vel: f32) {
         self.release_slot(slot);
+        if shared.is_plugin_pad(slot) {
+            self.start_note(shared, slot, hold, vel);
+            return;
+        }
         let Some(sample) = self.samples[slot].as_ref() else { return };
         let len = sample.first().map_or(0, Vec::len);
         if len < 2 {
@@ -1820,6 +1913,59 @@ impl Sampler {
         let fast = self.release;
         for v in self.voices.iter_mut().filter(|v| v.active && v.slot == slot) {
             v.release(Some(fast));
+        }
+        if slot < PADS {
+            self.note_off(slot);
+        }
+    }
+
+    /// A hit on a pad that plays a plugin: a note for it, at this frame,
+    /// held for a sequencer step's `Hold::Frames` or while the pad is held
+    /// by hand. Its key is C3 plus the pad's pitch.
+    fn start_note(&mut self, shared: &SamplerShared, pad: usize, hold: Hold, vel: f32) {
+        let p = shared.pads[pad].params();
+        if p.choke > 0 {
+            self.choke(shared, pad, p.choke);
+        }
+        let key = (PAD_NOTE + p.pitch).round().clamp(0.0, 127.0) as u8;
+        // Room is kept for every pad's note-off.
+        if self.notes.len() + PADS >= self.notes.capacity() {
+            return;
+        }
+        self.notes.push(Event::NoteOn { frame: self.frame_now, channel: pad as u8, key, velocity: vel.max(1.0 / 127.0) });
+        self.note_key[pad] = key;
+        match hold {
+            Hold::Frames(n) => {
+                // Counted from the next frame, so it ends where a sample voice's gate would.
+                self.note_left[pad] = (n - 1.0).max(0.0);
+                self.note_timed |= 1 << pad;
+            }
+            _ => self.note_held |= 1 << pad,
+        }
+        shared.pads[pad].played.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Ends the note a plugin pad is sounding, at this frame.
+    fn note_off(&mut self, pad: usize) {
+        let key = std::mem::replace(&mut self.note_key[pad], NO_KEY);
+        self.note_timed &= !(1 << pad);
+        self.note_held &= !(1 << pad);
+        if key != NO_KEY && self.notes.len() < self.notes.capacity() {
+            self.notes.push(Event::NoteOff { frame: self.frame_now, channel: pad as u8, key, velocity: 0.0 });
+        }
+    }
+
+    /// Counts down the sequencer's notes on plugin pads, ending those whose time is up.
+    fn count_notes(&mut self) {
+        let mut timed = self.note_timed;
+        while timed != 0 {
+            let pad = timed.trailing_zeros() as usize;
+            timed &= timed - 1;
+            if self.note_left[pad] <= 0.0 {
+                self.note_off(pad);
+            } else {
+                self.note_left[pad] -= 1.0;
+            }
         }
     }
 
@@ -2121,6 +2267,60 @@ mod tests {
         assert!(run(&mut s, &shared, 2_000)[3998] > 0.49, "still held");
         shared.release(0);
         assert_eq!(run(&mut s, &shared, 1_000)[1998], 0.0, "let go");
+    }
+
+    /// Runs `frames` frames in blocks of `block`, and returns the output and
+    /// every note sent to plugin pads, at its frame from the start.
+    fn run_notes(s: &mut Sampler, shared: &SamplerShared, frames: usize, block: usize) -> (Vec<f32>, Vec<(usize, Event)>) {
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        let mut at = 0;
+        while at < frames {
+            let n = block.min(frames - at);
+            out.extend(run(s, shared, n));
+            notes.extend(s.notes().iter().map(|e| (at + e.frame() as usize, *e)));
+            at += n;
+        }
+        (out, notes)
+    }
+
+    #[test]
+    fn a_pad_that_plays_a_plugin_sends_notes_instead_of_its_sample() {
+        let shared = SamplerShared::default();
+        let (mut s, mut link) = sampler(RATE);
+        link.send(2, Some(dc(RATE as usize, 0.5))).unwrap();
+        shared.set_pad(2, &PadParams { pitch: 5.0, ..Default::default() });
+        shared.set_plugin_pad(2, true);
+        assert!(shared.is_plugin_pad(2) && !shared.is_plugin_pad(3));
+        shared.set_pad(2, &PadParams { pitch: 5.0, gain: 0.5, pan: 0.5, ..Default::default() });
+        assert!(shared.is_plugin_pad(2), "pad settings leave the plugin bit alone");
+        assert_eq!(shared.pad_gains(2), [0.25, 0.5]);
+        shared.set_pattern(2, 1 | 1 << 4);
+        shared.set_playing(true);
+        // 120 BPM: a step is a sixteenth, 6,000 frames.
+        let (out, notes) = run_notes(&mut s, &shared, 30_000, 1_000);
+        assert!(out.iter().all(|&x| x == 0.0), "the pad's sample doesn't play");
+        let on = |f: usize, k: u8| (f, Event::NoteOn { frame: (f % 1_000) as u32, channel: 2, key: k, velocity: 1.0 });
+        let off = |f: usize, k: u8| (f, Event::NoteOff { frame: (f % 1_000) as u32, channel: 2, key: k, velocity: 0.0 });
+        assert_eq!(notes, vec![on(0, 65), off(6_000, 65), on(24_000, 65)], "C3 plus the pad's pitch, a step long");
+        // Stopping ends the note that sounds.
+        shared.set_playing(false);
+        let (_, notes) = run_notes(&mut s, &shared, 100, 100);
+        assert_eq!(notes, vec![off(0, 65)]);
+        // By hand: on while held.
+        shared.trigger_velocity(2, 0.5);
+        let (_, notes) = run_notes(&mut s, &shared, 100, 100);
+        assert_eq!(notes, vec![(0, Event::NoteOn { frame: 0, channel: 2, key: 65, velocity: 0.5 })]);
+        let (_, notes) = run_notes(&mut s, &shared, 100, 100);
+        assert!(notes.is_empty(), "held");
+        shared.release(2);
+        let (_, notes) = run_notes(&mut s, &shared, 100, 100);
+        assert_eq!(notes, vec![off(0, 65)]);
+        // Back to the sample.
+        shared.set_plugin_pad(2, false);
+        shared.trigger(2);
+        let (out, notes) = run_notes(&mut s, &shared, 100, 100);
+        assert!(notes.is_empty() && out[198] != 0.0);
     }
 
     #[test]
