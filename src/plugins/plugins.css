@@ -27,7 +27,7 @@
 .dc-add { width: 112px; min-height: 84px; border: 1.5px dashed var(--control-line); border-radius: 10px; background: transparent; color: var(--violet-soft); font-size: 12px; font-weight: 600; }
 .dc-add:hover:not(:disabled) { border-color: var(--violet); background: var(--accent-wash); }
 .dc-add.dc-slot { width: 180px; }
-.dc-card { width: 196px; min-height: 84px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card-2); }
+.dc-card { width: 196px; min-height: 84px; max-height: 132px; display: flex; flex-direction: column; gap: 3px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 10px; background: var(--card-2); }
 .dc-card.off { background: var(--well-alt); }
 .dc-card.off .dc-name { color: var(--dim); }
 .dc-card.bad { border-color: var(--warn-line); }

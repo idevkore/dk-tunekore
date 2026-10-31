@@ -30,8 +30,13 @@ idevkore/dk-tunekore#37
   every plugin again; the ones that failed are listed with why, with Retry.
 - **Saved with the project.** Every plugin's sound comes back when the project
   opens. One that isn't installed any more stays in its place, with its sound
-  kept, until you Reload it. Plugin parameters can be learned for MIDI knobs
-  from Audio settings' list.
+  kept, until you Reload it. One whose saved sound doesn't load says so and
+  keeps that sound in the project until you choose Keep. One that won't give
+  its sound when you save (an Arturia plugin that isn't activated) says so, and
+  the project keeps the sound it had. Plugin parameters can be learned for MIDI
+  knobs from Audio settings' list.
+- A project can only load plugins from the plugin list or the plugin folders,
+  never from anywhere else its file names.
 - The plugin host joined the main build, CI and the licence check, and the app
   bundle gets the entitlements that hosting needs. Quitting lets every plugin
   close down first (Serum 2 used to crash at exit).

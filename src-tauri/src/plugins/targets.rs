@@ -7,7 +7,7 @@
 //! queued for the main thread rather than waited for.
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tauri::{AppHandle, Manager};
@@ -37,6 +37,11 @@ struct DeviceParams {
 #[derive(Default)]
 pub struct ParamCache {
     devices: Mutex<HashMap<u64, DeviceParams>>,
+    /// Moves waiting for the main thread, the latest value of each (device,
+    /// parameter): a knob turning faster than the main thread runs sends one.
+    moves: Mutex<HashMap<(u64, ParamId), f64>>,
+    /// Whether a run of `moves` is already queued.
+    queued: AtomicBool,
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -144,18 +149,28 @@ impl Targets<AppHandle> for PluginTargets {
         if list.is_empty() {
             return Ok(());
         }
-        for &(d, p, v) in &list {
-            self.cache.set_value(d, p, v);
+        {
+            let mut waiting = lock(&self.cache.moves);
+            for &(d, p, v) in &list {
+                self.cache.set_value(d, p, v);
+                waiting.insert((d, p), v);
+            }
         }
         app.state::<super::Plugins>().revision.fetch_add(1, Ordering::Relaxed);
-        super::later(app, move |_, doc| {
-            for (device, param, value) in list {
-                let Ok(i) = doc.find(device) else { continue };
-                if let Some(l) = &mut doc.slots[i].loaded {
-                    l.controller.set_param(param, value);
+        if !self.cache.queued.swap(true, Ordering::AcqRel) {
+            let cache = self.cache.clone();
+            super::later(app, move |_, doc| {
+                // Cleared first: a move that lands while these apply queues another run.
+                cache.queued.store(false, Ordering::Release);
+                let moves = std::mem::take(&mut *lock(&cache.moves));
+                for ((device, param), value) in moves {
+                    let Ok(i) = doc.find(device) else { continue };
+                    if let Some(l) = &mut doc.slots[i].loaded {
+                        l.controller.set_param(param, value);
+                    }
                 }
-            }
-        });
+            });
+        }
         Ok(())
     }
 }

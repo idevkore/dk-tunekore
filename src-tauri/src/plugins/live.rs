@@ -97,16 +97,15 @@ impl LiveRoute {
                 link.send_live(kind);
                 true
             }
-            EventKind::NoteOff { channel, key, .. } => {
-                let held = lock(&self.held).remove(&(channel, key));
-                match held.or_else(|| self.focused()) {
-                    Some(link) => {
-                        link.send_live(kind);
-                        true
-                    }
-                    None => false,
+            // Only a note whose note-on went to an instrument ends there: one
+            // that started on a pad before the focus moved ends on the pad.
+            EventKind::NoteOff { channel, key, .. } => match lock(&self.held).remove(&(channel, key)) {
+                Some(link) => {
+                    link.send_live(kind);
+                    true
                 }
-            }
+                None => false,
+            },
             EventKind::ControlChange { .. } => false,
             _ => match self.focused() {
                 Some(link) => {
@@ -192,5 +191,35 @@ mod tests {
         let r = LiveRoute::default();
         assert!(!r.play(&[0x90, 36, 100]));
         assert!(!r.control(&[0xB0, 1, 10]));
+    }
+
+    fn link() -> Arc<PluginLink> {
+        tunekore_engine::plugin_device(tunekore_engine::PluginRole::Instrument, Box::new(|| {})).1
+    }
+
+    #[test]
+    fn a_note_ends_where_it_started_whatever_has_the_focus_now() {
+        let r = LiveRoute::default();
+        // Held on a pad, then the focus moves to an instrument track: the
+        // note-off is the pad's, so the pad lets go.
+        assert!(!r.play(&[0x90, 36, 100]), "the pads take it");
+        let keys = link();
+        r.set_focus(Some((TrackId(2), keys.clone())));
+        assert!(!r.play(&[0x80, 36, 0]), "its note-off goes to the pads too");
+        // Held on the instrument, then the focus goes: the note-off still reaches it.
+        assert!(r.play(&[0x90, 60, 100]));
+        r.set_focus(None);
+        assert!(r.play(&[0x90, 60, 0]), "a note-on at 0 is a note-off, and it was the instrument's");
+        assert!(!r.play(&[0x80, 60, 0]), "already ended");
+        // Pitch bend follows the focus.
+        assert!(!r.play(&[0xE0, 0, 64]));
+        r.set_focus(Some((TrackId(2), keys.clone())));
+        assert!(r.play(&[0xE0, 0, 64]));
+        assert!(r.control(&[0xB0, 1, 10]));
+        // A device that goes takes the focus and its held notes with it.
+        assert!(r.play(&[0x90, 62, 100]));
+        r.forget(&keys);
+        assert!(!r.has_focus());
+        assert!(!r.play(&[0x80, 62, 0]));
     }
 }

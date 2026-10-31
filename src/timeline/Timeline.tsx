@@ -173,7 +173,18 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
     // The plugins on the tracks, and the ones a project named that didn't load.
     plugins.state().then(setDevices).catch(() => {});
     offs.push(subscribe(plugins.onState(setDevices)));
-    offs.push(subscribe(plugins.onMissing((names) => fail(`These plugins didn't load: ${names.join(", ")}. Their sound is kept; Reload them once they're installed.`))));
+    offs.push(
+      subscribe(
+        plugins.onMissing((names) => fail(`Not every plugin came back as saved: ${names.join(", ")}. Their saved sound is kept; Reload them once they're installed or activated.`)),
+      ),
+    );
+    offs.push(
+      subscribe(
+        plugins.onUnsaved((names) =>
+          fail(`${names.join(", ")} wouldn't give ${names.length === 1 ? "its" : "their"} sound when saving, so the project keeps the sound ${names.length === 1 ? "it" : "they"} had. Is it activated?`),
+        ),
+      ),
+    );
     return () => offs.forEach((off) => off());
   }, [take, adopt, fail]);
 
@@ -190,9 +201,12 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   // Timeline shows; otherwise (the Sampler, or another kind of track) the pads.
   const focusTrack = active ? view?.tracks.find((t) => t.id === track && t.kind === "instrument")?.id ?? null : null;
   const hasInstrument = focusTrack !== null && (devices?.devices ?? []).some((d) => d.track === focusTrack && d.role === "instrument" && d.status === "ok");
+  const wantFocus = hasInstrument ? focusTrack : null;
+  // Sent again whenever the Rust side has another (a project opening clears it).
+  const hasFocus = devices?.focus ?? null;
   useEffect(() => {
-    plugins.focus(hasInstrument ? focusTrack : null).catch(() => {});
-  }, [focusTrack, hasInstrument]);
+    if (hasFocus !== wantFocus) plugins.focus(wantFocus).catch(() => {});
+  }, [wantFocus, hasFocus]);
 
   // The view's settings go back to the Rust side (saved with the project) once they settle.
   const snap = view?.snap ?? "beat";

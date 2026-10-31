@@ -85,6 +85,8 @@ export function installMocks() {
           vendor: p.vendor,
           status: "ok",
           error: null,
+          warning: null,
+          soundLost: false,
           bypass: false,
           hasEditor: true,
           editorOpen: false,
@@ -124,6 +126,14 @@ export function installMocks() {
         const d = find(a.id as number);
         d.status = "ok";
         d.error = null;
+        d.warning = null;
+        d.soundLost = false;
+        return send();
+      }
+      case "plugins_keep_sound": {
+        const d = find(a.id as number);
+        d.warning = null;
+        d.soundLost = false;
         return send();
       }
       case "plugins_focus":

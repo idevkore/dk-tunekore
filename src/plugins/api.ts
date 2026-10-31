@@ -18,7 +18,12 @@ export interface DeviceView {
   vendor: string;
   /** "missing": it didn't load (its state is kept); "failed": it threw while playing and is off. */
   status: "ok" | "missing" | "failed";
+  /** Why it is missing or failed. */
   error: string | null;
+  /** What needs a look on one that loaded: its saved sound didn't load, its sound wasn't saved, it couldn't start. */
+  warning: string | null;
+  /** Its saved sound didn't load: keepSound takes the sound it plays now. */
+  soundLost: boolean;
   bypass: boolean;
   hasEditor: boolean;
   editorOpen: boolean;
@@ -73,6 +78,8 @@ export const bypass = (id: number, on: boolean) => invoke<PluginsView>("plugins_
 export const move = (id: number, to: number) => invoke<PluginsView>("plugins_move", { id, to });
 export const editor = (id: number, open: boolean) => invoke<PluginsView>("plugins_editor", { id, open });
 export const reload = (id: number) => invoke<PluginsView>("plugins_reload", { id });
+/** After its saved sound didn't load: saving writes the sound it plays now. */
+export const keepSound = (id: number) => invoke<PluginsView>("plugins_keep_sound", { id });
 export const focus = (track: number | null) => invoke<PluginsView>("plugins_focus", { track });
 
 const on =
@@ -82,8 +89,10 @@ const on =
 
 export const onState = on<PluginsView>("plugins:state");
 export const onCatalog = on<CatalogView>("plugins:catalog");
-/** Plugins a project named that didn't load when it opened. */
+/** Plugins a project named that didn't come back as saved when it opened (missing, or their sound didn't load). */
 export const onMissing = on<string[]>("plugins:missing");
+/** Plugins that wouldn't give their sound at a save: the project kept the sound they had. Sent once until a save works. */
+export const onUnsaved = on<string[]>("plugins:unsaved");
 
 /**
  * Runs `f` once the window has painted what was just set (a "Loading…"

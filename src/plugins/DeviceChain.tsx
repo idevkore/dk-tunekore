@@ -94,8 +94,9 @@ export function DeviceCard({ device: d, owner, run, place }: CardProps) {
   const ok = d.status === "ok";
   const off = d.bypass || !ok;
   const status = d.status === "missing" ? "Missing" : d.status === "failed" ? "Failed" : d.bypass ? "Off" : null;
+  const flagged = !ok || !!d.warning;
   return (
-    <div className={`dc-card${off ? " off" : ""}${ok ? "" : " bad"}`} role="listitem" aria-label={`${d.name} on ${owner}`}>
+    <div className={`dc-card${off ? " off" : ""}${flagged ? " bad" : ""}`} role="listitem" aria-label={`${d.name} on ${owner}`}>
       <div className="dc-card-top">
         <button
           className={`dc-power${d.bypass ? "" : " on"}`}
@@ -119,8 +120,23 @@ export function DeviceCard({ device: d, owner, run, place }: CardProps) {
           {d.error && !ok ? `: ${d.error}` : ""}
         </span>
       )}
+      {ok && d.warning && (
+        <span className="dc-status warn" title={d.warning} role="note">
+          {d.warning}
+        </span>
+      )}
       <div className="dc-actions">
-        {ok ? (
+        {ok && d.soundLost && (
+          <>
+            <button className="btn small" title="Load it again with its saved sound" onClick={() => run(api.reload(d.id), `${d.name} didn't load`)}>
+              Reload
+            </button>
+            <button className="btn small" title="Keep the sound it plays now: saving writes this one" onClick={() => run(api.keepSound(d.id))}>
+              Keep
+            </button>
+          </>
+        )}
+        {ok && !d.soundLost ? (
           <button
             className={`btn small${d.editorOpen ? " on" : ""}`}
             disabled={!d.hasEditor}
@@ -130,9 +146,11 @@ export function DeviceCard({ device: d, owner, run, place }: CardProps) {
             {d.editorOpen ? "Show" : "Edit"}
           </button>
         ) : (
-          <button className="btn small" title="Load it again, from the sound last saved" onClick={() => run(api.reload(d.id), `${d.name} didn't load`)}>
-            Reload
-          </button>
+          !ok && (
+            <button className="btn small" title="Load it again, with the sound last saved" onClick={() => run(api.reload(d.id), `${d.name} didn't load`)}>
+              Reload
+            </button>
+          )
         )}
         {place && place.count > 1 && (
           <span className="group-btns">

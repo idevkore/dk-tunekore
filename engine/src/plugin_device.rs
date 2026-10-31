@@ -302,7 +302,8 @@ impl PluginDevice {
     }
 
     /// Gathers this block's notes: live ones first (at its start), then the
-    /// track's (a pad device's: its pad's only, on channel 1).
+    /// track's (a pad device's: its pad's only, on channel 1; an effect's:
+    /// controllers only).
     fn gather(&mut self, events: &Events) {
         self.events.clear();
         if self.link.role == Role::Instrument {
@@ -316,9 +317,14 @@ impl PluginDevice {
             Role::Pad(p) => Some(p),
             _ => None,
         };
+        let effect = self.link.role == Role::Effect;
         for e in events.as_slice() {
             if self.events.len() == self.events.capacity() {
                 break;
+            }
+            // An effect takes the track's controllers, not its notes (a pad's are for its plugin).
+            if effect && !matches!(e, Event::Control { .. }) {
+                continue;
             }
             let mut pe = to_plugin(e);
             if let Some(p) = pad {
@@ -659,10 +665,14 @@ mod tests {
         let mut ev = Events::with_capacity(8);
         let (out, _) = block(&mut d, &ctx, &mut ev, 0.3);
         assert!(out.iter().all(|&x| x == 0.3), "no plugin yet: dry");
-        link.give(fake(true, Arc::default()), RATE);
+        let seen = Arc::new(Seen::default());
+        link.give(fake(true, seen.clone()), RATE);
+        ev.push(Event::NoteOn { frame: 2, channel: 4, key: 60, velocity: 1.0 });
         let (out, allocs) = block(&mut d, &ctx, &mut ev, 0.3);
         assert_eq!(allocs, 0);
         assert!(out.iter().all(|&x| (x - 0.6).abs() < 1e-6));
+        assert_eq!(seen.last.load(Ordering::Relaxed), 0, "an effect isn't sent the track's notes");
+        ev.clear();
         link.set_bypass(true);
         let (out, _) = block(&mut d, &ctx, &mut ev, 0.3);
         assert!(out.iter().all(|&x| x == 0.3), "off: dry");
@@ -730,6 +740,49 @@ mod tests {
         ev.clear();
         d.process(&ctx, &mut ev, Buffers { left: &mut l, right: &mut r });
         assert!(l[0] > 0.0 && l[0] < 0.5 && l[31] == 0.0, "{} .. {}", l[0], l[31]);
+    }
+
+    #[test]
+    fn a_sampler_pad_plays_its_plugin_through_the_graph_without_allocating() {
+        use crate::graph::Mixer;
+        use crate::sampler::{self, PadParams, SamplerShared};
+        use crate::transport::{Transport, TransportShared};
+        use crate::SAMPLER_TRACK;
+
+        let clock = Arc::new(TransportShared::default());
+        let shared = Arc::new(SamplerShared::with_clock(clock.clone()));
+        shared.set_pad(2, &PadParams { gain: 0.5, ..Default::default() });
+        shared.set_plugin_pad(2, true);
+        shared.set_pattern(2, 1); // the first step only
+        let (sampler, _samples) = sampler::device(shared.clone(), RATE);
+        let mut m = Mixer::new();
+        m.add_track_as(SAMPLER_TRACK, "Sampler").unwrap();
+        m.set_source(SAMPLER_TRACK, Some(Box::new(sampler))).unwrap();
+        let pads = shared.clone();
+        let (mut pad, _link) = plugin_device_for_pad(2, Box::new(move || pads.pad_gains(2)), Box::new(|| {}));
+        let seen = Arc::new(Seen::default());
+        pad.install(fake(false, seen.clone()), RATE);
+        m.insert(SAMPLER_TRACK, 0, Box::new(pad)).unwrap();
+        let mut graph = m.start(RATE);
+        let mut transport = Transport::new(RATE);
+        clock.play();
+
+        // 120 BPM: the step's note lasts a sixteenth, 6,000 frames.
+        let mut levels = Vec::new();
+        let mut allocs = 0;
+        for _ in 0..8 {
+            let (_, n) = realtime(|| graph.run(&mut transport, &clock, 1_000));
+            allocs += n;
+            let (l, r) = graph.master();
+            levels.push((l[0], l[999], r[999]));
+        }
+        assert_eq!(allocs, 0, "the Sampler's notes and the pad's plugin ran without the heap");
+        assert_eq!(levels[0], (0.25, 0.25, 0.25), "the plugin's 0.5 at the pad's level, from the step's first frame");
+        assert_eq!(levels[5].1, 0.25, "still held at frame 5,999");
+        assert_eq!(levels[6], (0.0, 0.0, 0.0), "the note ends with the step");
+        assert_eq!(seen.last.load(Ordering::Relaxed), pack(0, &EventKind::NoteOff { channel: 0, key: 60, velocity: 0.0, note_id: -1 }), "C3, on the plugin's channel 1");
+        drop(graph);
+        assert!(m.stopped());
     }
 
     #[test]

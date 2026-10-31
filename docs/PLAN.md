@@ -345,7 +345,21 @@ Where the next pieces go:
     version, class id, path) and state (base64 of `save_state`, with values
     set from the UI flushed to the processor first). A plugin that won't load
     when a project opens stays as a missing device with its state, written
-    back unchanged; one moved to another folder is found by its class id.
+    back unchanged.
+  - **A plugin's sound is never lost quietly.** If its saved sound doesn't
+    load, it plays its own default and saving keeps the saved sound until the
+    user chooses Keep (or Reload). If it won't give its sound at a save (an
+    Arturia plugin that isn't activated), the project keeps the sound it had,
+    the card says so and the status line names it once. Each save refreshes
+    the sound Reload starts from, and Reload takes the plugin's sound just
+    before it goes.
+  - **Where plugins load from.** A project file names its plugins' paths,
+    and loading a plugin runs its code (with library validation off, and a
+    `.tunek` opening from the Finder), so a plugin loads only from the scan's
+    list (found by class id, wherever the scan found it) or from a bundle
+    inside a plugin folder (`/Library/Audio/Plug-Ins/VST3`,
+    `~/Library/Audio/Plug-Ins/VST3`, `VST3_PATH`), after following links.
+    Anything else stays missing.
   - Every plugin is activated on its **main stereo bus**. Kontakt's other
     outputs and Solid Bus Comp's sidechain wait for the Mixer (#43).
   - **Quitting** takes every plugin off its track, closes the output and runs
@@ -361,6 +375,13 @@ Where the next pieces go:
     developers' plugins.
   - `allow-unsigned-executable-memory` and `allow-jit`: some plugins need them.
   - `com.apple.security.device.audio-input`, with a microphone usage string.
+  - Not checked yet (no signing identity on Nate's Mac, 2026-10-30): the
+    scanner, copied to `Contents/MacOS/tunekore-scan` by `bundle.macOS.files`,
+    must be signed with the app and the same entitlements, as it loads
+    plugins too. Tauri signs the main binary and `externalBin` sidecars;
+    whether it signs copied files is to be confirmed when Developer ID
+    signing is set up. If it doesn't, sign it before the bundle, or make it a
+    sidecar (which needs it built before `tunekore`'s build script runs).
 
 ### UI and engine messages
 

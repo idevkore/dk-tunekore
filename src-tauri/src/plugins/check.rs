@@ -220,7 +220,7 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
             let i = d.find(id).ok()?;
             let s = &mut d.slots[i];
             let l = s.loaded.as_mut()?;
-            super::flush(l);
+            super::flush(l, true);
             let ids: Vec<u32> = l.controller.params().iter().filter(|q| !q.hidden).map(|q| q.id).collect();
             let values: Vec<(u32, f64)> = ids.into_iter().filter_map(|q| l.controller.param_value(q).map(|v| (q, v))).collect();
             let state = l.controller.save_state().map(|b| b.len()).map_err(|e| e.to_string());

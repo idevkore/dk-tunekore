@@ -29,11 +29,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use tunekore_engine::plugins::{vst3, Category, Format, PluginInfo};
 use tunekore_engine::{PluginRole, TrackId, TrackKind, PADS, SAMPLER_TRACK};
 
-use super::{base64, kind_of, lock, make_device, mark_pad, placeholder, publish, refresh_params, remove_at, with_doc, Doc, Loaded, Plugins, Role};
+use super::{base64, kind_of, lock, make_device, mark_pad, placeholder, plugin_folders, publish, refresh_params, remove_at, resolve, state_of, with_doc, Doc, Loaded, Plugins, Role, MAX_STATE};
 use crate::project::{Apply, Section};
-
-/// The most bytes one plugin's state may decode to (Kontakt's can be large).
-const MAX_STATE: usize = 256 << 20;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -147,27 +144,40 @@ fn read_file(value: Option<&Value>) -> Result<(u64, Vec<Read>), String> {
 /// Writes the document as the section, on the main thread. Devices whose
 /// track is gone (deleted in the Timeline, maybe to come back with an undo)
 /// are left out.
+///
+/// A plugin that won't give its sound keeps the sound it had in the project,
+/// says so on its card, and is named once (`plugins:unsaved`) until a save
+/// works again.
 fn write(app: &AppHandle, doc: &mut Doc) -> PluginsFile {
     let tracks: Vec<TrackId> = lock(crate::audio(app)).engine.tracks().into_iter().map(|t| t.id).collect();
+    let running = super::engine_rate(app) > 0;
+    let mut newly = Vec::new();
+    let mut changed = false;
     let devices = doc
         .slots
         .iter_mut()
         .filter(|s| tracks.contains(&s.track))
         .map(|s| {
-            let state = super::state_of(s).map(|b| base64::encode(&b));
+            let before = s.save_error.is_some();
+            let state = state_of(s, running).map(|b| base64::encode(&b));
+            if before != s.save_error.is_some() {
+                changed = true;
+                if !before {
+                    newly.push(s.info.name.clone());
+                }
+            }
             let pad = (s.role == Role::Pad).then_some(s.pad + 1);
             DeviceFile { id: s.id, track: s.track, role: s.role, pad, plugin: PluginFile::of(&s.info), state, bypass: s.bypass }
         })
         .collect();
-    PluginsFile { next_id: doc.next_id.max(1), devices }
-}
-
-/// Finds a moved plugin: the same class at another path, from the scan.
-fn relocate(app: &AppHandle, f: &PluginFile) -> Option<PathBuf> {
-    let state = app.state::<Plugins>();
-    let c = lock(&state.catalog);
-    let found = c.cache.as_ref()?.plugins().find(|e| e.info.class_id.eq_ignore_ascii_case(&f.class_id) && e.info.format == f.format).map(|e| e.info.path.clone());
-    found
+    let file = PluginsFile { next_id: doc.next_id.max(1), devices };
+    if changed {
+        publish(app, doc);
+    }
+    if !newly.is_empty() {
+        let _ = app.emit("plugins:unsaved", &newly);
+    }
+    file
 }
 
 /// Main thread: empties the document and the tracks of plugins.
@@ -186,6 +196,8 @@ fn apply(app: &AppHandle, doc: &mut Doc, next: u64, devices: Vec<Read>) -> Vec<S
     doc.next_id = next;
     let tracks = lock(crate::audio(app)).engine.tracks();
     let rate = super::engine_rate(app);
+    let catalog = lock(&app.state::<Plugins>().catalog).cache.clone();
+    let folders = plugin_folders();
     let mut missing = Vec::new();
     for Read { file, state } in devices {
         let Some(track) = tracks.iter().find(|t| t.id == file.track) else {
@@ -196,24 +208,22 @@ fn apply(app: &AppHandle, doc: &mut Doc, next: u64, devices: Vec<Read>) -> Vec<S
             missing.push(format!("{} (its track isn't an instrument track)", file.plugin.name));
             continue;
         }
-        let mut info = file.plugin.info(file.role);
-        let mut slot = placeholder(file.id, file.track, file.role, info.clone());
+        let named = file.plugin.info(file.role);
+        let mut slot = placeholder(file.id, file.track, file.role, named.clone());
         slot.pad = file.pad.map_or(0, |p| p.saturating_sub(1));
         slot.bypass = file.bypass;
         slot.saved = state.clone();
-        let loaded = vst3::load(&info).or_else(|first| match relocate(app, &file.plugin) {
-            Some(p) if p != info.path => {
-                info.path = p;
-                vst3::load(&info)
-            }
-            _ => Err(first),
-        });
+        // Only from the scan's list or a plugin folder: a project file can't
+        // point tuneKore at code anywhere else.
+        let loaded = resolve(catalog.as_ref(), &named, &folders).and_then(|info| vst3::load(&info).map(|c| (info, c)).map_err(|e| e.to_string()));
         match loaded {
-            Ok(mut controller) => {
-                slot.info = info.clone();
+            Ok((info, mut controller)) => {
+                slot.info = info;
                 if let Some(s) = &state {
                     if let Err(e) = controller.load_state(s) {
-                        slot.error = Some(format!("its saved sound didn't load: {e}"));
+                        // It plays its own sound; the saved one is kept and written back.
+                        slot.sound_lost = Some(e.to_string());
+                        missing.push(format!("{} (its saved sound didn't load)", file.plugin.name));
                     }
                 }
                 if file.role != Role::Effect && kind_of(controller.info()) != Role::Instrument {
@@ -249,7 +259,7 @@ fn apply(app: &AppHandle, doc: &mut Doc, next: u64, devices: Vec<Read>) -> Vec<S
                 }
             }
             Err(e) => {
-                slot.error = Some(e.to_string());
+                slot.error = Some(e);
                 missing.push(file.plugin.name.clone());
             }
         }
