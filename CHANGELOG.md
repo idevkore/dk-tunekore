@@ -5,6 +5,45 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.18: plugins on tracks and pads
+
+idevkore/dk-tunekore#37
+
+- **Instrument tracks.** "+ Instrument" in the Timeline picks a VST3
+  instrument (Serum, Arturia, Kontakt…) and puts it on a new track of its own.
+  A MIDI controller's keys play the selected instrument track while the
+  Timeline shows, with pitch bend, pressure, the mod wheel and the sustain
+  pedal; otherwise they play the pads as before.
+- **Effects on any track.** Select a track and its devices show under the
+  tracks: switch each on or off, open its window, move it along the chain,
+  remove it, or add one with "+ Effect". The Sampler's track takes effects too.
+- **A plugin on a pad.** "Plugin…" in a pad's settings makes the pad play a
+  plugin instrument instead of its sample: its steps play C3 plus its pitch
+  for a step, and by hand for as long as you hold it, at the pad's level and
+  pan. The sample stays, for when you take the plugin off. Exports and bounces
+  of the pattern leave plugin pads out for now.
+- **Plugin windows.** Each plugin opens in a window of its own, titled with its
+  track, floating over tuneKore and hidden while you're in another app. Several
+  can be open at once.
+- **The plugin list** comes from a scan in a helper program, so a plugin that
+  crashes while being looked at can't take tuneKore down. Rescan looks at
+  every plugin again; the ones that failed are listed with why, with Retry.
+- **Saved with the project.** Every plugin's sound comes back when the project
+  opens. One that isn't installed any more stays in its place, with its sound
+  kept, until you Reload it. One whose saved sound doesn't load says so and
+  keeps that sound in the project until you choose Keep. One that won't give
+  its sound when you save (an Arturia plugin that isn't activated) says so, and
+  the project keeps the sound it had. Plugin parameters can be learned for MIDI
+  knobs from Audio settings' list.
+- A project can only load plugins from the plugin list or the plugin folders,
+  never from anywhere else its file names.
+- The plugin host joined the main build, CI and the licence check, and the app
+  bundle gets the entitlements that hosting needs. Quitting lets every plugin
+  close down first (Serum 2 used to crash at exit).
+- Found on this Mac: the Arturia plugins aren't activated, so they won't save
+  their sound and Analog Lab V is silent; Kontakt's and Solid Bus Comp's extra
+  inputs and outputs wait for the Mixer.
+
 ## 0.1.17: open projects from the Finder
 
 idevkore/dk-tunekore#51

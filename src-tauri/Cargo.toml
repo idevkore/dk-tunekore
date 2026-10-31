@@ -1,6 +1,6 @@
 [package]
 name = "tunekore"
-version = "0.1.17"
+version = "0.1.18"
 description = "tuneKore: a lightweight DAW by devKore"
 authors = ["devKore"]
 edition.workspace = true
@@ -20,10 +20,16 @@ tunekore-engine = { path = "../engine" }
 tauri = { version = "2.12", features = [] }
 serde = { version = "1", features = ["derive"] }
 tauri-plugin-dialog = "2.8.3"
-tunekore-analyzer = { version = "0.1.17", path = "../analyzer" }
+tunekore-analyzer = { version = "0.1.18", path = "../analyzer" }
 serde_json = "1.0.154"
 midir = "0.11.1"
 tauri-plugin-window-state = "2.5.0"
+
+# macOS: the windows plugin editors open in.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSView", "NSWindow", "NSGraphics"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry", "NSString", "NSNotification", "NSObject"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"

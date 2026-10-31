@@ -124,8 +124,13 @@ impl MidiState {
 }
 
 /// Plays and releases pads from a midir callback, and passes control
-/// changes on. Touches only atomics and the channel.
+/// changes on. While a track's instrument has the keys (`plugins_focus`),
+/// notes, pitch bend and pressure go to it instead, and so do control
+/// changes MIDI learn neither maps nor is learning.
 fn handle(pads: &SamplerHandle, state: &MidiState, changes: &Sender<Arrived>, msg: &[u8]) {
+    if crate::plugins::play_live(msg) {
+        return;
+    }
     match parse(msg) {
         Some(PadEvent::On { pad, velocity }) => {
             pads.trigger_velocity(pad, velocity as f32 / 127.0);
@@ -134,6 +139,15 @@ fn handle(pads: &SamplerHandle, state: &MidiState, changes: &Sender<Arrived>, ms
         Some(PadEvent::Off { pad }) => pads.release(pad),
         None => {
             if let Some(cc) = map::parse_cc(msg) {
+                if crate::plugins::live_has_focus() {
+                    let free = {
+                        let m = state.mapper.lock().unwrap_or_else(|e| e.into_inner());
+                        m.learning().is_none() && !m.mappings().iter().any(|x| x.source.listens(cc.channel, cc.cc))
+                    };
+                    if free {
+                        crate::plugins::control_live(msg);
+                    }
+                }
                 let _ = changes.send((Instant::now(), cc));
             }
         }
@@ -542,7 +556,6 @@ pub fn commands() -> crate::Commands {
 
 /// Adds a module's controls to what knobs can learn, under its id prefix
 /// (`plugin.<id>.<param>` for #37). Call it once, from the module's setup.
-#[allow(dead_code)] // for the modules still to come
 pub fn register_targets(app: &AppHandle, targets: impl Targets<AppHandle>) {
     app.state::<Arc<MidiState>>().targets.lock().unwrap().register(Arc::new(targets));
 }

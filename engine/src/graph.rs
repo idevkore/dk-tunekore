@@ -277,6 +277,20 @@ impl Mixer {
         Ok(())
     }
 
+    /// Moves the device at `from` in a track's chain to `to` (clamped to its
+    /// end), without making it again: an effect keeps its state.
+    pub fn move_in_chain(&mut self, id: TrackId, from: usize, to: usize) -> Result<(), String> {
+        let i = self.index(id)?;
+        let chain = &mut self.tracks[i].chain;
+        if from >= chain.len() {
+            return Err(format!("track {} has no device {}", id.0, from + 1));
+        }
+        let slot = chain.remove(from);
+        chain.insert(to.min(chain.len()), slot);
+        self.changed();
+        Ok(())
+    }
+
     /// A handle that reads a track's level from any thread.
     pub fn meter(&self, id: TrackId) -> Option<TrackMeter> {
         self.tracks.iter().find(|t| t.id == id).map(|t| TrackMeter { meters: self.meters.clone(), slot: t.slot })
@@ -752,6 +766,24 @@ mod tests {
         rig.mixer.remove(t, 0).unwrap();
         assert_eq!(rig.run(64), (1.25, 1.25));
         assert!(rig.mixer.remove(t, 5).is_err());
+    }
+
+    #[test]
+    fn a_device_moved_in_the_chain_keeps_running_in_its_new_place() {
+        let mut m = Mixer::new();
+        let t = m.add_track("T").unwrap();
+        m.set_source(t, Some(Box::new(Dc(1.0)))).unwrap();
+        m.insert(t, 0, Box::new(Gain(2.0))).unwrap();
+        m.insert(t, 1, Box::new(Dc(0.25))).unwrap();
+        let mut rig = Rig::new(m);
+        assert_eq!(rig.run(64), (2.25, 2.25), "doubled, then 0.25 added");
+        rig.mixer.move_in_chain(t, 1, 0).unwrap();
+        let (_, allocs) = realtime(|| rig.graph.run(&mut rig.clock, &rig.shared, 64));
+        assert_eq!(allocs, 0);
+        assert_eq!(rig.graph.master().0[63], 2.5, "0.25 added, then doubled");
+        assert!(rig.mixer.move_in_chain(t, 2, 0).is_err());
+        rig.mixer.move_in_chain(t, 0, 9).unwrap();
+        assert_eq!(rig.run(64), (2.25, 2.25), "to the end");
     }
 
     #[test]

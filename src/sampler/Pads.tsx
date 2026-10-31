@@ -14,9 +14,11 @@ interface Props {
   onPress: (pad: number) => void;
   onRelease: (pad: number) => void;
   onDragStart: (pad: number, x: number, y: number) => void;
+  /** The plugin each pad that plays one plays, by pad. */
+  plugins?: Record<number, string>;
 }
 
-export default function Pads({ pads, selected, played, dropTarget, onSelect, onPress, onRelease, onDragStart }: Props) {
+export default function Pads({ pads, selected, played, dropTarget, onSelect, onPress, onRelease, onDragStart, plugins = {} }: Props) {
   return (
     <section className="pads" aria-label="Pads">
       {pads.map((p) => (
@@ -30,6 +32,7 @@ export default function Pads({ pads, selected, played, dropTarget, onSelect, onP
           onPress={onPress}
           onRelease={onRelease}
           onDragStart={onDragStart}
+          plugin={plugins[p.index]}
         />
       ))}
     </section>
@@ -45,9 +48,11 @@ interface PadProps {
   onPress: (pad: number) => void;
   onRelease: (pad: number) => void;
   onDragStart: (pad: number, x: number, y: number) => void;
+  /** The plugin the pad plays instead of its sample. */
+  plugin?: string;
 }
 
-function Pad({ pad, selected, played, over, onSelect, onPress, onRelease, onDragStart }: PadProps) {
+function Pad({ pad, selected, played, over, onSelect, onPress, onRelease, onDragStart, plugin }: PadProps) {
   const [flash, setFlash] = useState(0);
   const last = useRef(played);
   useEffect(() => {
@@ -59,12 +64,14 @@ function Pad({ pad, selected, played, over, onSelect, onPress, onRelease, onDrag
 
   const key = PAD_KEYS[pad.index].toUpperCase();
   const loaded = !!pad.name && !pad.missing;
-  const cls = ["pad", selected && "on", loaded && "loaded", pad.missing && "missing", over && "over", pad.settings.mute && "muted"]
+  const cls = ["pad", selected && "on", (loaded || plugin) && "loaded", plugin && "plugin", pad.missing && !plugin && "missing", over && "over", pad.settings.mute && "muted"]
     .filter(Boolean)
     .join(" ");
-  const label = pad.name
-    ? `Pad ${pad.index + 1}, ${pad.name}${pad.missing ? ", file missing" : ""}. Key ${key}.`
-    : `Pad ${pad.index + 1}, empty. Key ${key}.`;
+  const label = plugin
+    ? `Pad ${pad.index + 1}, plays ${plugin}. Key ${key}.`
+    : pad.name
+      ? `Pad ${pad.index + 1}, ${pad.name}${pad.missing ? ", file missing" : ""}. Key ${key}.`
+      : `Pad ${pad.index + 1}, empty. Key ${key}.`;
 
   return (
     <button
@@ -72,7 +79,7 @@ function Pad({ pad, selected, played, over, onSelect, onPress, onRelease, onDrag
       data-pad={pad.index}
       aria-label={label}
       aria-pressed={selected}
-      title={pad.path ?? "Empty: drop a sample here, or pick one in the Library and press Enter"}
+      title={plugin ? `Plays ${plugin}` : (pad.path ?? "Empty: drop a sample here, or pick one in the Library and press Enter")}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         e.preventDefault(); // keep focus where it is, so Space stays play/stop
@@ -99,12 +106,18 @@ function Pad({ pad, selected, played, over, onSelect, onPress, onRelease, onDrag
         <span className="pad-num">{pad.index + 1}</span>
         <kbd>{key}</kbd>
       </span>
-      {loaded ? (
+      {plugin ? (
+        <span className="pad-wave pad-plugin" aria-hidden="true">
+          <svg viewBox="0 0 24 16" width="24" height="16">
+            <path d="M1 8h4l2-6 3 12 3-12 3 12 2-6h5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+          </svg>
+        </span>
+      ) : loaded ? (
         <Wave className="pad-wave" peaks={pad.peaks} start={pad.settings.start} end={pad.settings.end} reverse={pad.settings.reverse} />
       ) : (
         <span className="pad-wave pad-empty" aria-hidden="true">{pad.missing ? "missing" : "+"}</span>
       )}
-      <span className="pad-name">{pad.name ?? "Empty"}</span>
+      <span className="pad-name">{plugin ?? pad.name ?? "Empty"}</span>
     </button>
   );
 }

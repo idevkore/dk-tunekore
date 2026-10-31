@@ -35,6 +35,11 @@ import Lanes from "./Lanes";
 import Ruler from "./Ruler";
 import TrackHeader from "./TrackHeader";
 import ClipInspector from "./ClipInspector";
+import Dialog from "../sampler/Dialog";
+import DeviceChain from "../plugins/DeviceChain";
+import PluginPicker from "../plugins/PluginPicker";
+import * as plugins from "../plugins/api";
+import type { CatalogEntry, PluginsView } from "../plugins/api";
 import { retryFailed } from "./peaks";
 import "./timeline.css";
 
@@ -95,6 +100,9 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   const [drop, setDrop] = useState<Drop | null>(null);
   const [libDrag, setLibDrag] = useState<{ item: LibraryItem; x0: number; y0: number; moving: boolean } | null>(null);
   const [libraryFolder, setLibraryFolder] = useState<string | null>(null);
+  const [devices, setDevices] = useState<PluginsView | null>(null);
+  const [pickInstrument, setPickInstrument] = useState(false);
+  const [removing, setRemoving] = useState<{ id: number; name: string } | null>(null);
 
   const scrollEl = useRef<HTMLDivElement>(null);
   const hscroll = useRef<HTMLDivElement>(null);
@@ -162,6 +170,21 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
     } catch {
       // not in Tauri (the dev mock)
     }
+    // The plugins on the tracks, and the ones a project named that didn't load.
+    plugins.state().then(setDevices).catch(() => {});
+    offs.push(subscribe(plugins.onState(setDevices)));
+    offs.push(
+      subscribe(
+        plugins.onMissing((names) => fail(`Not every plugin came back as saved: ${names.join(", ")}. Their saved sound is kept; Reload them once they're installed or activated.`)),
+      ),
+    );
+    offs.push(
+      subscribe(
+        plugins.onUnsaved((names) =>
+          fail(`${names.join(", ")} wouldn't give ${names.length === 1 ? "its" : "their"} sound when saving, so the project keeps the sound ${names.length === 1 ? "it" : "they"} had. Is it activated?`),
+        ),
+      ),
+    );
     return () => offs.forEach((off) => off());
   }, [take, adopt, fail]);
 
@@ -173,6 +196,17 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
     const ids = new Set(view.tracks.flatMap((t) => t.clips.map((c) => c.id)));
     setSelected((s) => ([...s].every((id) => ids.has(id)) ? s : new Set([...s].filter((id) => ids.has(id)))));
   }, [view]);
+
+  // A MIDI controller's keys play the selected track's instrument while the
+  // Timeline shows; otherwise (the Sampler, or another kind of track) the pads.
+  const focusTrack = active ? view?.tracks.find((t) => t.id === track && t.kind === "instrument")?.id ?? null : null;
+  const hasInstrument = focusTrack !== null && (devices?.devices ?? []).some((d) => d.track === focusTrack && d.role === "instrument" && d.status === "ok");
+  const wantFocus = hasInstrument ? focusTrack : null;
+  // Sent again whenever the Rust side has another (a project opening clears it).
+  const hasFocus = devices?.focus ?? null;
+  useEffect(() => {
+    if (hasFocus !== wantFocus) plugins.focus(wantFocus).catch(() => {});
+  }, [wantFocus, hasFocus]);
 
   // The view's settings go back to the Rust side (saved with the project) once they settle.
   const snap = view?.snap ?? "beat";
@@ -352,6 +386,40 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   const undo = useCallback(() => api.undo().then(take).catch(fail), [take, fail]);
   const redo = useCallback(() => api.redo().then(take).catch(fail), [take, fail]);
   const addTrack = useCallback(() => api.addTrack().then(take).catch(fail), [take, fail]);
+  /** A new instrument track with `p` on it, selected. */
+  const addInstrument = useCallback(
+    (p: CatalogEntry) => {
+      setPickInstrument(false);
+      say(`Loading ${p.name}…`);
+      const before = new Set((devices?.devices ?? []).map((d) => d.id));
+      // Loading takes the UI's thread for a moment (Kontakt can take seconds): show the message first.
+      plugins.afterPaint(() => {
+        plugins
+          .add(p, null)
+          .then((v) => {
+            setDevices(v);
+            const added = v.devices.find((d) => !before.has(d.id));
+            if (added) setTrack(added.track);
+            say(`${p.name} is on a new instrument track`);
+          })
+          .catch((e) => fail(`${p.name} didn't load: ${e}`));
+      });
+    },
+    [devices, say, fail],
+  );
+  const removeInstrumentTrack = useCallback(
+    (id: number) => {
+      setRemoving(null);
+      plugins
+        .removeTrack(id)
+        .then((v) => {
+          setDevices(v);
+          if (track === id) setTrack(null);
+        })
+        .catch(fail);
+    },
+    [track, fail],
+  );
   const setSnap = (s: Snap) => api.setView({ snap: s }).then(take).catch(fail);
   const setLibrary = (on: boolean) => api.setView({ library: on }).then(take).catch(fail);
 
@@ -525,6 +593,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   }
 
   const one = selected.size === 1 ? allClips.find(({ clip }) => selected.has(clip.id)) : undefined;
+  const selectedTrack = view.tracks.find((t) => t.id === track) ?? null;
   const contentPx = contentBeats * zoom + size.w;
   const empty = allClips.length === 0;
 
@@ -604,8 +673,11 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
         <button className="btn small" onClick={split} disabled={empty} title={`Split the selected clips, or every clip, at the playhead (${mod}E)`}>
           Split
         </button>
-        <button className="btn small" onClick={() => void addTrack()} title="Add an empty audio track">
-          + Track
+        <button className="btn small" onClick={() => void addTrack()} title="Add an empty audio track, for clips">
+          + Audio
+        </button>
+        <button className="btn small" onClick={() => setPickInstrument(true)} title="Add an instrument track with a plugin instrument on it">
+          + Instrument
         </button>
         <span className="grow" />
         <div className="group-btns">
@@ -668,7 +740,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
                     onMix={(mix) => api.setTrack(l.track.id, { mix }).then(take).catch(fail)}
                     onRename={(name) => api.setTrack(l.track.id, { name }).then(take).catch(fail)}
                     onColour={(colour) => api.setTrack(l.track.id, { colour }).then(take).catch(fail)}
-                    onRemove={() => api.removeTrack(l.track.id).then(take).catch(fail)}
+                    onRemove={() => (l.track.kind === "instrument" ? setRemoving({ id: l.track.id, name: l.track.name }) : api.removeTrack(l.track.id).then(take).catch(fail))}
                     onHeight={(h, done) => {
                       const height = Math.round(Math.min(320, Math.max(28, h)));
                       setHeights((x) => ({ ...x, [l.track.id]: height }));
@@ -728,7 +800,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
           <div className="tl-hscroll" ref={hscroll} style={{ marginLeft: HEADER_W }} onScroll={(e) => setScroll(e.currentTarget.scrollLeft / zoom)} aria-hidden="true">
             <div style={{ width: contentPx, height: 1 }} />
           </div>
-          {one && (
+          {one ? (
             <ClipInspector
               clip={one.clip}
               tempo={tempo}
@@ -737,9 +809,25 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
               onChange={(clip, key) => void send({ key, clips: [toInput(clip, one.track)], delete: [] }).catch(() => {})}
               onDelete={deleteSelected}
             />
+          ) : (
+            selectedTrack && <DeviceChain track={selectedTrack} plugins={devices} onPlugins={setDevices} onMessage={say} />
           )}
         </div>
       </div>
+      {pickInstrument && <PluginPicker kind="instrument" title="New instrument track" onPick={addInstrument} onClose={() => setPickInstrument(false)} />}
+      {removing && (
+        <Dialog title={`Delete ${removing.name}?`} onClose={() => setRemoving(null)}>
+          <p>The track goes with its instrument and effects, and their sound. This can't be undone yet.</p>
+          <div className="dialog-foot">
+            <button className="btn small" onClick={() => setRemoving(null)}>
+              Keep it
+            </button>
+            <button className="btn small danger" onClick={() => removeInstrumentTrack(removing.id)}>
+              Delete
+            </button>
+          </div>
+        </Dialog>
+      )}
       <StatusBar message={message} onDismiss={() => onMessage(null)}>
         <kbd>Space</kbd> play · drag samples onto tracks · <kbd>⌥</kbd>-drag copies · <kbd>{mod}</kbd>-drag ignores the grid · <kbd>{mod}E</kbd> split · <kbd>{mod}D</kbd> duplicate · <kbd>⌫</kbd> delete · <kbd>{mod}Z</kbd> undo · <kbd>{mod}1</kbd> Sampler
       </StatusBar>

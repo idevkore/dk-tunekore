@@ -12,6 +12,7 @@ async function start() {
   if (import.meta.env.DEV && new URLSearchParams(location.search).has("mock")) {
     (await import("./sampler/devmock")).installMocks();
     (await import("./timeline/devmock")).installMocks();
+    (await import("./plugins/devmock")).installMocks();
   }
   createRoot(document.getElementById("root")!).render(
     <StrictMode>

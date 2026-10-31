@@ -124,8 +124,8 @@ export default function TrackHeader({ track, height, selected, meter, onSelect, 
           <button className="tl-ms arm" disabled title="Arm for recording: comes with recording into the Timeline" aria-label={`Arm ${track.name} (not yet)`}>
             ●
           </button>
-          {track.kind === "audio" && (
-            <button className="tl-x" title="Delete the track (undo brings it back)" aria-label={`Delete ${track.name}`} onClick={onRemove}>
+          {track.kind !== "sampler" && (
+            <button className="tl-x" title={track.kind === "audio" ? "Delete the track (undo brings it back)" : "Delete the track and its plugins"} aria-label={`Delete ${track.name}`} onClick={onRemove}>
               ×
             </button>
           )}

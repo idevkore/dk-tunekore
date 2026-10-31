@@ -1,13 +1,14 @@
 // The selected pad's settings: trim, level, pan, pitch, gate, reverse, mute.
 // Every slider can learn a MIDI knob (src/midi/learn.tsx) for the selected
 // pad, or for this pad only.
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import Wave from "./Wave";
 import SampleInput from "./SampleInput";
 import { AUDIO_EXTENSIONS, PAD_KEYS, onControls, subscribe, type PadSettings, type PadView } from "./api";
 import { Learnable } from "../midi/learn";
 import { padLearn } from "../midi/api";
+import { noteName } from "../plugins/api";
 
 interface Props {
   pad: PadView;
@@ -20,6 +21,10 @@ interface Props {
   /** Slices the sample at its hits onto the empty pads. */
   onChop: (count: number) => void;
   freePads: number;
+  /** The card of the plugin instrument the pad plays instead of its sample, if it plays one. */
+  plugin?: ReactNode;
+  /** Opens the list of instruments, to play one on this pad. */
+  onPlugin?: () => void;
 }
 
 const fmtDb = (db: number) => (db <= -60 ? "off" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`);
@@ -33,7 +38,7 @@ const fmtTime = (s: number) => (s < 1 ? `${Math.round(s * 1000)} ms` : `${s.toFi
 const fmtOct = (o: number) => (Math.abs(o) < 0.05 ? "off" : `${o > 0 ? "+" : "−"}${Math.abs(o).toFixed(1)} oct`);
 const fmtPct = (v: number) => (Math.abs(v) < 0.005 ? "off" : `${v > 0 ? "+" : "−"}${Math.round(Math.abs(v) * 100)}%`);
 
-export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition, onChop, freePads }: Props) {
+export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClearSteps, onAudition, onChop, freePads, plugin, onPlugin }: Props) {
   // Local copy so sliders move smoothly; each change is sent as it happens.
   const [s, setS] = useState(pad.settings);
   const [tab, setTab] = useState<"sample" | "shape">("sample");
@@ -67,15 +72,57 @@ export default function Inspector({ pad, onSettings, onLoadFile, onClear, onClea
   const loaded = !!pad.name && !pad.missing;
   const length = pad.seconds * (s.end - s.start);
 
+  // A pad that plays a plugin: the plugin, and the settings that still apply.
+  if (plugin) {
+    return (
+      <section className="inspector" aria-label={`Pad ${pad.index + 1} settings`}>
+        <div className="pane-head">
+          <h2>
+            Pad {pad.index + 1} <kbd>{key}</kbd>
+          </h2>
+        </div>
+        <div className="insp-plugin">{plugin}</div>
+        <div className="panel">
+          <Slider {...padLearn("gainDb")} label="Level" value={s.gainDb} min={-60} max={6} step={0.5} shown={fmtDb(s.gainDb)} onChange={(v) => change({ gainDb: v })} reset={0} />
+          <Slider {...padLearn("pan")} label="Pan" value={s.pan} min={-1} max={1} step={0.01} shown={fmtPan(s.pan)} onChange={(v) => change({ pan: v })} reset={0} />
+          <Slider {...padLearn("pitch")} label="Note" value={s.pitch} min={-24} max={24} step={1} shown={noteName(60 + s.pitch)} onChange={(v) => change({ pitch: v })} reset={0} />
+          <div className="slider">
+            <label htmlFor="s-choke">Choke</label>
+            <select id="s-choke" className="choke" value={s.choke} onChange={(e) => change({ choke: Number(e.target.value) })} title="Pads in the same group cut each other off">
+              <option value={0}>None</option>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((g) => (
+                <option key={g} value={g}>Group {g}</option>
+              ))}
+            </select>
+            <span />
+          </div>
+          <div className="toggles" role="group" aria-label="Playback">
+            <Toggle on={s.mute} label="Mute" hint="Leave out of the pattern (the pad still plays by hand)" onClick={() => change({ mute: !s.mute })} />
+          </div>
+        </div>
+        <p className="dim small hint">
+          Its steps play {noteName(60 + s.pitch)} for a step; by hand, as long as you hold the pad.{pad.name ? ` Its sample, ${pad.name}, is kept for when you take the plugin off.` : ""} Exports and bounces of the pattern leave plugin pads out for now.
+        </p>
+      </section>
+    );
+  }
+
   return (
     <section className="inspector" aria-label={`Pad ${pad.index + 1} settings`}>
       <div className="pane-head">
         <h2>
           Pad {pad.index + 1} <kbd>{key}</kbd>
         </h2>
-        <button className="btn small" onClick={() => void pick()}>
-          {loaded ? "Replace…" : "Choose file…"}
-        </button>
+        <span className="pane-head-btns">
+          {onPlugin && (
+            <button className="btn small" onClick={onPlugin} title="Play a plugin instrument on this pad instead of a sample">
+              Plugin…
+            </button>
+          )}
+          <button className="btn small" onClick={() => void pick()}>
+            {loaded ? "Replace…" : "Choose file…"}
+          </button>
+        </span>
       </div>
 
       {!pad.name && (

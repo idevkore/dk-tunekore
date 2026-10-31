@@ -1,11 +1,13 @@
 {
   "name": "tunekore",
   "private": true,
-  "version": "0.1.17",
+  "version": "0.1.18",
   "type": "module",
   "license": "UNLICENSED",
   "scripts": {
     "dev": "vite",
+    "scanner": "cargo build -p tunekore-plugins --bin tunekore-scan",
+    "scanner:release": "cargo build --release -p tunekore-plugins --bin tunekore-scan",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "tauri": "tauri",
