@@ -1,8 +1,3 @@
-[![CI](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/idevkore/dk-tunekore/actions/workflows/ci.yml?query=branch%3Amain)
-
-CI: the last build and test run on `main`. CI runs by hand for now (see
-`.github/workflows/ci.yml`), so the badge shows the latest run started.
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="brand/tunekore-logo-color.svg">
   <img alt="tuneKore" src="brand/tunekore-logo-color-on-light.svg" width="420">
@@ -15,90 +10,103 @@ CI: whether `main` builds and passes its tests on macOS, Windows and Linux.
 tuneKore is a lightweight DAW in the style of Ableton Live, built by devKore to
 host our own instruments, effects and tools alongside the plugins we already
 use (Serum, Arturia, Native Instruments). It is sampling first, and new tech
-only: VST3 and CLAP plugins, no legacy formats. The main window has two
-views on one beat clock, the Sampler and the Timeline (⌘1 and ⌘2); the
-Analyzer splits a song into stems and sends them to the Sampler's pads.
+only: VST3 and CLAP plugins, no legacy formats. macOS first, then Windows and
+Linux.
 
-CI (`.github/workflows/ci.yml`) builds and tests the engine, the Analyzer, the
-stem worker and the app on macOS, and compiles and links them on Windows and
-Linux, for every push to `main` and every pull request. A pull request into
-`main` needs CI to pass and a code owner's approval (`.github/CODEOWNERS`);
-report security problems privately, as `SECURITY.md` says.
+## What's in it
 
-Status: the Sampler (Phase 2, the MVP) is in; the Timeline (Phase 4) has
-tracks and audio clips, with MIDI clips and plugins on tracks next.
+The main window has two views on one beat clock, the Sampler and the
+Timeline (<kbd>⌘1</kbd> and <kbd>⌘2</kbd>). The Analyzer is a second window
+that splits a song into stems.
 
-- **Sampler** (main window):
-  - **Library:** pick a sample folder, click or arrow through samples to hear
-    them, and drag them onto 16 pads (or select a pad and press Enter, or use
-    the Add a sound row under the steps).
-  - **Pads:** start and end (drag them on the waveform), level, pan, pitch,
-    gate, reverse, mute and a choke group; on the Shape tab, an amp envelope
-    (attack, decay, sustain, release) and a low, high or band-pass filter.
-    Chop any pad's sample at its hits onto the empty pads.
-  - **Steps:** four patterns (A–D) of 8, 16 or 32 steps with tempo and swing.
-    Right-click a step for its velocity, chance and repeats (ratchets), or
-    drag the velocity lane under the steps. Arm
-    Record and play pads (keys or a MIDI controller) while it runs; a
-    metronome clicks on the beat.
-  - **Song:** chain patterns into a song and play it through, looped or once.
-  - **Sampling:** select a pad and press Sample from input to record from a
-    microphone or audio interface (pick it in Audio settings). The take is
-    trimmed and saved in `Music/tuneKore/Samples/Recordings`; macOS asks for
-    microphone access the first time.
-  - **MIDI:** plug in a controller and notes C1 to D♯2 (36 to 51) play pads 1
-    to 16 at the velocity you play; it connects by itself. MIDI learn maps
-    knobs and faders (7-bit, or 14-bit pairs) to the pad settings (for the
-    selected pad, or one pad), tempo, swing, the master level and the Sampler
-    track's volume and pan: click the MIDI light in the top bar, click a
-    control and move a knob, or right-click a control. One turn of a knob is
-    one undo step. The mappings are saved with the project and listed in
-    Audio settings.
-  - **Display:** the layout scales to big screens; View → Zoom In / Zoom Out
-    (⌘+, ⌘−, ⌘0) sizes the whole interface; windows reopen where you left them.
-  - **Output:** a master level, and a limiter that keeps the output under
-    -0.3 dBFS.
-  - **Projects:** undo and redo cover every edit; save as `.tunek`, collect
-    the samples into a folder beside the project, and autosave recovers
-    unsaved work after a crash. Export the pattern or the whole song as a WAV
-    or as stems (one WAV per pad), or bounce it onto a pad to resample it.
-- **Timeline** (⌘2): tracks of audio clips on the Sampler's beat clock, with
-  the Sampler as the first track.
-  - **Tracks:** name, colour, volume, pan, mute, solo and a meter; drag a
-    track's foot to change its height, and press F2 or Enter on a focused
-    track to rename it. An arm button waits for recording.
-  - **Clips:** drag samples from the Library or files from Finder onto a
-    track (they play one after another), or below the tracks for a track
-    each, lined up; the Analyzer sends a stem, or all four, to new tracks at
-    bar 1. Move them (⌥ copies), trim either edge, loop one by
-    dragging the top of its right edge, fade in and out from its top corners,
-    set its gain, split at the playhead (⌘E), duplicate (⌘D) and delete (⌫).
-    Drags snap to the grid (bar, beat, 1/8, 1/16 or off; hold ⌘, or Ctrl on
-    Windows and Linux, to ignore it).
-  - **Ruler:** click to move the playhead; drag in its top strip for a loop
-    range, drag the brace to move it, click it to turn the loop on or off.
-    Zoom with ⌘-scroll, pinch, or = and -; the playhead is followed while
-    playing.
-  - Clips aren't warped yet: they play at their own speed, so a clip's length
-    in beats follows the tempo, and a tempo change while playing lets the
-    clips under the playhead play on. Their files are decoded into memory.
-  - Undo and redo cover the Timeline's edits; tracks, clips, the loop and the
-    view are saved in the project, and collecting samples copies the clips'
-    files too.
-- **Analyzer:** open a song, split it into vocals, drums, bass and other,
-  then play, solo, mute and export the stems, or send one to the pads, whole
-  or chopped at its hits from the playhead, or to the Timeline, one stem or
-  all four on tracks of their own. It finds the song's tempo and key
-  (with its Camelot code) and can set the Sampler to that tempo. Separation runs on this Mac in a
-  separate worker process, with Demucs. Its weights are research-only, so a
-  model we may ship replaces it before release (see `docs/PLAN.md` section 6).
+**Status:** the Sampler, the Timeline with audio clips, and VST3 plugins on
+tracks and pads are in. MIDI clips, CLAP, recording, automation, the Mixer and
+export come next (`docs/PLAN.md` section 4 has the roadmap).
 
-Keys: <kbd>Space</kbd> plays and stops, <kbd>⌘1</kbd> and <kbd>⌘2</kbd>
-show the Sampler and the Timeline, <kbd>1</kbd>–<kbd>4</kbd>,
-<kbd>Q</kbd>–<kbd>R</kbd>, <kbd>A</kbd>–<kbd>F</kbd> and <kbd>Z</kbd>–<kbd>V</kbd>
-play the pads, <kbd>/</kbd> searches the Library, <kbd>⌘S</kbd>,
-<kbd>⌘O</kbd>, <kbd>⌘N</kbd> and <kbd>⌘E</kbd> save, open, start a new
-project and export; <kbd>⌘Z</kbd> and <kbd>⇧⌘Z</kbd> undo and redo.
+### Sampler
+
+- **Library and pads:** pick a sample folder, click or arrow through samples to
+  hear them, and drag them onto 16 pads (or select a pad and press
+  <kbd>Enter</kbd>). Each pad has start and end, level, pan, pitch, gate,
+  reverse, mute, a choke group, an amp envelope and a low, high or band-pass
+  filter. Chop a sample at its hits onto the empty pads. **Clear pad** (in the
+  Inspector) empties one.
+- **Steps:** four patterns (A–D) of 8, 16, 32 or 64 steps, with tempo and
+  swing. Right-click a step for its velocity, chance and repeats (ratchets), or
+  drag the velocity lane. Arm Record and play pads while it runs; a metronome
+  clicks on the beat.
+- **Song:** chain patterns into a song and play it through, looped or once.
+- **Sampling:** press Sample from input to record from a microphone or audio
+  interface (pick it in Audio settings). Takes are trimmed and saved in
+  `Music/tuneKore/Samples/Recordings`.
+- **Output:** a master level and a limiter that keeps the output under
+  -0.3 dBFS.
+
+### Timeline
+
+- **Tracks:** audio tracks and instrument tracks, with name, colour, volume,
+  pan, mute, solo and a meter. The Sampler is the first track.
+- **Clips:** drag samples from the Library or files from Finder onto a track.
+  Move, copy (<kbd>⌥</kbd>), trim, loop, fade, set gain, split at the playhead
+  (<kbd>⌘E</kbd>), duplicate (<kbd>⌘D</kbd>) and delete. Drags snap to the
+  grid; hold <kbd>⌘</kbd> to ignore it.
+- **Ruler:** click to move the playhead, drag its top strip for a loop range,
+  zoom with <kbd>⌘</kbd>-scroll or pinch.
+- Clips aren't warped yet: they play at their own speed.
+
+### Plugins
+
+- **Instrument tracks:** "+ Instrument" picks a VST3 instrument for a new
+  track. A MIDI controller plays the selected instrument track while the
+  Timeline shows; otherwise it plays the pads.
+- **Effects:** select any track, including the Sampler's, and add effects in
+  the device strip under the tracks.
+- **Pads:** "Plugin…" in a pad's settings makes the pad play a plugin
+  instrument instead of its sample.
+- **Windows and state:** each plugin opens in its own window, and its sound is
+  saved with the project. Plugin parameters can be MIDI learn targets.
+- Exports and bounces leave plugin pads out for now.
+
+### Analyzer
+
+Open a song and split it into vocals, drums, bass and other. Play, solo, mute
+and export the stems, or send them to the pads (whole or chopped) or to
+Timeline tracks. It also finds the tempo and key (with its Camelot code) and
+can set the Sampler to that tempo. Separation runs on this Mac in a separate
+worker, with Demucs. Its weights are research-only, so a model we may ship
+replaces it before release (`docs/PLAN.md` section 6).
+
+### MIDI
+
+Plug in a controller and it connects by itself. Notes C1 to D♯2 (36 to 51)
+play pads 1 to 16. MIDI learn maps knobs and faders (7-bit, or 14-bit pairs)
+to pad settings, tempo, swing, the master level, track volume and pan, and
+plugin parameters. Click the MIDI light in the top bar, click a control and
+move a knob, or right-click a control. The mappings are saved with the project.
+
+### Projects and display
+
+- Undo and redo cover every edit. Save as `.tunek`, double-click a `.tunek` in
+  Finder to open it, and collect the samples into a folder beside the
+  project. Autosave recovers unsaved work after a crash.
+- Export the pattern or the whole song as a WAV or as stems (one WAV per pad),
+  or bounce it onto a pad.
+- Eight colour themes (tuneKore, Dracula, Nord, Gruvbox Dark, Tokyo Night, and
+  the light Solarized Light, GitHub Light and Gruvbox Light), picked from the
+  top bar.
+- The layout scales to big screens; View → Zoom In / Zoom Out
+  (<kbd>⌘+</kbd>, <kbd>⌘−</kbd>, <kbd>⌘0</kbd>) sizes the whole interface.
+
+### Keys
+
+| Key | Does |
+| --- | --- |
+| <kbd>Space</kbd> | play and stop |
+| <kbd>⌘1</kbd>, <kbd>⌘2</kbd> | show the Sampler, the Timeline |
+| <kbd>1</kbd>–<kbd>4</kbd>, <kbd>Q</kbd>–<kbd>R</kbd>, <kbd>A</kbd>–<kbd>F</kbd>, <kbd>Z</kbd>–<kbd>V</kbd> | play the pads |
+| <kbd>/</kbd> | search the Library |
+| <kbd>⌘S</kbd>, <kbd>⌘O</kbd>, <kbd>⌘N</kbd>, <kbd>⌘E</kbd> | save, open, new project, export |
+| <kbd>⌘Z</kbd>, <kbd>⇧⌘Z</kbd> | undo, redo |
 
 ## Build and run
 
@@ -111,24 +119,43 @@ npm install
 npm run tauri dev
 ```
 
-The main window is the Sampler; open the Analyzer from its top bar. Demucs's weights (about 160 MB)
-download to this Mac on first use. See [`stems/README.md`](stems/README.md).
+Demucs's weights (about 160 MB) download to this Mac on first use. See
+[`stems/README.md`](stems/README.md).
 
 `npm run tauri build -- --bundles app` makes `tuneKore.app` in
-`target/release/bundle/macos/`. The repo is one Cargo workspace: the audio
-engine is the `tunekore-engine` crate in `engine/`, the Analyzer's decoding,
-worker and export code is `tunekore-analyzer` in `analyzer/`, and the Tauri
-shell in `src-tauri/` depends on both. To try the UI in a browser without
-Rust, run `npm run dev` and open `http://localhost:1420/?mock` (the Sampler
-and the Timeline) or `/analyzer.html?mock` (the Analyzer). The stem worker is Python, in
-`stems/`. To test the engine alone (it plays a short tone on the default
-output unless `CI` is set): `cargo test -p tunekore-engine`.
+`target/release/bundle/macos/`.
+
+To try the UI in a browser without Rust, run `npm run dev` and open
+`http://localhost:1420/?mock` (the Sampler and the Timeline) or
+`/analyzer.html?mock` (the Analyzer).
+
+To test the engine alone (it plays a short tone on the default output unless
+`CI` is set): `cargo test -p tunekore-engine`.
+
+## How the repo is laid out
+
+One Cargo workspace:
+
+- `engine/`: the audio engine (`tunekore-engine`)
+- `analyzer/`: the Analyzer's decoding, worker and export code
+- `plugins/`: the VST3 host and the plugin scanner
+- `src-tauri/`: the Tauri shell, which depends on all of the above
+- `src/`: the React UI
+- `stems/`: the stem worker, in Python
+
+## Contributing
+
+CI (`.github/workflows/ci.yml`) builds and tests the engine, the Analyzer, the
+stem worker and the app on macOS, and compiles and links them on Windows and
+Linux, for every push to `main` and every pull request. A pull request into
+`main` needs CI to pass and a code owner's approval (`.github/CODEOWNERS`).
+Report security problems privately, as [`SECURITY.md`](SECURITY.md) says.
 
 - [`docs/PLAN.md`](docs/PLAN.md): the stack, architecture, roadmap, plugin
   support, stems and cross-platform path
-- [`CHANGELOG.md`](CHANGELOG.md): what each version added. Every pull request
-  that adds to the app bumps the patch number with `npm run version:bump`
-  (CI checks the copies agree); the version shows in the app's status bar.
+- [`CHANGELOG.md`](CHANGELOG.md): what each version added. A pull request that
+  adds to the app bumps the patch number with `npm run version:bump` (CI
+  checks the copies agree); the version shows in the app's status bar.
 - [`THIRD_PARTY.md`](THIRD_PARTY.md): every dependency and its licence
 - [`stems/`](stems/README.md): the stem worker and the model comparison tools
 - [`brand/`](brand/README.md): the logo, the K› icon and the macOS app icon
