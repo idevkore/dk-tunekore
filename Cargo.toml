@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
-members = ["engine", "analyzer", "src-tauri"]
+members = ["engine", "analyzer", "plugins", "src-tauri"]
+# The plugin host's test plugin is a workspace of its own, built by its tests.
+exclude = ["plugins/tests/fixture"]
 
 [workspace.package]
 edition = "2021"

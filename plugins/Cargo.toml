@@ -8,11 +8,6 @@ publish = false
 description = "tuneKore's plugin host: scans, loads and runs VST3 plugins behind one Plugin trait"
 build = "build.rs"
 
-# Its own workspace until the plugins-in-the-app PR joins it to the root one.
-[workspace]
-resolver = "2"
-exclude = ["third_party", "tests/fixture"]
-
 [dependencies]
 crossbeam-queue = "0.3"
 libloading = "0.9"
