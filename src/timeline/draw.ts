@@ -1,9 +1,10 @@
-// Drawing the Timeline's canvases: the lanes (grid, clips with their
-// waveforms, fades and loops, the loop range, a drop ghost) and the ruler
-// (bars and beats, the loop brace). The playhead is a DOM line over both,
-// so it moves without a redraw.
-import { COLOURS, type ClipView, type SourceView, type TrackView } from "./api";
+// Drawing the Timeline's canvases: the lanes (grid, audio clips with their
+// waveforms, fades and loops, MIDI clips with their notes, the loop range, a
+// drop ghost) and the ruler (bars and beats, the loop brace). The playhead
+// is a DOM line over both, so it moves without a redraw.
+import { COLOURS, type ClipView, type MidiClipView, type SourceView, type TrackView } from "./api";
 import { barBeats, clipEnd, isLooped, secondsPerBeat, sourceAt } from "./edits";
+import { isLoopedMidi, midiEnd, placed } from "./midi";
 import { getPeaks, levelFor } from "./peaks";
 import { alpha, mix, palette } from "../theme/theme";
 
@@ -232,6 +233,84 @@ function drawClip(ctx: CanvasRenderingContext2D, c: ClipView, colour: string, la
   }
 }
 
+/** A MIDI clip: its name strip, and its notes in small, scaled to the
+ *  clip's range of keys, pass after pass. */
+function drawMidiClip(ctx: CanvasRenderingContext2D, c: MidiClipView, colour: string, lane: Lane, s: Scene) {
+  const x0 = beatToX(c.start, s.scroll, s.zoom);
+  const x1 = beatToX(midiEnd(c), s.scroll, s.zoom);
+  if (x1 < 0 || x0 > s.width) return;
+  const y = lane.top - s.scrollTop + 1;
+  const h = lane.height - 2;
+  const w = Math.max(2, x1 - x0);
+  const head = Math.min(CLIP_HEAD, h / 2);
+  const selected = s.selected.has(c.id);
+  const p = palette();
+  ctx.save();
+  roundRect(ctx, x0, y, w, h, 4);
+  ctx.fillStyle = mix(selected ? p.clipSel : p.clip, colour, p.clipTint);
+  ctx.fill();
+  ctx.clip();
+  ctx.fillStyle = colour;
+  ctx.globalAlpha = selected ? 0.95 : 0.7;
+  ctx.fillRect(x0, y, w, head);
+  ctx.globalAlpha = 1;
+  const body = y + head;
+  const bodyH = h - head;
+  // The notes that play, scaled to the clip's keys (an octave at least).
+  const inContent = c.notes.filter((n) => n.start >= c.offset && n.start < c.offset + c.content);
+  if (bodyH > 4 && inContent.length) {
+    let lo = 127;
+    let hi = 0;
+    for (const n of inContent) {
+      lo = Math.min(lo, n.key);
+      hi = Math.max(hi, n.key);
+    }
+    const rows = Math.max(12, hi - lo + 1);
+    const base = lo - Math.floor((rows - (hi - lo + 1)) / 2);
+    const rowH = (bodyH - 4) / rows;
+    const from = c.start + Math.max(0, -x0) / s.zoom;
+    const to = c.start + Math.min(w, s.width - x0) / s.zoom;
+    for (const [beat, len, n] of placed(c, from, to)) {
+      const nx = beatToX(beat, s.scroll, s.zoom);
+      const ny = body + 2 + (rows - 1 - (n.key - base)) * rowH;
+      ctx.fillStyle = mix(colour, p.text, p.waveShade);
+      ctx.globalAlpha = 0.45 + 0.55 * (n.velocity / 127);
+      ctx.fillRect(Math.round(nx), ny, Math.max(1.5, len * s.zoom - 1), Math.max(1.5, rowH - (rowH > 3 ? 1 : 0)));
+    }
+    ctx.globalAlpha = 1;
+  }
+  // Where a looped clip starts its content again.
+  if (isLoopedMidi(c) && c.content > 0) {
+    ctx.fillStyle = alpha(p.ink, 0.35);
+    for (let b = c.start - c.phase + c.content; b < midiEnd(c); b += c.content) {
+      const x = Math.round(beatToX(b, s.scroll, s.zoom));
+      if (x > s.width) break;
+      if (x <= x0) continue;
+      ctx.fillRect(x, body, 1, bodyH);
+      ctx.beginPath();
+      ctx.moveTo(x - 3, body);
+      ctx.lineTo(x + 3, body);
+      ctx.lineTo(x, body + 4);
+      ctx.fill();
+    }
+  }
+  if (w > 24 && h > 12) {
+    ctx.fillStyle = NAME_INK;
+    ctx.font = "600 10.5px Geist, -apple-system, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.fillText(c.name, Math.max(x0, 0) + 5, y + head / 2 + 0.5, Math.max(0, w - 10));
+  }
+  ctx.restore();
+  roundRect(ctx, x0 + 0.5, y + 0.5, w - 1, h - 1, 4);
+  ctx.strokeStyle = selected ? p.text : alpha(p.ink, 0.12);
+  ctx.stroke();
+  if ((s.hover === c.id || selected) && w >= 24) {
+    // The loop handle: the top of the right edge.
+    ctx.fillStyle = p.highlight;
+    ctx.fillRect(Math.round(x1) - 3, y + 1, 2, head - 2);
+  }
+}
+
 export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
   prepare(ctx, s.width, s.height, s.dpr);
   const p = palette();
@@ -262,12 +341,22 @@ export function drawLanes(ctx: CanvasRenderingContext2D, s: Scene) {
   for (const lane of s.lanes) {
     const y = lane.top - s.scrollTop;
     if (y > s.height || y + lane.height < 0) continue;
+    if (lane.track.kind === "instrument") {
+      const colour = COLOURS[lane.track.colour % COLOURS.length];
+      if (lane.track.midi.length === 0) {
+        ctx.fillStyle = p.faint;
+        ctx.font = "11.5px Geist, -apple-system, sans-serif";
+        ctx.textBaseline = "middle";
+        ctx.fillText("Double-click to add a MIDI clip; select it to write its notes.", 12, y + lane.height / 2);
+      }
+      for (const c of lane.track.midi) drawMidiClip(ctx, c, colour, lane, s);
+      continue;
+    }
     if (lane.track.kind !== "audio") {
       ctx.fillStyle = p.faint;
       ctx.font = "11.5px Geist, -apple-system, sans-serif";
       ctx.textBaseline = "middle";
-      const hint = lane.track.kind === "sampler" ? "The Sampler's pattern plays on this track, from bar 1." : "An instrument track: its notes come with MIDI clips.";
-      ctx.fillText(hint, 12, y + lane.height / 2);
+      ctx.fillText("The Sampler's pattern plays on this track, from bar 1.", 12, y + lane.height / 2);
       continue;
     }
     const colour = COLOURS[lane.track.colour % COLOURS.length];

@@ -3,8 +3,9 @@
 // mocked invoke and answers the `timeline_*` commands, and sends ticks while
 // "playing". main.tsx loads it only in `npm run dev` builds with `?mock`.
 import { emit } from "@tauri-apps/api/event";
-import type { ClipIn, ClipView, Edit, SourceView, TimelineView, TrackView } from "./api";
+import type { ClipIn, ClipView, Edit, MidiClipIn, MidiClipView, SourceView, TimelineView, TrackView } from "./api";
 import { clipEnd, isLooped } from "./edits";
+import { isLoopedMidi, midiEnd, sortNotes } from "./midi";
 
 type Invoke = (cmd: string, args?: unknown, options?: unknown) => Promise<unknown>;
 
@@ -13,7 +14,31 @@ export function installMocks() {
   const inner = internals.invoke;
   const mix = () => ({ volume: 1, pan: 0, mute: false, solo: false });
   const v: TimelineView = {
-    tracks: [{ id: 1, name: "Sampler", kind: "sampler", colour: 0, height: 72, mix: mix(), clips: [] }],
+    tracks: [
+      { id: 1, name: "Sampler", kind: "sampler", colour: 0, height: 72, mix: mix(), clips: [], midi: [] },
+      // An instrument track, as "+ Instrument" makes, with a riff to edit.
+      {
+        id: 2,
+        name: "Keys",
+        kind: "instrument",
+        colour: 3,
+        height: 90,
+        mix: mix(),
+        clips: [],
+        midi: [
+          {
+            id: 1,
+            name: "Riff",
+            start: 4,
+            offset: 0,
+            content: 4,
+            phase: 0,
+            length: 8,
+            notes: [60, 63, 67, 70, 72, 67, 63, 65].map((key, i) => ({ id: i + 1, key, start: i * 0.5, length: 0.4, velocity: 70 + ((i * 17) % 57) })),
+          },
+        ],
+      },
+    ],
     sources: [],
     tempo: 120,
     signature: [4, 4],
@@ -27,8 +52,8 @@ export function installMocks() {
     canUndo: false,
     canRedo: false,
   };
-  let nextTrack = 2;
-  let nextClip = 1;
+  let nextTrack = 3;
+  let nextClip = 2;
   let playing = false;
   let beat = 0;
   let start = 0;
@@ -59,10 +84,21 @@ export function installMocks() {
   };
   const audio = (id: number) => v.tracks.find((t) => t.id === id && t.kind === "audio");
   const newTrack = (n: string): TrackView => {
-    const t: TrackView = { id: nextTrack++, name: n, kind: "audio", colour: v.tracks.length % 12, height: 72, mix: mix(), clips: [] };
+    const t: TrackView = { id: nextTrack++, name: n, kind: "audio", colour: v.tracks.length % 12, height: 72, mix: mix(), clips: [], midi: [] };
     v.tracks.push(t);
     return t;
   };
+  const instrument = (id: number) => v.tracks.find((t) => t.id === id && t.kind === "instrument");
+  const toMidi = (c: MidiClipIn, id: number, old?: MidiClipView): MidiClipView => ({
+    id,
+    name: c.name ?? old?.name ?? "MIDI",
+    start: c.start,
+    offset: c.offset,
+    content: c.content,
+    phase: c.phase,
+    length: c.length,
+    notes: sortNotes(c.notes ?? old?.notes ?? []),
+  });
   const toClip = (c: ClipIn, id: number): ClipView => ({ id, path: c.path, name: name(c.path), start: c.start, offset: c.offset, content: c.content, phase: c.phase, length: c.length, fadeIn: c.fadeIn, fadeOut: c.fadeOut, gainDb: c.gainDb });
 
   const handle = (cmd: string, a: Record<string, unknown>): unknown => {
@@ -84,9 +120,19 @@ export function installMocks() {
       }
       case "timeline_edit": {
         const e = a.edit as Edit;
+        if ((e.midi ?? []).some((m) => !instrument(m.track))) throw "that's not an instrument track; put MIDI clips on an instrument track";
         checkpoint();
-        const gone = new Set([...e.delete, ...e.clips.flatMap((c) => (c.id ? [c.id] : []))]);
-        for (const t of v.tracks) t.clips = t.clips.filter((c) => !gone.has(c.id));
+        const olds = new Map(v.tracks.flatMap((t) => t.midi.map((c) => [c.id, c] as const)));
+        const gone = new Set([...e.delete, ...e.clips.flatMap((c) => (c.id ? [c.id] : [])), ...(e.midi ?? []).flatMap((c) => (c.id ? [c.id] : []))]);
+        for (const t of v.tracks) {
+          t.clips = t.clips.filter((c) => !gone.has(c.id));
+          t.midi = t.midi.filter((c) => !gone.has(c.id));
+        }
+        for (const m of e.midi ?? []) {
+          const t = instrument(m.track)!;
+          t.midi.push(toMidi(m, m.id ?? nextClip++, m.id ? olds.get(m.id) : undefined));
+          t.midi.sort((x, y) => x.start - y.start);
+        }
         const fresh = e.clips.some((c) => c.track === 0) ? newTrack(name(e.clips.find((c) => c.track === 0)!.path)) : null;
         for (const c of e.clips) {
           const t = c.track === 0 ? fresh! : audio(c.track);
@@ -102,6 +148,17 @@ export function installMocks() {
         checkpoint();
         let done = 0;
         for (const t of v.tracks) {
+          t.midi = t.midi.flatMap((c) => {
+            if ((ids.length && !ids.includes(c.id)) || !(c.start < at && at < midiEnd(c))) return [c];
+            done++;
+            const n = at - c.start;
+            if (isLoopedMidi(c)) return [{ ...c, length: n }, { ...c, id: nextClip++, start: at, length: c.length - n, phase: (c.phase + n) % c.content }];
+            const cut = c.offset + c.phase + n;
+            return [
+              { ...c, length: n, content: c.phase + n, notes: c.notes.filter((x) => x.start < cut).map((x) => ({ ...x, length: Math.min(x.length, cut - x.start) })) },
+              { ...c, id: nextClip++, start: at, offset: cut, phase: 0, content: c.content - c.phase - n, length: c.length - n, notes: c.notes.filter((x) => x.start + x.length > cut).map((x) => (x.start < cut ? { ...x, start: cut, length: x.start + x.length - cut } : x)) },
+            ];
+          });
           t.clips = t.clips.flatMap((c) => {
             if ((ids.length && !ids.includes(c.id)) || !(c.start < at && at < clipEnd(c, v.tempo))) return [c];
             done++;
@@ -159,6 +216,8 @@ export function installMocks() {
         playing = a.playing as boolean;
         beat = start;
         return null;
+      case "timeline_preview":
+        return null;
       case "timeline_peaks": {
         const s = source(a.path as string);
         const bucket = [16, 64, 256, 1024, 4096, 16384][a.level as number];
@@ -193,7 +252,7 @@ export function installMocks() {
       if (v.loopOn && beat >= v.loopEnd) beat = v.loopStart + ((beat - v.loopEnd) % (v.loopEnd - v.loopStart));
     }
     last = now;
-    const levels = v.tracks.map((t) => [t.id, playing && t.clips.some((c) => c.start <= beat && beat < clipEnd(c, v.tempo)) ? 0.5 : 0]);
+    const levels = v.tracks.map((t) => [t.id, playing && (t.clips.some((c) => c.start <= beat && beat < clipEnd(c, v.tempo)) || t.midi.some((c) => c.start <= beat && beat < midiEnd(c))) ? 0.5 : 0]);
     const tick = { playing, beat: playing ? beat : start, tempo: v.tempo, signature: v.signature, levels };
     const text = JSON.stringify(tick);
     if (text !== sent) void emit("timeline:tick", tick);

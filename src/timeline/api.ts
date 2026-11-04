@@ -28,16 +28,43 @@ export interface ClipView {
   gainDb: number;
 }
 
+/** A note, in beats of its clip's own time. `id` names it within its clip. */
+export interface MidiNote {
+  id: number;
+  /** 0..127; 60 is C3. */
+  key: number;
+  start: number;
+  length: number;
+  /** 1..127. */
+  velocity: number;
+}
+
+/** A MIDI clip: all in beats. It plays `length` beats of its notes from
+ *  `offset + phase`, looping over `content` beats from `offset` when
+ *  `phase + length` runs past them, as an audio clip loops over its file. */
+export interface MidiClipView {
+  id: number;
+  name: string;
+  start: number;
+  offset: number;
+  content: number;
+  phase: number;
+  length: number;
+  /** Sorted by start, then key. */
+  notes: MidiNote[];
+}
+
 export interface TrackView {
   id: number;
   name: string;
-  /** Clips go on audio tracks; the Sampler's and instrument tracks show their mix. */
+  /** Audio clips go on audio tracks, MIDI clips on instrument tracks; the Sampler's shows its mix. */
   kind: "sampler" | "audio" | "instrument";
   /** An index into COLOURS. */
   colour: number;
   height: number;
   mix: TrackMix;
   clips: ClipView[];
+  midi: MidiClipView[];
 }
 
 export interface SourceView {
@@ -92,10 +119,26 @@ export interface ClipIn {
   gainDb: number;
 }
 
+/** A MIDI clip to add (no id) or change, on an instrument track. Without
+ *  `notes`, an existing clip keeps its own and a new one starts empty. */
+export interface MidiClipIn {
+  id?: number | null;
+  track: number;
+  name?: string;
+  start: number;
+  offset: number;
+  content: number;
+  phase: number;
+  length: number;
+  notes?: MidiNote[];
+}
+
 export interface Edit {
   /** The kind of edit: a run of the same kind undoes as one step. */
   key: string;
   clips: ClipIn[];
+  midi?: MidiClipIn[];
+  /** Clips of either kind. */
   delete: number[];
 }
 
@@ -135,6 +178,10 @@ export const setView = (change: ViewChange) => invoke<TimelineView>("timeline_vi
 export const setLoop = (on: boolean, start: number, end: number) => invoke<TimelineView>("timeline_loop", { on, start, end });
 export const seek = (beat: number) => invoke<void>("timeline_seek", { beat });
 export const play = (playing: boolean) => invoke<void>("timeline_play", { playing });
+/** Plays `key` on an instrument track's instrument (`on`), or lets go of it. */
+export const previewNote = (track: number, key: number, velocity: number, on: boolean) => invoke<void>("timeline_preview", { track, key, velocity, on });
+/** Lets go of every note the keyboard is holding on the track. */
+export const previewOff = (track: number) => invoke<void>("timeline_preview", { track, key: null, velocity: null, on: false });
 /** A file's peaks at `level`: min then max of each bucket, signed bytes. */
 export const peaks = (path: string, level: number) => invoke<ArrayBuffer>("timeline_peaks", { path, level });
 
