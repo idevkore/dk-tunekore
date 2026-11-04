@@ -79,6 +79,7 @@ struct TrackSnap {
     id: TrackId,
     /// Index into the graph's per-track state and the meters.
     slot: usize,
+    notes: Option<usize>,
     source: Option<usize>,
     chain: Vec<usize>,
     /// Left and right gain with volume, pan, mute and solo applied.
@@ -99,6 +100,8 @@ struct TrackDoc {
     name: String,
     kind: TrackKind,
     mix: TrackMix,
+    /// A device that runs ahead of the source and hands it notes (a MIDI clip player).
+    notes: Option<usize>,
     source: Option<usize>,
     chain: Vec<usize>,
 }
@@ -171,7 +174,7 @@ impl Mixer {
             .find(|s| self.tracks.iter().all(|t| t.slot != *s))
             .ok_or(format!("tuneKore runs at most {TRACK_SLOTS} tracks"))?;
         self.next_id = self.next_id.max(id.0.saturating_add(1));
-        self.tracks.push(TrackDoc { id, slot, name: name.to_string(), kind: TrackKind::default(), mix: TrackMix::default(), source: None, chain: Vec::new() });
+        self.tracks.push(TrackDoc { id, slot, name: name.to_string(), kind: TrackKind::default(), mix: TrackMix::default(), notes: None, source: None, chain: Vec::new() });
         self.changed();
         Ok(())
     }
@@ -194,7 +197,7 @@ impl Mixer {
     pub fn remove_track(&mut self, id: TrackId) -> Result<(), String> {
         let i = self.index(id)?;
         let t = self.tracks.remove(i);
-        for slot in t.source.into_iter().chain(t.chain) {
+        for slot in t.notes.into_iter().chain(t.source).chain(t.chain) {
             self.free(slot);
         }
         self.changed();
@@ -255,6 +258,28 @@ impl Mixer {
     pub fn restore_source(&mut self, id: TrackId, device: Box<dyn Device>) -> Result<(), String> {
         let before = self.revision();
         self.set_source(id, Some(device))?;
+        self.revision.store(before, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Puts a device in a track's notes slot, which runs ahead of its source
+    /// (a MIDI clip player, whose notes the instrument in the source slot
+    /// plays), or empties it. The old one is dropped on this thread.
+    pub fn set_notes(&mut self, id: TrackId, device: Option<Box<dyn Device>>) -> Result<(), String> {
+        let i = self.index(id)?;
+        let slot = device.map(|d| self.put(d)).transpose()?;
+        let old = std::mem::replace(&mut self.tracks[i].notes, slot);
+        if let Some(old) = old {
+            self.free(old);
+        }
+        self.changed();
+        Ok(())
+    }
+
+    /// [`set_notes`](Self::set_notes) without an edit, as [`restore_source`](Self::restore_source).
+    pub fn restore_notes(&mut self, id: TrackId, device: Box<dyn Device>) -> Result<(), String> {
+        let before = self.revision();
+        self.set_notes(id, Some(device))?;
         self.revision.store(before, Ordering::Relaxed);
         Ok(())
     }
@@ -355,6 +380,7 @@ impl Mixer {
                 self.pending.clear();
                 // Not an edit: the track list and mixes a project saves are unchanged.
                 for t in &mut self.tracks {
+                    t.notes = None;
                     t.source = None;
                     t.chain.clear();
                 }
@@ -408,6 +434,7 @@ impl Mixer {
                 TrackSnap {
                     id: t.id,
                     slot: t.slot,
+                    notes: t.notes,
                     source: t.source,
                     chain: t.chain.clone(),
                     gains: if audible { t.mix.gains() } else { [0.0; 2] },
@@ -641,7 +668,7 @@ impl Graph {
             events.clear();
             // Devices run even on a muted track, so its sequencer and its
             // plugins stay in time.
-            for &slot in t.source.iter().chain(&t.chain) {
+            for &slot in t.notes.iter().chain(&t.source).chain(&t.chain) {
                 if let Some(d) = devices.get_mut(slot).and_then(Option::as_mut) {
                     d.process(ctx, events, Buffers { left: &mut *l, right: &mut *r });
                 }
@@ -708,6 +735,7 @@ fn approach(current: f32, target: f32, step: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::device::Event;
     use crate::testing::realtime;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
@@ -1003,5 +1031,68 @@ mod tests {
         rig.graph.run(&mut rig.clock, &rig.shared, 64);
         let (l, _) = rig.graph.master();
         assert!(l.iter().all(|&x| x == 0.5), "only B, from its first frame");
+    }
+
+    /// Pushes a note at `frame` of every piece: a stand-in MIDI clip player.
+    struct Notes(u32);
+    impl Device for Notes {
+        fn process(&mut self, _: &ProcessContext, events: &mut Events, _: Buffers<'_>) {
+            events.push(Event::NoteOn { frame: self.0, channel: 0, key: 60, velocity: 0.5 });
+        }
+    }
+
+    /// Plays each note's velocity from its frame on: a stand-in instrument.
+    struct Synth;
+    impl Device for Synth {
+        fn process(&mut self, _: &ProcessContext, events: &mut Events, audio: Buffers<'_>) {
+            for e in events.as_slice() {
+                if let Event::NoteOn { frame, velocity, .. } = *e {
+                    audio.left[frame as usize..].iter_mut().for_each(|x| *x += velocity);
+                    audio.right[frame as usize..].iter_mut().for_each(|x| *x += velocity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn notes_from_the_notes_slot_reach_the_source_in_the_same_block() {
+        let mut m = Mixer::new();
+        let t = m.add_track("Synth").unwrap();
+        m.set_source(t, Some(Box::new(Synth))).unwrap();
+        m.set_notes(t, Some(Box::new(Notes(10)))).unwrap();
+        m.insert(t, 0, Box::new(Gain(2.0))).unwrap();
+        let mut rig = Rig::new(m);
+        let (_, allocs) = realtime(|| rig.graph.run(&mut rig.clock, &rig.shared, 64));
+        assert_eq!(allocs, 0, "the notes slot runs without the heap");
+        let (l, r) = rig.graph.master();
+        assert_eq!((l[9], l[10], r[63]), (0.0, 1.0, 1.0), "the note lands on its frame, then the chain doubles it");
+
+        // Emptied, the source hears nothing; a new notes device goes in without an edit.
+        rig.mixer.set_notes(t, None).unwrap();
+        assert_eq!(rig.run(64), (0.0, 0.0));
+        let rev = rig.mixer.revision();
+        rig.mixer.restore_notes(t, Box::new(Notes(0))).unwrap();
+        assert_eq!(rig.mixer.revision(), rev, "restoring is not an edit");
+        assert_eq!(rig.run(64), (1.0, 1.0));
+        assert!(rig.mixer.set_notes(TrackId(99), None).is_err());
+    }
+
+    #[test]
+    fn a_notes_device_comes_home_with_the_others_and_goes_with_its_track() {
+        let prepared = Arc::new(AtomicUsize::new(0));
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut m = Mixer::new();
+        let t = m.add_track("T").unwrap();
+        m.set_notes(t, Some(Box::new(Probe { dropped: dropped.clone(), prepared: prepared.clone() }))).unwrap();
+        drop(m.start(RATE));
+        assert!(m.stopped());
+        assert_eq!(prepared.load(Ordering::Relaxed), 1, "prepared with the others");
+        assert!(!dropped.load(Ordering::Relaxed), "it came home");
+        let graph = m.start(RATE);
+        assert_eq!(prepared.load(Ordering::Relaxed), 2);
+        m.remove_track(t).unwrap();
+        drop(graph);
+        assert!(m.stopped());
+        assert!(dropped.load(Ordering::Relaxed), "removing the track freed it");
     }
 }
