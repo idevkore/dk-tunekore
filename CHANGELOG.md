@@ -37,6 +37,40 @@ idevkore/dk-tunekore#44
   the audio output closing, leaves nothing half written, and any file that
   was already there stays as it was. Playback stops while it exports.
 
+## 0.1.20: CLAP plugins
+
+idevkore/dk-tunekore#39
+
+- **CLAP plugins**, beside VST3. The scan now also looks in
+  `/Library/Audio/Plug-Ins/CLAP`, `~/Library/Audio/Plug-Ins/CLAP` and
+  `CLAP_PATH`, in the same helper program, so a CLAP plugin that crashes,
+  hangs or throws while it is looked at can't take tuneKore down.
+- The plugin list shows each plugin's format (VST3 or CLAP), and you can
+  search for either. A CLAP plugin goes on an instrument track, in any
+  track's chain or on a Sampler pad, opens its window like a VST3 one, plays
+  notes, controllers and automation, and is saved with the project with its
+  sound. A knob turned in its window counts as a change to the project, even
+  while the plugin is switched off. One that isn't installed when a project
+  opens shows as missing, with its sound kept.
+- None of the plugins on the test Mac ship as CLAP yet, so this was tested
+  with a CLAP test plugin written for tuneKore's tests and one that
+  misbehaves on purpose.
+
+## 0.1.19: stem sends never overwrite
+
+idevkore/dk-tunekore#53
+
+- Fixed: sending a stem from the Analyzer to the pads again no longer writes
+  over the first file, so pads and saved projects that use it keep their
+  sound. A new send goes to a new file, numbered " 2", " 3"… as the Timeline
+  send already did, and a file of that name from another project is never
+  touched. A chopped set keeps one number for all its slices.
+- Both sends, to the pads and to the Timeline, claim each file before they
+  write it, so two sends at once can't pick the same name, and a send that
+  fails part way leaves no empty files. Tests send a whole stem and a chop
+  twice, and over another project's file, and check that the first files are
+  unchanged byte for byte.
+
 ## 0.1.18: plugins on tracks and pads
 
 idevkore/dk-tunekore#37

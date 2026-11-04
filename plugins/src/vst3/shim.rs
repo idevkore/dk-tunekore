@@ -115,7 +115,7 @@ pub fn readable(raw: &str) -> String {
 }
 
 #[inline]
-fn finish<T>(status: i32, out: T) -> Guarded<T> {
+pub(crate) fn finish<T>(status: i32, out: T) -> Guarded<T> {
     if status == 0 { Ok(out) } else { Err(thrown()) }
 }
 

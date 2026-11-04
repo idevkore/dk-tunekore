@@ -393,7 +393,8 @@ pub struct ToPads {
 /// one pad: `first_pad`, or the first free pad when `None`) or `"chop"`
 /// (`count` slices from `from_seconds`, cut at its transients, on the pads
 /// from `first_pad`). The audio is written as WAV under Music/tuneKore/Samples,
-/// so a saved project can find it again.
+/// so a saved project can find it again, in new files numbered as `claim`
+/// does: sending again never changes what pads and projects already play.
 #[tauri::command]
 pub async fn analyzer_to_pads(
     stem: String,
@@ -415,40 +416,23 @@ pub async fn analyzer_to_pads(
         let rate = stems.sample_rate;
         std::fs::create_dir_all(&folder).map_err(|e| format!("can't make {}: {e}", folder.display()))?;
         let base = format!("{} - {}", safe_name(&loaded.name), title(&stem));
-        let mut pads = Vec::new();
-        match how.as_str() {
+        let files: Vec<(usize, PathBuf)> = match how.as_str() {
             "whole" => {
                 let pad = first_pad.or_else(|| crate::sampler::first_free_pad(&a)).ok_or("every pad is in use; clear one first")?;
-                let path = folder.join(format!("{base}.wav"));
-                export_wav(audio, rate, &path)?;
-                crate::sampler::load_pad(&a, pad, &path, Default::default())?;
-                pads.push(pad);
+                vec![(pad, write_whole(&folder, &base, audio, rate)?)]
             }
             "chop" => {
                 let first = first_pad.unwrap_or(0).min(tunekore_engine::PADS - 1);
                 let count = count.clamp(1, tunekore_engine::PADS - first);
-                let frames = audio.first().map_or(0, Vec::len);
-                let from = ((from_seconds.max(0.0) * rate as f64) as usize).min(frames);
-                // About half a second of audio per slice: 4 bars at 120 BPM for 16 slices.
-                let to = (from + count * rate as usize / 2).min(frames);
-                if to <= from + rate as usize / 20 {
-                    return Err("move the playhead back: there is too little audio left to chop".into());
-                }
-                let mut starts = onsets(audio, rate, from, to, count);
-                if starts.len() < 2 {
-                    starts = even(from, to, count);
-                }
-                let stamp = from_seconds.max(0.0);
-                for (i, (s, e)) in slices(&starts, to, 2 * rate as usize).into_iter().enumerate() {
-                    let pad = first + i;
-                    let path = folder.join(format!("{base} @{}m{:04.1}s {:02}.wav", (stamp / 60.0) as u32, stamp % 60.0, i + 1));
-                    let slice: Vec<Vec<f32>> = audio.iter().map(|c| c[s..e].to_vec()).collect();
-                    export_wav(&slice, rate, &path)?;
-                    crate::sampler::load_pad(&a, pad, &path, Default::default())?;
-                    pads.push(pad);
-                }
+                let paths = write_slices(&folder, &base, audio, rate, from_seconds, count)?;
+                paths.into_iter().enumerate().map(|(i, path)| (first + i, path)).collect()
             }
             other => return Err(format!("unknown way to send to pads: {other}")),
+        };
+        let mut pads = Vec::new();
+        for (pad, path) in files {
+            crate::sampler::load_pad(&a, pad, &path, Default::default())?;
+            pads.push(pad);
         }
         Ok(ToPads { pads, folder: folder.display().to_string() })
     })
@@ -487,8 +471,7 @@ pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: Sta
         let mut files = Vec::new();
         for name in &names {
             let audio = separated.get(name).ok_or_else(|| format!("no stem called {name}"))?;
-            let path = free_name(&folder, &format!("{} - {}", safe_name(&loaded.name), title(name)));
-            export_wav(audio, separated.sample_rate, &path)?;
+            let path = write_whole(&folder, &format!("{} - {}", safe_name(&loaded.name), title(name)), audio, separated.sample_rate)?;
             files.push((path, title(name)));
         }
         crate::timeline::add_tracks(&app, &files, 0.0)?;
@@ -498,17 +481,101 @@ pub async fn analyzer_to_timeline(stems: Vec<String>, app: AppHandle, state: Sta
     .map_err(|e| e.to_string())?
 }
 
-/// `<base>.wav` in `folder`, or `<base> 2.wav`, `<base> 3.wav`... when it is
-/// taken: a stem sent to the Timeline again never writes over the file that
-/// clips and saved projects already play.
-fn free_name(folder: &Path, base: &str) -> PathBuf {
-    let mut path = folder.join(format!("{base}.wav"));
-    let mut n = 2;
-    while path.exists() {
-        path = folder.join(format!("{base} {n}.wav"));
+/// Writes a whole stem to a new file in `folder`, `<base>.wav` or numbered
+/// as `claim` does. The pads and the Timeline both send stems this way.
+fn write_whole(folder: &Path, base: &str, audio: &[Vec<f32>], rate: u32) -> Result<PathBuf, String> {
+    claim(folder, &[base.to_string()])?.write(audio, rate)
+}
+
+/// Cuts `count` slices of `audio` from `from_seconds`, at its transients, and
+/// writes them to new files in `folder`: `<base> @0m12.5s 01.wav`, `02`...,
+/// numbered as one set as `claim` does.
+fn write_slices(
+    folder: &Path,
+    base: &str,
+    audio: &[Vec<f32>],
+    rate: u32,
+    from_seconds: f64,
+    count: usize,
+) -> Result<Vec<PathBuf>, String> {
+    let frames = audio.first().map_or(0, Vec::len);
+    let from = ((from_seconds.max(0.0) * rate as f64) as usize).min(frames);
+    // About half a second of audio per slice: 4 bars at 120 BPM for 16 slices.
+    let to = (from + count * rate as usize / 2).min(frames);
+    if to <= from + rate as usize / 20 {
+        return Err("move the playhead back: there is too little audio left to chop".into());
+    }
+    let mut starts = onsets(audio, rate, from, to, count);
+    if starts.len() < 2 {
+        starts = even(from, to, count);
+    }
+    let stamp = from_seconds.max(0.0);
+    let spans = slices(&starts, to, 2 * rate as usize);
+    let names: Vec<String> =
+        (1..=spans.len()).map(|i| format!("{base} @{}m{:04.1}s {i:02}", (stamp / 60.0) as u32, stamp % 60.0)).collect();
+    let mut files = claim(folder, &names)?;
+    spans
+        .into_iter()
+        .map(|(s, e)| {
+            let slice: Vec<Vec<f32>> = audio.iter().map(|c| c[s..e].to_vec()).collect();
+            files.write(&slice, rate)
+        })
+        .collect()
+}
+
+/// Claims a new file in `folder` for each of `names`: `<name>.wav`, or
+/// `<name> 2.wav`, `<name> 3.wav`... for all of them when any is taken, so
+/// a set of slices keeps one number. Each file is created exclusively, so a
+/// send never writes over a file already there (one that pads, clips or a
+/// saved project, this one or another, may play), and two sends at once
+/// never get the same file.
+fn claim(folder: &Path, names: &[String]) -> Result<Claim, String> {
+    let mut n = 1;
+    loop {
+        let mut claimed = Claim { paths: Vec::with_capacity(names.len()), written: 0 };
+        let mut taken = false;
+        for name in names {
+            let path = folder.join(if n == 1 { format!("{name}.wav") } else { format!("{name} {n}.wav") });
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(_) => claimed.paths.push(path),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    taken = true;
+                    break;
+                }
+                Err(e) => return Err(format!("can't write {}: {e}", path.display())),
+            }
+        }
+        if !taken {
+            return Ok(claimed);
+        }
+        // Dropping `claimed` gives back the names this try took.
         n += 1;
     }
-    path
+}
+
+/// New, empty files from `claim`, written in order. Dropping it removes the
+/// ones not written yet, so a send that fails part way leaves no empty WAVs.
+struct Claim {
+    paths: Vec<PathBuf>,
+    written: usize,
+}
+
+impl Claim {
+    /// Writes `audio` to the next claimed file and returns its path.
+    fn write(&mut self, audio: &[Vec<f32>], rate: u32) -> Result<PathBuf, String> {
+        let path = self.paths.get(self.written).ok_or("every claimed file is written")?.clone();
+        export_wav(audio, rate, &path)?;
+        self.written += 1;
+        Ok(path)
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        for path in &self.paths[self.written..] {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 /// Where a song's stems and slices are written: Music/tuneKore/Samples/<song>.
@@ -588,13 +655,119 @@ pub fn setup(app: &AppHandle) {
 mod tests {
     use super::*;
 
+    const RATE: u32 = 44_100;
+
+    /// Two seconds of stereo tone; a different `level` gives different bytes.
+    fn stem(level: f32) -> Vec<Vec<f32>> {
+        let tone = |f: f32| (0..2 * RATE as usize).map(|i| (i as f32 * f).sin() * level).collect();
+        vec![tone(0.013), tone(0.021)]
+    }
+
+    fn bytes(path: &Path) -> Vec<u8> {
+        std::fs::read(path).unwrap()
+    }
+
+    fn wavs(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        names.sort();
+        names
+    }
+
     #[test]
-    fn a_stem_sent_again_gets_a_new_file() {
+    fn a_whole_stem_sent_again_gets_a_new_file() {
         let dir = tempfile::tempdir().unwrap();
-        let first = free_name(dir.path(), "Song - Drums");
+        let first = write_whole(dir.path(), "Song - Drums", &stem(0.4), RATE).unwrap();
         assert_eq!(first, dir.path().join("Song - Drums.wav"));
-        std::fs::write(&first, b"x").unwrap();
-        let second = free_name(dir.path(), "Song - Drums");
-        assert_eq!(second, dir.path().join("Song - Drums 2.wav"), "the first isn't written over");
+        let before = bytes(&first);
+        let second = write_whole(dir.path(), "Song - Drums", &stem(0.2), RATE).unwrap();
+        assert_eq!(second, dir.path().join("Song - Drums 2.wav"));
+        let third = write_whole(dir.path(), "Song - Drums", &stem(0.1), RATE).unwrap();
+        assert_eq!(third, dir.path().join("Song - Drums 3.wav"));
+        assert_eq!(bytes(&first), before, "the first file is as it was");
+        assert_ne!(bytes(&second), before, "the second send's audio went to its own file");
+    }
+
+    #[test]
+    fn a_whole_stem_never_writes_over_another_projects_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("Song - Drums.wav");
+        std::fs::write(&theirs, b"another project's drums").unwrap();
+        let ours = write_whole(dir.path(), "Song - Drums", &stem(0.4), RATE).unwrap();
+        assert_eq!(ours, dir.path().join("Song - Drums 2.wav"));
+        assert_eq!(bytes(&theirs), b"another project's drums");
+    }
+
+    #[test]
+    fn slices_chopped_again_get_new_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = write_slices(dir.path(), "Song - Drums", &stem(0.4), RATE, 0.0, 4).unwrap();
+        let names: Vec<PathBuf> = (1..=4).map(|i| dir.path().join(format!("Song - Drums @0m00.0s {i:02}.wav"))).collect();
+        assert_eq!(first, names);
+        let before: Vec<Vec<u8>> = first.iter().map(|p| bytes(p)).collect();
+
+        // A longer chop of the same spot: the whole set takes the next number,
+        // slices 05 to 08 too, though nothing used those names yet.
+        let second = write_slices(dir.path(), "Song - Drums", &stem(0.2), RATE, 0.0, 8).unwrap();
+        let numbered: Vec<PathBuf> = (1..=8).map(|i| dir.path().join(format!("Song - Drums @0m00.0s {i:02} 2.wav"))).collect();
+        assert_eq!(second, numbered);
+        for (path, was) in first.iter().zip(&before) {
+            assert_eq!(&bytes(path), was, "{} is as it was", path.display());
+        }
+        assert_ne!(bytes(&second[0]), before[0], "the second chop's audio went to its own files");
+        assert_eq!(wavs(dir.path()).len(), 12, "no stray files: {:?}", wavs(dir.path()));
+    }
+
+    #[test]
+    fn slices_never_write_over_another_projects_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let theirs = dir.path().join("Song - Drums @0m01.0s 03.wav");
+        std::fs::write(&theirs, b"another project's slice").unwrap();
+        let ours = write_slices(dir.path(), "Song - Drums", &stem(0.4), RATE, 1.0, 4).unwrap();
+        let numbered: Vec<PathBuf> = (1..=4).map(|i| dir.path().join(format!("Song - Drums @0m01.0s {i:02} 2.wav"))).collect();
+        assert_eq!(ours, numbered);
+        assert_eq!(bytes(&theirs), b"another project's slice");
+        // Slices 01 and 02 were claimed before 03 was found taken; they're given back.
+        assert_eq!(wavs(dir.path()).len(), 5, "no empty files left behind: {:?}", wavs(dir.path()));
+    }
+
+    #[test]
+    fn two_sends_at_once_never_share_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sends = 8;
+        let start = std::sync::Barrier::new(sends);
+        let paths: Vec<(PathBuf, f32)> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..sends)
+                .map(|i| {
+                    let (dir, start) = (dir.path(), &start);
+                    let level = 0.1 + i as f32 * 0.1;
+                    s.spawn(move || {
+                        start.wait();
+                        (write_whole(dir, "Song - Drums", &stem(level), RATE).unwrap(), level)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let mut names: Vec<&PathBuf> = paths.iter().map(|(p, _)| p).collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), sends, "each send got its own file");
+        // Each file holds the audio of the send that claimed it.
+        let reference = tempfile::tempdir().unwrap();
+        for (path, level) in &paths {
+            let expected = reference.path().join(format!("{level}.wav"));
+            export_wav(&stem(*level), RATE, &expected).unwrap();
+            assert_eq!(bytes(path), bytes(&expected), "{}", path.display());
+        }
+    }
+
+    #[test]
+    fn a_claim_dropped_unwritten_leaves_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let names = vec!["a".to_string(), "b".to_string()];
+        let mut files = claim(dir.path(), &names).unwrap();
+        files.write(&stem(0.4), RATE).unwrap();
+        drop(files);
+        assert_eq!(wavs(dir.path()), ["a.wav"], "the written file stays, the unwritten one goes");
     }
 }

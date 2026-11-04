@@ -1,7 +1,8 @@
 //! `Plugin::process` must not allocate on our side: this counts every allocation made on the
-//! test's thread while `process` runs, against the fixture's "Fixture Thru", which allocates
-//! nothing itself. Notes, parameter ramps, edits from the UI, plugin output events and output
-//! parameter changes all go through the counted path.
+//! test's thread while `process` runs, against the fixtures' "Fixture Thru" and "Fixture CLAP
+//! Thru", which allocate nothing themselves. Notes, parameter ramps, edits from the UI, plugin
+//! output events and output parameter changes all go through the counted path, for VST3 and for
+//! CLAP.
 
 mod common;
 
@@ -179,6 +180,156 @@ fn full_lists_drop_and_count_without_allocating() {
     events.extend((0..100u32).map(|i| Event { offset: 255, kind: EventKind::NoteOff { channel: 0, key: (i % 128) as u8, velocity: 0.0, note_id: i as i32 } }));
     events.sort_by_key(|e| e.offset);
     // more parameters than there are queues, more points on one than a queue holds,
+    let mut changes: Vec<ParamChange> = (0..300u32).map(|id| ParamChange { id, offset: 0, value: 0.5 }).collect();
+    changes.extend((0..40u32).map(|i| ParamChange { id: 7, offset: i * 6, value: f64::from(i) / 40.0 }));
+    changes.sort_by_key(|c| c.offset);
+    // and more waiting UI values than a block takes.
+    for id in 0..300u32 {
+        c.set_param(50_000 + id, 0.5);
+    }
+    let dropped = counted_block(&mut *p, &events, &changes);
+    assert!(dropped.events > 0 && dropped.param_points > 0, "{dropped:?}");
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations inside process");
+}
+
+// ---- CLAP ----------------------------------------------------------------------------------
+
+#[test]
+fn clap_process_allocates_nothing() {
+    const FRAMES: usize = 256;
+    let mut c = common::load_clap_fixture("Fixture CLAP Thru");
+    let mut p = c.activate(&ProcessSetup { max_block_size: FRAMES as u32, ..ProcessSetup::default() }).unwrap();
+    assert_eq!((p.layout().input_channels(), p.layout().output_channels()), (2, 2));
+
+    let ins: Vec<Vec<f32>> = (0..2).map(|ch| (0..FRAMES).map(|i| (i + ch) as f32 / FRAMES as f32).collect()).collect();
+    let mut outs = vec![vec![0.0f32; FRAMES]; 2];
+    let mut table = ChannelTable::with_capacity(2, 2);
+    // Notes (sent as MIDI: the Thru takes MIDI only), controllers and pitch bend.
+    let mut events: Vec<Event> = (0..32u32).map(|i| Event { offset: i * 4, kind: EventKind::NoteOn { channel: 0, key: 40 + i as u8, velocity: 0.5, note_id: i as i32 } }).collect();
+    events.push(Event { offset: 200, kind: EventKind::ControlChange { channel: 0, controller: 1, value: 0.5 } });
+    events.push(Event { offset: 201, kind: EventKind::PitchBend { channel: 0, value: -0.5 } });
+    let ramp: Vec<ParamChange> = (0..8u32).flat_map(|i| [ParamChange { id: 100 + i, offset: 0, value: 0.0 }, ParamChange { id: 100 + i, offset: 128, value: 1.0 }]).collect();
+    let (mut midi, mut params) = (OutBuf::with_capacity(64), OutBuf::with_capacity(64));
+    let mut transport = Transport { playing: true, looping: true, loop_end_beats: 8.0, ..Transport::default() };
+
+    for block in 0..2000usize {
+        if block % 100 == 0 {
+            // An edit from the UI, waiting for the next block.
+            c.set_param(7, (block / 100) as f64 / 20.0);
+        }
+        midi.clear();
+        params.clear();
+        transport.project_samples = (block * FRAMES) as i64;
+        transport.continuous_samples = transport.project_samples;
+        transport.project_beats = transport.project_samples as f64 / 24_000.0;
+        COUNTING.with(|f| f.set(true));
+        let (inputs, outputs) = table.audio(&ins, &mut outs);
+        let mut b = ProcessBlock { frames: FRAMES, inputs, outputs, events: &events, param_changes: &ramp, transport: &transport, midi_out: &mut midi, param_out: &mut params };
+        let r = p.process(&mut b);
+        let dropped = p.take_dropped();
+        COUNTING.with(|f| f.set(false));
+        r.unwrap();
+        assert_eq!(dropped, Dropped::default());
+        assert_eq!(outs, ins, "audio passes through");
+        assert_eq!(midi.as_slice().len(), 34, "every note and controller handed back");
+        assert!(params.as_slice().len() >= 16, "the ramps come back too");
+    }
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations inside process");
+}
+
+#[test]
+fn clap_ports_that_are_off_in_place_buffers_and_flushes_allocate_nothing() {
+    const FRAMES: usize = 128;
+    // The Gain: its sidechain is off (silent buffers of our own), its input is also its output
+    // (copied first), and a zero-frame block hands values over through `params.flush`.
+    let mut c = common::load_clap_fixture("Fixture CLAP Gain");
+    let mut p = c.activate(&ProcessSetup { max_block_size: FRAMES as u32, ..ProcessSetup::default() }).unwrap();
+    let mut bufs = vec![vec![0.25f32; FRAMES]; 2];
+    let mut table = ChannelTable::with_capacity(2, 2);
+    let (mut midi, mut params) = (OutBuf::with_capacity(8), OutBuf::with_capacity(8));
+    let t = Transport::default();
+    let mut empty = [Vec::<f32>::new(), Vec::new()];
+    let empty_in = [Vec::<f32>::new(), Vec::new()];
+    for block in 0..500usize {
+        c.set_param(7, 0.5);
+        for b in &mut bufs {
+            b.fill(0.25);
+        }
+        COUNTING.with(|f| f.set(true));
+        let r = if block % 2 == 0 {
+            let (inputs, outputs) = table.in_place(&mut bufs, 2);
+            let mut b = ProcessBlock { frames: FRAMES, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+            p.process(&mut b)
+        } else {
+            let (inputs, outputs) = table.audio(&empty_in, &mut empty);
+            let mut b = ProcessBlock { frames: 0, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+            p.process(&mut b)
+        };
+        COUNTING.with(|f| f.set(false));
+        r.unwrap();
+        assert!(!c.has_pending_params(), "block {block} took the value");
+        if block % 2 == 0 {
+            assert_eq!(bufs, vec![vec![0.25f32; FRAMES]; 2], "gain 1, in place, the sidechain silent");
+        }
+    }
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations inside process");
+}
+
+#[test]
+fn a_clap_plugin_that_throws_in_process_is_switched_off_without_allocating() {
+    let dir = common::scratch_dir("clap-throws-in-process-alloc");
+    let Some(bundle) = common::bad_clap(&dir, "ClapThrowsInProcess", common::ClapMisbehaviour::ThrowsInProcess) else {
+        return eprintln!("skipped: no C++ compiler");
+    };
+    let info = clap::classes(&bundle).unwrap().remove(0);
+    let mut c = clap::load(&info).unwrap();
+    let mut p = c.activate(&ProcessSetup { max_block_size: 64, ..ProcessSetup::default() }).unwrap();
+    assert_eq!(p.layout().output_channels(), 2);
+    let none: [Vec<f32>; 0] = [];
+    let mut outs = vec![vec![1.0f32; 64]; 2];
+    let mut table = ChannelTable::with_capacity(0, 2);
+    let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
+    let t = Transport::default();
+    let note = [Event { offset: 0, kind: EventKind::NoteOn { channel: 0, key: 60, velocity: 1.0, note_id: 1 } }];
+
+    COUNTING.with(|f| f.set(true));
+    let (inputs, outputs) = table.audio(&none, &mut outs);
+    let mut b = ProcessBlock { frames: 64, inputs, outputs, events: &note, param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let first = p.process(&mut b);
+    let (inputs, outputs) = table.audio(&none, &mut outs);
+    let mut b = ProcessBlock { frames: 64, inputs, outputs, events: &note, param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    let second = p.process(&mut b);
+    COUNTING.with(|f| f.set(false));
+    assert_eq!(first, Err(ProcessError::Failed));
+    assert_eq!(second, Err(ProcessError::Failed), "not called again");
+    assert!(outs.iter().all(|ch| ch.iter().all(|&x| x == 0.0)), "silence");
+    assert_eq!(ALLOCATIONS.load(Ordering::Relaxed), 0, "allocations on the exception path");
+
+    let mut events = Vec::new();
+    c.poll(&mut events);
+    assert!(events.contains(&ControllerEvent::Failed));
+    events.clear();
+    c.poll(&mut events);
+    assert!(!events.contains(&ControllerEvent::Failed), "reported once");
+    let why = c.take_error().unwrap();
+    assert!(why.contains("clap_plugin.process") && why.contains("boom from process") && why.contains("std::runtime_error"), "{why}");
+    c.set_param(1, 0.5);
+    assert_eq!(c.param_text(1, 0.5), None);
+    assert!(c.save_state().is_err());
+    assert!(c.activate(&ProcessSetup::default()).is_err());
+    drop(p);
+    drop(c); // leaks the plugin instead of destroying it
+}
+
+#[test]
+fn clap_full_lists_drop_and_count_without_allocating() {
+    let mut c = common::load_clap_fixture("Fixture CLAP Thru");
+    let mut p = c.activate(&ProcessSetup { max_block_size: 256, ..ProcessSetup::default() }).unwrap();
+    // More notes than the list holds (the plugin hands them back into its own full list),
+    let mut events: Vec<Event> = (0..1100u32).map(|i| Event { offset: i % 256, kind: EventKind::NoteOn { channel: 0, key: (i % 128) as u8, velocity: 0.5, note_id: i as i32 } }).collect();
+    events.extend((0..100u32).map(|i| Event { offset: 255, kind: EventKind::NoteOff { channel: 0, key: (i % 128) as u8, velocity: 0.0, note_id: i as i32 } }));
+    events.sort_by_key(|e| e.offset);
+    // more parameters than a block takes, more points on one than it keeps,
     let mut changes: Vec<ParamChange> = (0..300u32).map(|id| ParamChange { id, offset: 0, value: 0.5 }).collect();
     changes.extend((0..40u32).map(|i| ParamChange { id: 7, offset: i * 6, value: f64::from(i) / 40.0 }));
     changes.sort_by_key(|c| c.offset);

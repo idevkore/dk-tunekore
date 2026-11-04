@@ -3,13 +3,14 @@
 // mocks: it wraps the mocked invoke and answers the `plugins_*` commands with
 // a made-up plugin list. main.tsx loads it only in `npm run dev` with `?mock`.
 import { emit } from "@tauri-apps/api/event";
-import type { CatalogEntry, CatalogView, DeviceView, PluginsView } from "./api";
+import type { CatalogEntry, CatalogView, DeviceView, Format, PluginsView } from "./api";
 
 type Invoke = (cmd: string, args?: unknown, options?: unknown) => Promise<unknown>;
 
-const entry = (name: string, vendor: string, kind: "instrument" | "effect", subCategories: string[]): CatalogEntry => ({
-  path: `/Library/Audio/Plug-Ins/VST3/${name}.vst3`,
-  classId: name.toUpperCase().replace(/\W/g, "").padEnd(32, "0").slice(0, 32),
+const entry = (name: string, vendor: string, kind: "instrument" | "effect", subCategories: string[], format: Format = "vst3"): CatalogEntry => ({
+  path: format === "clap" ? `/Library/Audio/Plug-Ins/CLAP/${name}.clap` : `/Library/Audio/Plug-Ins/VST3/${name}.vst3`,
+  classId: format === "clap" ? `dev.mock.${name.toLowerCase().replace(/\W/g, "")}` : name.toUpperCase().replace(/\W/g, "").padEnd(32, "0").slice(0, 32),
+  format,
   name,
   vendor,
   version: "1.0",
@@ -28,6 +29,8 @@ export function installMocks() {
       entry("Kontakt 7", "Native Instruments", "instrument", ["Instrument", "Sampler"]),
       entry("Guitar Rig 7", "Native Instruments", "effect", ["Fx", "Distortion"]),
       entry("Efx REFRACT", "Arturia", "effect", ["Fx", "Modulation"]),
+      entry("Mock Wavetable", "devKore", "instrument", ["instrument", "synthesizer"], "clap"),
+      entry("Mock Delay", "devKore", "effect", ["audio-effect", "delay"], "clap"),
     ],
     failed: [{ name: "Broken Synth", path: "/Library/Audio/Plug-Ins/VST3/Broken.vst3", status: "crashed", error: "it crashed while loading" }],
     scanning: false,

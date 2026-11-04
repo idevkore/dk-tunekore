@@ -533,6 +533,11 @@ pub enum ProcessError {
     /// The plugin returned an error from `process`.
     #[error("the plugin returned error {0} from process")]
     Plugin(i32),
+    /// The host was using the plugin on the main thread in the audio thread's place (a CLAP
+    /// parameter flush while no blocks were running), so this block was skipped. Rare: only a
+    /// block that starts during that call.
+    #[error("the plugin was busy on the main thread; this block was skipped")]
+    Busy,
 }
 
 /// The audio-thread half of a loaded plugin. See the module notes.

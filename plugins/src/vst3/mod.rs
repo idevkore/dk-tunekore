@@ -16,7 +16,7 @@ mod editor;
 mod events;
 mod host;
 mod instance;
-mod mailbox;
+pub(crate) mod mailbox;
 mod module;
 mod ptr;
 pub(crate) mod shim;
@@ -97,7 +97,7 @@ pub fn shutdown() {
     module::exit_modules();
 }
 
-/// Whether a category is something the engine puts on a track.
+/// Whether a category is something the engine puts on a track ([`crate::is_hostable`]).
 pub fn is_hostable(c: Category) -> bool {
-    matches!(c, Category::Instrument | Category::Effect)
+    crate::is_hostable(c)
 }

@@ -112,7 +112,9 @@ egui interface. Checked 2026-10-26 at commit `7dc56a4` (v0.13.1, pre-alpha).
 - **How:** copy the crates we use into this repo, unmodified at first, keep
   its license and NOTICE text with them, record them in `THIRD_PARTY.md`, and
   test them against the section 5 list before relying on them. It is
-  pre-alpha, so we own the testing.
+  pre-alpha, so we own the testing. The `clap-host` crate (#39) was read
+  rather than copied first: its single-threaded design didn't fit our two
+  halves, so `plugins/src/clap/` is new code built around the pieces it took.
 
 ## 2. Architecture
 
@@ -335,8 +337,36 @@ Where the next pieces go:
   requires. We support event lists, parameter changes, the process context,
   sidechain and extra output buses (Kontakt), and state through
   `getState`/`setState`.
-- **CLAP.** Through its C ABI (MIT), with the same host context, events and
-  state. soundCraft's `clap-host` crate is the starting point.
+- **CLAP (#39, built 2026-11-04).** Through `clap-sys` (bindings to
+  CLAP's MIT headers), behind the same traits as VST3 and with the same
+  rules: the C++ shim around every call, a main-thread controller and an
+  audio-thread processor, no allocation or locks in `process`, and a
+  plugin that throws or hangs switched off and leaked. Parameters are
+  normalized at our side and in the plugin's own units at CLAP's; notes
+  go as CLAP note events or MIDI, by what the plugin's note port takes;
+  every port gets buffers, silent ones for ports that are off. State is
+  the plugin's own `clap.state`, and editors use `clap.gui`, embedded in
+  the same windows as VST3's. soundCraft's `clap-host` was the starting
+  point (read, not copied: see `plugins/third_party/soundcraft/`).
+  - **Threads.** `activate`, `deactivate` and every main-thread call run
+    on the controller's thread; `start_processing` and `process` on the
+    audio thread. The host's thread check calls the thread that made the
+    plugin the main thread, and the thread inside an audio-thread call
+    the audio thread (no thread between calls). Two audio-thread calls
+    run on the main thread in the audio thread's place when no block can
+    run, as CLAP 1.2 allows: `stop_processing` when stopping (the
+    processor is stale by then), and a parameter flush the plugin asked
+    for while no blocks come (a switched-off device), so an edit in its
+    window still reaches the project. A block that starts during that
+    flush is skipped.
+  - **Polling.** What a plugin asks of the main thread (`request_callback`,
+    timers, parameter flushes, editor resizes) is served by the
+    controller's `poll`, which the app runs every 100 ms. A timer
+    therefore fires at most every 100 ms, and a flush asked for while
+    blocks run waits for the next block.
+  - Not yet: `audio-ports-config` (channel counts are the plugin's own),
+    `posix-fd-support` (Linux editors), parameter modulation, timers from
+    the run loop.
 - **No Audio Units.** Dropped on 2026-10-26 (new tech only). Every plugin on
   the test list ships as VST3.
 - **C++ exceptions** thrown by a plugin are caught by a small C++ shim around
@@ -387,13 +417,19 @@ Where the next pieces go:
     and loading a plugin runs its code (with library validation off, and a
     `.tunek` opening from the Finder), so a plugin loads only from the scan's
     list (found by class id, wherever the scan found it) or from a bundle
-    inside a plugin folder (`/Library/Audio/Plug-Ins/VST3`,
-    `~/Library/Audio/Plug-Ins/VST3`, `VST3_PATH`), after following links.
-    Anything else stays missing.
+    inside a plugin folder (VST3's `/Library/Audio/Plug-Ins/VST3`,
+    `~/Library/Audio/Plug-Ins/VST3` and `VST3_PATH`, and CLAP's
+    `/Library/Audio/Plug-Ins/CLAP`, `~/Library/Audio/Plug-Ins/CLAP` and
+    `CLAP_PATH`), after following links, and only in the format the project
+    names (a `.clap` saved as VST3 stays missing). Anything else stays
+    missing.
   - Every plugin is activated on its **main stereo bus**. Kontakt's other
-    outputs and Solid Bus Comp's sidechain wait for the Mixer (#43).
+    outputs and Solid Bus Comp's sidechain wait for the Mixer (#43). A CLAP
+    plugin keeps its own channel counts (no `audio-ports-config` yet); its
+    other ports get silent buffers.
   - **Quitting** takes every plugin off its track, closes the output and runs
-    `vst3::shutdown()`.
+    `tunekore_plugins::shutdown()`: each VST3 module's `bundleExit`, then
+    each CLAP module's `clap_entry.deinit`.
   - `TUNEKORE_PLUGINS_CHECK=<report>` in a debug build runs the section 5
     test list inside the running app (see `src-tauri/src/plugins/check.rs`).
 - **Automation.** Each plugin parameter can be automated sample-accurately in
@@ -482,7 +518,10 @@ play from a pad.
 
 ## 5. Plugins and hardware: what "support Serum, Arturia and Splice" means
 
-On this Mac every plugin is installed as both AU and VST3, with no CLAP.
+On this Mac every plugin is installed as both AU and VST3, with no CLAP, and
+none of them ships as CLAP (checked 2026-11-04). CLAP hosting (#39) is tested
+with its own test plugin; for a real one, install Six Sines (MIT) or DPF's
+Kars (ISC).
 tuneKore hosts the VST3 builds (section 1):
 
 - **Xfer:** Serum, Serum 2

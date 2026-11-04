@@ -1,6 +1,6 @@
-//! Loads a VST3 plugin, plays notes through it offline and writes a WAV file.
+//! Loads a VST3 or CLAP plugin, plays notes through it offline and writes a WAV file.
 //!
-//!     cargo run --release --example render -- <plugin.vst3> [options]
+//!     cargo run --release --example render -- <plugin.vst3|plugin.clap> [options]
 //!
 //!     --name NAME | --class ID   which plugin in the bundle (default: the first)
 //!     --seconds N                length of the render (default 4)
@@ -61,7 +61,7 @@ fn parse() -> Result<Args, String> {
 }
 
 fn pick(a: &Args) -> Result<PluginInfo, String> {
-    let all = vst3::classes(&a.bundle).map_err(|e| e.to_string())?;
+    let all = classes(scan::bundles::format_of(&a.bundle).unwrap_or(Format::Vst3), &a.bundle).map_err(|e| e.to_string())?;
     if all.is_empty() {
         return Err("no audio plugins in this bundle".into());
     }
@@ -97,8 +97,8 @@ fn level(r: &offline::Rendered) -> String {
 
 fn main() {
     run();
-    // Unload the plugins' modules before the process exits (see `vst3::shutdown`).
-    vst3::shutdown();
+    // Let the plugins' modules exit before the process does (see `vst3::shutdown`).
+    shutdown();
 }
 
 fn run() {
@@ -112,7 +112,7 @@ fn run() {
     };
     println!("plugin: {} ({}) {} [{:?}] class {}", info.name, info.vendor, info.version, info.category, info.class_id);
     let t = Instant::now();
-    let mut c = match vst3::load(&info) {
+    let mut c = match load(&info) {
         Ok(c) => c,
         Err(e) => return println!("load failed: {e}"),
     };
@@ -152,7 +152,7 @@ fn run() {
             Err(e) => return println!("save state failed: {e}"),
         };
         println!("state: saved {} bytes", state.len());
-        let mut fresh = match vst3::load(&info) {
+        let mut fresh = match load(&info) {
             Ok(c) => c,
             Err(e) => return println!("second load failed: {e}"),
         };
@@ -170,7 +170,7 @@ fn run() {
             Err(e) => return println!("restored render failed: {e}"),
         }
         if !a.params.is_empty() {
-            let mut plain = vst3::load(&info).expect("a third load");
+            let mut plain = load(&info).expect("a third load");
             if let Ok(third) = offline::render(&mut *plain, &RenderSpec { params: Vec::new(), ..spec.clone() }) {
                 println!("state-check: control without the state: largest difference from the first render {:e}", offline::max_difference(&first, &third));
             }

@@ -93,6 +93,25 @@ impl ParamMailbox {
         }
     }
 
+    /// The value waiting for `id`, if one is. Any thread; it may be taken a moment later.
+    pub fn peek(&self, id: u32) -> Option<f64> {
+        if id == EMPTY {
+            return None;
+        }
+        let mut i = (id.wrapping_mul(0x9E37_79B1) as usize) & self.mask;
+        for _ in 0..=self.mask {
+            match self.ids[i].load(Ordering::Acquire) {
+                cur if cur == id => {
+                    let waiting = self.dirty[i / 64].load(Ordering::Acquire) & (1 << (i % 64)) != 0;
+                    return waiting.then(|| f64::from_bits(self.values[i].load(Ordering::Acquire)));
+                }
+                EMPTY => return None,
+                _ => i = (i + 1) & self.mask,
+            }
+        }
+        None
+    }
+
     /// Whether any value is waiting.
     pub fn pending(&self) -> bool {
         self.dirty.iter().any(|w| w.load(Ordering::Acquire) != 0)
@@ -126,7 +145,9 @@ mod tests {
         m.post(7, 0.2);
         m.post(1_000_003, 0.9);
         assert!(m.pending());
+        assert_eq!((m.peek(7), m.peek(8)), (Some(0.2), None), "peeking takes nothing");
         assert_eq!(taken(&m), vec![(7, 0.2), (1_000_003, 0.9)], "only the latest value of 7");
+        assert_eq!(m.peek(7), None, "taken: nothing waits");
         assert!(!m.pending());
         assert!(taken(&m).is_empty(), "taken once");
         m.post(7, 0.3);

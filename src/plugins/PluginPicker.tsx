@@ -1,10 +1,11 @@
 // The plugin list to add from: the scanner's plugins of one kind (instruments
-// or effects), searchable by name, vendor or category, with Rescan and the
-// plugins that failed to load. ↑ and ↓ move through the list, Enter adds.
+// or effects), VST3 and CLAP, searchable by name, vendor, category or format,
+// with Rescan and the plugins that failed to load. ↑ and ↓ move through the
+// list, Enter adds.
 import { useEffect, useMemo, useRef, useState } from "react";
 import Dialog from "../sampler/Dialog";
 import * as api from "./api";
-import { subscribe, type CatalogEntry, type CatalogView } from "./api";
+import { formatName, subscribe, type CatalogEntry, type CatalogView } from "./api";
 import "./plugins.css";
 
 type Props = {
@@ -17,6 +18,8 @@ type Props = {
 };
 
 const STATUS: Record<string, string> = { failed: "failed to load", crashed: "crashed while loading", timed_out: "took too long to load" };
+/** Category words that only say instrument or effect, which the list already does (VST3's and CLAP's). */
+const HIDDEN_CATEGORIES = new Set(["instrument", "fx", "audio-effect"]);
 
 export default function PluginPicker({ kind, title, onPick, onClose }: Props) {
   const [catalog, setCatalog] = useState<CatalogView | null>(null);
@@ -35,7 +38,7 @@ export default function PluginPicker({ kind, title, onPick, onClose }: Props) {
     return (catalog?.plugins ?? [])
       .filter((p) => (kind === "instrument" ? p.kind === "instrument" : p.kind !== "instrument"))
       .filter((p) => {
-        const hay = `${p.name} ${p.vendor} ${p.subCategories.join(" ")}`.toLowerCase();
+        const hay = `${p.name} ${p.vendor} ${p.subCategories.join(" ")} ${formatName(p.format)}`.toLowerCase();
         return words.every((w) => hay.includes(w));
       });
   }, [catalog, query, kind]);
@@ -75,15 +78,18 @@ export default function PluginPicker({ kind, title, onPick, onClose }: Props) {
         />
         <ul className="pp-list" ref={list} role="listbox" aria-label={kind === "instrument" ? "Instruments" : "Effects"}>
           {shown.map((p, i) => (
-            <li key={`${p.path}#${p.classId}`} data-i={i} role="option" aria-selected={i === at} className={i === at ? "on" : undefined} onMouseEnter={() => setAt(i)} onClick={() => pick(p)}>
-              <span className="pp-name">{p.name}</span>
+            <li key={`${p.format}:${p.path}#${p.classId}`} data-i={i} role="option" aria-selected={i === at} className={i === at ? "on" : undefined} onMouseEnter={() => setAt(i)} onClick={() => pick(p)}>
+              <span className="pp-name">
+                {p.name}
+                <span className="pp-format">{formatName(p.format)}</span>
+              </span>
               <span className="pp-vendor">{p.vendor}</span>
-              <span className="pp-sub">{p.subCategories.filter((c) => c !== "Instrument" && c !== "Fx").join(" · ")}</span>
+              <span className="pp-sub">{p.subCategories.filter((c) => !HIDDEN_CATEGORIES.has(c.toLowerCase())).join(" · ")}</span>
             </li>
           ))}
           {shown.length === 0 && (
             <li className="pp-empty" aria-disabled="true">
-              {scanning ? "Looking for plugins…" : query ? "Nothing matches." : `No ${kind === "instrument" ? "instruments" : "effects"} found in the VST3 folders.`}
+              {scanning ? "Looking for plugins…" : query ? "Nothing matches." : `No ${kind === "instrument" ? "instruments" : "effects"} found in the VST3 or CLAP folders.`}
             </li>
           )}
         </ul>
