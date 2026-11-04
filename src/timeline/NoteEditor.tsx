@@ -93,7 +93,8 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   const step = gridOf(grid, bar);
   const [drawMode, setDrawMode] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [shown, setShown] = useState<MidiNote[] | null>(null);
+  // What shows ahead of the Rust side (a gesture, or edits on their way), for the clip it belongs to.
+  const [shown, setShown] = useState<{ id: number; notes: MidiNote[] } | null>(null);
   const [shownClip, setShownClip] = useState<MidiClipView | null>(null);
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [held, setHeld] = useState<Set<number>>(new Set());
@@ -109,12 +110,22 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   /** Edits sent and not landed yet, and the last of them, which the next waits for. */
   const pending = useRef(0);
   const queue = useRef<Promise<unknown>>(Promise.resolve());
+  /** A gesture let go: back to what was last sent (or the Rust side's state when nothing is on its way). */
+  const unshape = useCallback(() => {
+    setShown(null);
+    setShownClip(null);
+  }, []);
   const lastLength = useRef(0.25);
   const sounding = useRef<number | null>(null);
   const resize = useRef<{ y0: number; h0: number } | null>(null);
   const theme = useTheme();
-  const notes = shown ?? clip.notes;
-  const c = shownClip ?? clip;
+  /** Per clip, the last notes and the last clip sent and not landed yet. */
+  const sentNotes = useRef(new Map<number, MidiNote[]>());
+  const sentClip = useRef(new Map<number, MidiClipView>());
+  // Another clip's (the selection moved while its edits were on their way) never shows here; this
+  // clip's own edits still on their way do, after a switch away and back too.
+  const notes = shown?.id === clip.id ? shown.notes : sentNotes.current.get(clip.id) ?? clip.notes;
+  const c = shownClip?.id === clip.id ? shownClip : sentClip.current.get(clip.id) ?? clip;
   const colour = COLOURS[track.colour % COLOURS.length];
   const live = useRef({ view, size, clip, notes });
   live.current = { view, size, clip, notes };
@@ -218,23 +229,25 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
 
   // ---- Edits ----
 
-  /** Sends an edit once the ones before it have landed. A refusal drops what shows. */
+  /** Sends an edit once the ones before it have landed. Each names its clip, so it lands on that
+   *  clip whatever is selected by then. Once the last has landed (or was refused), the Rust side's
+   *  state shows as it is. */
   const send = useCallback(
-    (edit: MidiClipIn, key: string) => {
+    (edit: MidiClipIn, key: string, refused?: () => void) => {
       pending.current += 1;
       const next = queue.current.catch(() => {}).then(() => onEdit(edit, key));
       queue.current = next;
       next
-        .catch(() => {
-          setShown(null);
-          setShownClip(null);
-        })
+        .catch(() => refused?.())
         .finally(() => {
           pending.current -= 1;
-          // The last one landed: the new state shows as it is.
-          if (pending.current === 0 && !op.current) {
-            setShown(null);
-            setShownClip(null);
+          if (pending.current === 0) {
+            sentNotes.current.clear();
+            sentClip.current.clear();
+            if (!op.current) {
+              setShown(null);
+              setShownClip(null);
+            }
           }
         });
     },
@@ -244,15 +257,17 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   const commit = useCallback(
     (next: MidiNote[], what: string, merge = false) => {
       const key = merge ? `notes:${clip.id}:${what}` : `notes:${clip.id}:${what}:${++gestures}`;
-      setShown(next);
+      sentNotes.current.set(clip.id, next);
+      setShown({ id: clip.id, notes: next });
       // The clip as shown: a loop change still on its way isn't undone by this.
-      send({ ...toMidiInput(shownClip ?? clip, track.id), notes: sortNotes(next) }, key);
+      send({ ...toMidiInput(c, track.id), notes: sortNotes(next) }, key);
     },
-    [clip, shownClip, track.id, send],
+    [clip.id, c, track.id, send],
   );
 
   const commitClip = useCallback(
     (next: MidiClipView, what: string) => {
+      sentClip.current.set(clip.id, next);
       setShownClip(next);
       send(toMidiInput(next, track.id), `${what}:${clip.id}`);
     },
@@ -410,7 +425,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
     if (drawMode) {
       const note = addNote(xBeat(view, x), yKey(view, y), free);
       op.current = { kind: "draw", note, base: notes, moved: false };
-      setShown([...notes, note]);
+      setShown({ id: clip.id, notes: [...notes, note] });
       setSelected(new Set([note.id]));
       sound(note.key);
       return;
@@ -536,7 +551,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
     }
     if (o.kind === "draw") o.moved = true;
     const next = shape(o, x, y, free, e.altKey, true);
-    if (next) setShown(next);
+    if (next) setShown({ id: clip.id, notes: next });
   };
 
   const onUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -554,7 +569,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
         if (!o.moved) {
           // A click on a note with Draw on deletes it; otherwise it only selected it.
           if (o.erase) removeNotes(new Set([o.anchor.id]));
-          else setShown(null);
+          else unshape();
           return;
         }
         const next = shape(o, x, y, free, e.altKey);
@@ -660,7 +675,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   const count = selected.size;
   const commitName = () => {
     const n = name.trim();
-    if (n && n !== clip.name) send({ ...toMidiInput(shownClip ?? clip, track.id), name: n }, `name:${clip.id}`);
+    if (n && n !== clip.name) send({ ...toMidiInput(c, track.id), name: n }, `name:${clip.id}`, () => setName(clip.name));
     else setName(clip.name);
   };
 
@@ -745,8 +760,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
           onPointerCancel={() => {
             op.current = null;
             setMarquee(null);
-            setShown(null);
-            setShownClip(null);
+            unshape();
             sound(null);
           }}
           onDoubleClick={onDouble}
