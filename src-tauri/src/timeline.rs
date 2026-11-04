@@ -1777,19 +1777,18 @@ pub async fn timeline_play(playing: bool, app: AppHandle) -> Result<(), String> 
 
 /// Plays `key` on an instrument track's instrument from the note editor's
 /// keyboard (`on`), or lets go of it; with no `key`, lets go of every note
-/// played that way. The note goes in the track's player's queue first, then
-/// the output opens if it isn't (as play does): the queue belongs to the
-/// player, not the output, so with the editor sending each preview once the
-/// last has landed, an end never overtakes its start.
+/// played that way. A start waits for the output to open (as play does) and
+/// is dropped when it can't, so starts never pile up to play in a burst
+/// later; an end goes straight to the player. With the editor sending each
+/// preview once the last has landed, an end never overtakes its start.
 #[tauri::command]
 pub async fn timeline_preview(track: u32, key: Option<u8>, velocity: Option<u8>, on: bool, app: AppHandle) -> Result<(), String> {
     let s = shared(&app);
     spawn_blocking(move || {
-        s.preview(TrackId(track), key.map(|k| (k, velocity.unwrap_or(midi::DEFAULT_VELOCITY), on)))?;
         if on {
             lock(s.audio).ensure_open()?;
         }
-        Ok(())
+        s.preview(TrackId(track), key.map(|k| (k, velocity.unwrap_or(midi::DEFAULT_VELOCITY), on)))
     })
     .await
     .map_err(|e| e.to_string())?

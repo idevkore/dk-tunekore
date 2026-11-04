@@ -546,9 +546,21 @@ impl MidiPlayer {
 
 impl Device for MidiPlayer {
     /// The output reopened: the next piece starts afresh, and lets go of any
-    /// clip note still sounding on the instrument.
+    /// clip note still sounding on the instrument. Notes played by hand that
+    /// waited for it are dropped rather than played in a burst; the ends
+    /// among them still end their keys, on the next piece's first frame.
     fn prepare(&mut self, _sample_rate: u32, _max_frames: usize) {
         self.last = None;
+        while let Ok(p) = self.preview.pop() {
+            let ending = match p {
+                Preview::Off { key } if usize::from(key) < KEYS => self.hand & bit(key),
+                Preview::AllOff => self.hand,
+                _ => 0,
+            };
+            self.on &= !ending;
+            self.hand &= !ending;
+            self.deferred |= ending;
+        }
     }
 
     fn process(&mut self, ctx: &ProcessContext, events: &mut Events, audio: Buffers<'_>) {

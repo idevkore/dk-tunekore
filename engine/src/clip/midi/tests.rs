@@ -130,7 +130,8 @@ impl Rig {
     fn held_by_playing_notes(&self, keys: std::ops::Range<u8>) {
         let Some((beat, bpf)) = self.end else { return };
         let tol = 2.0 * bpf;
-        for key in keys.filter(|&k| self.sounding[usize::from(k)]) {
+        // A key the hand holds is the hand's, not a clip's.
+        for key in keys.filter(|&k| self.sounding[usize::from(k)] && self.player.hand & (1u128 << k) == 0) {
             let held = self.clips.iter().filter(|c| c.length > 0.0 && c.content > 0.0).any(|c| {
                 let end = c.start + c.length;
                 let base = c.start - c.phase;
@@ -349,6 +350,22 @@ fn a_key_played_by_hand_and_by_a_clip_is_never_started_twice() {
 }
 
 #[test]
+fn notes_by_hand_that_waited_for_the_output_are_dropped_but_their_ends_kept() {
+    let mut rig = Rig::new(vec![]);
+    rig.feed.preview(Preview::On { key: 60, velocity: 1.0 });
+    rig.run(512, 512);
+    // The output closes and opens again; meanwhile one key is played and 60 let go.
+    rig.feed.preview(Preview::On { key: 64, velocity: 1.0 });
+    rig.feed.preview(Preview::Off { key: 64 });
+    rig.feed.preview(Preview::On { key: 67, velocity: 1.0 });
+    rig.feed.preview(Preview::Off { key: 60 });
+    rig.player.prepare(RATE, 4096);
+    rig.run(512, 512);
+    assert_eq!(rig.log, [At::On(60, 0), At::Off(60, 512)], "no burst of 64 and 67; 60 still ends");
+    assert!(rig.silent());
+}
+
+#[test]
 fn a_split_plays_on_as_one_clip() {
     // Not looped: the note over the cut ends there and goes on in the second half.
     let c = clip(1.0, 4.0, vec![note(60, 0.0, 1.0), note(62, 1.5, 1.0), note(64, 3.0, 0.5)]);
@@ -471,12 +488,12 @@ fn edits_jumps_and_tempo_changes_never_leave_a_note_sounding() {
             3 => rig.shared.stop(),
             4 => rig.shared.play(),
             5 => rig.shared.set_looping(d.below(2) == 0),
-            // By hand on keys of their own, so every clip key's note can be checked.
+            // By hand, on the clips' keys too (hand and clip take keys over from each other).
             6 => {
-                rig.feed.preview(Preview::On { key: 80 + d.below(12) as u8, velocity: 0.7 });
+                rig.feed.preview(Preview::On { key: 40 + d.below(16) as u8, velocity: 0.7 });
             }
             7 => {
-                rig.feed.preview(Preview::Off { key: 80 + d.below(12) as u8 });
+                rig.feed.preview(Preview::Off { key: 40 + d.below(16) as u8 });
             }
             _ => {}
         }
