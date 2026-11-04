@@ -1777,15 +1777,22 @@ pub async fn timeline_play(playing: bool, app: AppHandle) -> Result<(), String> 
 
 /// Plays `key` on an instrument track's instrument from the note editor's
 /// keyboard (`on`), or lets go of it; with no `key`, lets go of every note
-/// played that way. Opens the output first, as play does.
+/// played that way. The note goes in the track's player's queue first, then
+/// the output opens if it isn't (as play does): the queue belongs to the
+/// player, not the output, so with the editor sending each preview once the
+/// last has landed, an end never overtakes its start.
 #[tauri::command]
 pub async fn timeline_preview(track: u32, key: Option<u8>, velocity: Option<u8>, on: bool, app: AppHandle) -> Result<(), String> {
     let s = shared(&app);
-    if on {
-        let audio = s.audio;
-        spawn_blocking(move || lock(audio).ensure_open()).await.map_err(|e| e.to_string())??;
-    }
-    s.preview(TrackId(track), key.map(|k| (k, velocity.unwrap_or(midi::DEFAULT_VELOCITY), on)))
+    spawn_blocking(move || {
+        s.preview(TrackId(track), key.map(|k| (k, velocity.unwrap_or(midi::DEFAULT_VELOCITY), on)))?;
+        if on {
+            lock(s.audio).ensure_open()?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// A file's waveform peaks at `level` (see `tunekore_engine::PEAK_LEVELS`):
@@ -2551,4 +2558,5 @@ mod tests {
         rig.state.redo().unwrap();
         assert!(lock(&rig.state.doc).midi.is_empty());
     }
+
 }

@@ -178,10 +178,18 @@ export const setView = (change: ViewChange) => invoke<TimelineView>("timeline_vi
 export const setLoop = (on: boolean, start: number, end: number) => invoke<TimelineView>("timeline_loop", { on, start, end });
 export const seek = (beat: number) => invoke<void>("timeline_seek", { beat });
 export const play = (playing: boolean) => invoke<void>("timeline_play", { playing });
+/** Notes played by hand go one at a time, each once the last has landed, so a
+ *  note's end can never reach the instrument before its start. */
+let previews: Promise<unknown> = Promise.resolve();
+const preview = (args: { track: number; key: number | null; velocity: number | null; on: boolean }) => {
+  const next = previews.catch(() => {}).then(() => invoke<void>("timeline_preview", args));
+  previews = next;
+  return next;
+};
 /** Plays `key` on an instrument track's instrument (`on`), or lets go of it. */
-export const previewNote = (track: number, key: number, velocity: number, on: boolean) => invoke<void>("timeline_preview", { track, key, velocity, on });
+export const previewNote = (track: number, key: number, velocity: number, on: boolean) => preview({ track, key, velocity, on });
 /** Lets go of every note the keyboard is holding on the track. */
-export const previewOff = (track: number) => invoke<void>("timeline_preview", { track, key: null, velocity: null, on: false });
+export const previewOff = (track: number) => preview({ track, key: null, velocity: null, on: false });
 /** A file's peaks at `level`: min then max of each bucket, signed bytes. */
 export const peaks = (path: string, level: number) => invoke<ArrayBuffer>("timeline_peaks", { path, level });
 
