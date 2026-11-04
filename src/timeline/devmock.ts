@@ -153,10 +153,11 @@ export function installMocks() {
             done++;
             const n = at - c.start;
             if (isLoopedMidi(c)) return [{ ...c, length: n }, { ...c, id: nextClip++, start: at, length: c.length - n, phase: (c.phase + n) % c.content }];
-            const cut = c.offset + c.phase + n;
+            const first = c.offset + c.phase;
+            const cut = first + n;
             return [
               { ...c, length: n, content: c.phase + n, notes: c.notes.filter((x) => x.start < cut).map((x) => ({ ...x, length: Math.min(x.length, cut - x.start) })) },
-              { ...c, id: nextClip++, start: at, offset: cut, phase: 0, content: c.content - c.phase - n, length: c.length - n, notes: c.notes.filter((x) => x.start + x.length > cut).map((x) => (x.start < cut ? { ...x, start: cut, length: x.start + x.length - cut } : x)) },
+              { ...c, id: nextClip++, start: at, offset: cut, phase: 0, content: c.content - c.phase - n, length: c.length - n, notes: c.notes.filter((x) => x.start + x.length > cut).map((x) => (x.start < cut && x.start >= first ? { ...x, start: cut, length: x.start + x.length - cut } : x)) },
             ];
           });
           t.clips = t.clips.flatMap((c) => {

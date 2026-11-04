@@ -100,8 +100,9 @@ impl MidiClipSpec {
 
 /// Cuts a clip at `cut` (a beat on the Timeline) into two that play on as
 /// one: the second carries on where the first stops. A note that crosses the
-/// cut in a clip that doesn't loop is cut in two, so it sounds on in the
-/// second half; a looped clip's notes are shared by all its passes, so they
+/// cut in a clip that doesn't loop, and that the clip plays, is cut in two,
+/// so it sounds on in the second half (one that starts before the clip's
+/// first beat, which the clip never plays, stays silent); a looped clip's notes are shared by all its passes, so they
 /// stay as they are, and a note that crosses the cut stops there. `None`
 /// when `cut` isn't inside the clip.
 pub fn split(c: &MidiClipSpec, cut: f64) -> Option<(MidiClipSpec, MidiClipSpec)> {
@@ -116,7 +117,8 @@ pub fn split(c: &MidiClipSpec, cut: f64) -> Option<(MidiClipSpec, MidiClipSpec)>
         return Some((left, right));
     }
     // Not looped: each half keeps the part of the content it plays, and the notes in it.
-    let at = c.offset + c.phase + n;
+    let first = c.offset + c.phase;
+    let at = first + n;
     left.content = c.phase + n;
     right.offset = at;
     right.content = (c.content - c.phase - n).max(MIN_BEATS);
@@ -126,7 +128,8 @@ pub fn split(c: &MidiClipSpec, cut: f64) -> Option<(MidiClipSpec, MidiClipSpec)>
         .notes
         .iter()
         .filter(|x| x.start + x.length > at + 1e-9)
-        .map(|x| if x.start < at { MidiNote { start: at, length: x.start + x.length - at, ..*x } } else { *x })
+        // Only a note the clip was playing goes on from the cut; the rest stay before the half's content, silent.
+        .map(|x| if x.start < at && x.start >= first { MidiNote { start: at, length: x.start + x.length - at, ..*x } } else { *x })
         .collect();
     Some((left, right))
 }
@@ -461,8 +464,10 @@ impl MidiPlayer {
             }
             let k = ((now - c.pass(0.0)) / c.content).floor().max(0.0);
             let pass = c.pass(k);
-            let upto = c.notes.partition_point(|x| pass + x.at < now);
-            for x in &c.notes[..upto] {
+            // Notes that started by now, but not before the clip did: those it never plays hold nothing.
+            let from = c.notes.partition_point(|x| pass + x.at < c.start);
+            let upto = c.notes.partition_point(|x| pass + x.at < now).max(from);
+            for x in &c.notes[from..upto] {
                 let end = pass + x.at + x.len;
                 if end > now && clips & bit(x.key) != 0 {
                     self.end[usize::from(x.key)] = end.min(c.end);

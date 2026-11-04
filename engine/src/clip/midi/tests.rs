@@ -36,6 +36,10 @@ struct Rig {
     log: Vec<At>,
     /// Keys sounding on the instrument, as the log leaves them.
     sounding: [bool; KEYS],
+    /// The clips last published, which the player plays from the next block on.
+    clips: Vec<MidiClipSpec>,
+    /// Where the last piece ended and its beats per frame, when it was playing.
+    end: Option<(f64, f64)>,
 }
 
 impl Rig {
@@ -46,7 +50,7 @@ impl Rig {
     fn at(rate: u32, clips: Vec<MidiClipSpec>) -> Self {
         let (mut player, mut feed) = player();
         player.prepare(rate, 4096);
-        feed.publish(MidiClipSet::new(clips));
+        feed.publish(MidiClipSet::new(clips.clone()));
         Self {
             player,
             feed,
@@ -58,16 +62,24 @@ impl Rig {
             frames: 0,
             log: Vec::with_capacity(1 << 16),
             sounding: [false; KEYS],
+            clips,
+            end: None,
         }
+    }
+
+    fn publish(&mut self, clips: Vec<MidiClipSpec>) {
+        self.feed.publish(MidiClipSet::new(clips.clone()));
+        self.clips = clips;
     }
 
     /// Runs one block, as the graph does, and checks every piece's events:
     /// in frame order, inside the piece, and never a note started twice or
     /// ended while silent.
     fn block(&mut self, frames: usize) {
-        let Rig { player, shared, clock, events, left, right, log, sounding, .. } = self;
+        let Rig { player, shared, clock, events, left, right, log, sounding, end, .. } = self;
         let base = self.frames;
         clock.run(shared, frames, |ctx, off| {
+            *end = ctx.playing.then(|| (ctx.map.advance(ctx.beat, ctx.frames as f64), ctx.beats_per_frame));
             events.clear();
             player.process(ctx, events, Buffers { left: &mut left[off..off + ctx.frames], right: &mut right[off..off + ctx.frames] });
             let mut last = 0;
@@ -110,6 +122,34 @@ impl Rig {
 
     fn silent(&self) -> bool {
         self.sounding.iter().all(|s| !s)
+    }
+
+    /// Checks that every clip key sounding (of `keys`) at the end of the last
+    /// block is held by a note of the clips in effect that plays there,
+    /// within two frames: no note sounds on past every note that holds it.
+    fn held_by_playing_notes(&self, keys: std::ops::Range<u8>) {
+        let Some((beat, bpf)) = self.end else { return };
+        let tol = 2.0 * bpf;
+        for key in keys.filter(|&k| self.sounding[usize::from(k)]) {
+            let held = self.clips.iter().filter(|c| c.length > 0.0 && c.content > 0.0).any(|c| {
+                let end = c.start + c.length;
+                let base = c.start - c.phase;
+                let k0 = ((beat - base) / c.content).floor();
+                (-1..=1).any(|dk| {
+                    let pass = base + (k0 + f64::from(dk)) * c.content;
+                    c.notes.iter().filter(|n| n.key == key).any(|n| {
+                        let at = n.start - c.offset;
+                        let on = pass + at;
+                        if at < 0.0 || at >= c.content || on < c.start || on >= end {
+                            return false;
+                        }
+                        let off = (on + n.length.max(MIN_BEATS)).min(pass + c.content).min(end);
+                        on <= beat + tol && beat < off + tol
+                    })
+                })
+            });
+            assert!(held, "key {key} sounds at beat {beat} with no note of the clips holding it: {:?}", self.clips);
+        }
     }
 }
 
@@ -242,7 +282,7 @@ fn an_edit_keeps_the_notes_the_new_clips_still_hold_and_ends_the_rest() {
     rig.shared.play();
     rig.run(10_000, 500);
     // 60 now ends at beat 4, 62 is gone, 65 moved to start later, and 64 is new at beat 2.
-    rig.feed.publish(MidiClipSet::new(vec![clip(0.0, 8.0, vec![note(60, 0.0, 4.0), note(64, 2.0, 1.0), note(65, 3.0, 1.0)])]));
+    rig.publish(vec![clip(0.0, 8.0, vec![note(60, 0.0, 4.0), note(64, 2.0, 1.0), note(65, 3.0, 1.0)])]);
     rig.run(5 * BEAT, 500);
     let b = |beats: u64| beats * BEAT;
     assert_eq!(
@@ -253,7 +293,7 @@ fn an_edit_keeps_the_notes_the_new_clips_still_hold_and_ends_the_rest() {
     // Removing every clip ends what sounds.
     rig.shared.seek(0.0);
     rig.run(1_000, 500);
-    rig.feed.publish(MidiClipSet::empty());
+    rig.publish(vec![]);
     rig.run(1_000, 500);
     assert!(rig.silent());
 }
@@ -339,6 +379,40 @@ fn a_split_plays_on_as_one_clip() {
 }
 
 #[test]
+fn a_split_of_a_trimmed_clip_plays_only_what_the_clip_did() {
+    // The long note starts before the content (offset 2) or before the clip's
+    // first beat (phase 2): the clip never plays it, nor do its halves.
+    let trimmed = [
+        MidiClipSpec { start: 0.0, offset: 2.0, content: 6.0, phase: 0.0, length: 6.0, notes: vec![note(60, 0.0, 8.0), note(64, 3.0, 0.5)] },
+        MidiClipSpec { start: 0.0, offset: 0.0, content: 6.0, phase: 2.0, length: 4.0, notes: vec![note(60, 1.0, 8.0), note(64, 3.0, 0.5)] },
+    ];
+    for c in trimmed {
+        let play = |clips: Vec<MidiClipSpec>| {
+            let mut rig = Rig::new(clips);
+            rig.shared.play();
+            rig.run(8 * BEAT, 512);
+            rig.log
+        };
+        let whole = play(vec![c.clone()]);
+        assert_eq!(whole, [At::On(64, BEAT), At::Off(64, BEAT * 3 / 2)], "{c:?}");
+        let (a, b) = split(&c, 2.0).unwrap();
+        assert_eq!(play(vec![a, b]), whole, "{c:?}");
+    }
+}
+
+#[test]
+fn an_edit_ends_a_note_that_now_falls_before_its_clip() {
+    // A looped clip's start trimmed past a sounding note while it plays, as the Timeline trims.
+    let c = MidiClipSpec { start: 0.0, offset: 0.0, content: 4.0, phase: 0.0, length: 8.0, notes: vec![note(60, 0.0, 3.0)] };
+    let mut rig = Rig::new(vec![c.clone()]);
+    rig.shared.play();
+    rig.run(BEAT, 500);
+    rig.publish(vec![MidiClipSpec { start: 0.5, phase: 0.5, length: 7.5, ..c }]);
+    rig.run(4 * BEAT, 500);
+    assert_eq!(rig.log, [At::On(60, 0), At::Off(60, BEAT), At::On(60, 4 * BEAT)], "off at the edit, and on again in the next pass");
+}
+
+#[test]
 fn bad_clips_and_notes_are_left_out_or_clamped() {
     let set = MidiClipSet::new(vec![
         MidiClipSpec { start: f64::NAN, ..clip(0.0, 1.0, vec![]) },
@@ -391,21 +465,23 @@ fn edits_jumps_and_tempo_changes_never_leave_a_note_sounding() {
     // Every piece is checked as it runs (see `Rig::block`): no note starts while it sounds or ends while silent.
     for _ in 0..12_000 {
         match d.below(12) {
-            0 => rig.feed.publish(MidiClipSet::new(random_clips(&mut d))),
+            0 => rig.publish(random_clips(&mut d)),
             1 => rig.shared.seek(d.beats(14.0)),
             2 => rig.shared.set_tempo(60.0 + d.beats(180.0)),
             3 => rig.shared.stop(),
             4 => rig.shared.play(),
             5 => rig.shared.set_looping(d.below(2) == 0),
+            // By hand on keys of their own, so every clip key's note can be checked.
             6 => {
-                rig.feed.preview(Preview::On { key: 40 + d.below(12) as u8, velocity: 0.7 });
+                rig.feed.preview(Preview::On { key: 80 + d.below(12) as u8, velocity: 0.7 });
             }
             7 => {
-                rig.feed.preview(Preview::Off { key: 40 + d.below(12) as u8 });
+                rig.feed.preview(Preview::Off { key: 80 + d.below(12) as u8 });
             }
             _ => {}
         }
         rig.block(1 + d.below(1_500) as usize);
+        rig.held_by_playing_notes(40..52);
     }
     rig.shared.stop();
     rig.feed.preview(Preview::AllOff);
