@@ -533,6 +533,11 @@ impl Device for Playing {
 /// `setup_at`), and the shell holds a project with plugins to real-time pace
 /// in an export until offline mode is wired in. This renders through the
 /// output's borrowed graph, with the plugins activated as the app does.
+///
+/// The fixture's synth and gain allocate in `process` (only its "Thru"
+/// doesn't), which the output callback's real-time checks would stop. So the
+/// render asks for the graph before the stand-in callback first runs, which
+/// then lends it without running it, and stops before the graph comes back.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_project_with_plugins_renders_through_them() {
@@ -561,14 +566,22 @@ fn a_project_with_plugins_renders_through_them() {
     let (mut pad, _pad_link) = plugin_device_for_pad(2, Box::new(move || p.pad_gains(2)), Box::new(|| {}));
     pad.install(synth.activate(&as_the_app).unwrap(), RATE);
     engine.mixer().insert(SAMPLER_TRACK, 0, Box::new(pad)).unwrap();
-    let cb = Callback::start(out, f32::NAN);
-    while cb.runs.load(Ordering::Relaxed) < 3 {
+    let loan = engine.loan.clone();
+    let engine = Arc::new(std::sync::Mutex::new(engine));
+    let starter = {
+        let engine = engine.clone();
+        std::thread::spawn(move || engine.lock().unwrap().start_render(spec(0.0, 2.0, vec![SAMPLER_TRACK, fx], MAX_FRAMES)))
+    };
+    while loan.state.load(Ordering::Acquire) != WANTED {
         std::thread::sleep(Duration::from_millis(1));
     }
-
-    let mut render = engine.start_render(spec(0.0, 2.0, vec![SAMPLER_TRACK, fx], MAX_FRAMES)).unwrap();
+    let cb = Callback::start(out, f32::NAN);
+    let mut render = starter.join().unwrap().unwrap();
+    let (out, _) = cb.stop();
     let f = collect(&mut render);
     drop(render);
+    drop(out);
+    let mut engine = Arc::try_unwrap(engine).ok().unwrap().into_inner().unwrap();
 
     assert_eq!(f.master[0].len(), 2 * BEAT);
     let wet = &f.stems[1][0];
@@ -578,8 +591,7 @@ fn a_project_with_plugins_renders_through_them() {
     let s = &f.stems[0][0];
     assert!(s[0] > 0.0 && s[..sixteenth].iter().all(|&x| x == s[0]), "the synth sounds from the step's first frame: {}", s[0]);
     assert!(s[sixteenth..].iter().all(|&x| x == 0.0), "and stops with the step");
-    let (out, _) = cb.stop();
-    drop(out);
+    // As closing the stream does: the graph given back to the gone callback goes home.
     engine.after_stream();
     assert_eq!(engine.mixer().track(fx).map(|t| t.chain), Some(1), "the plugin came home on its track");
     // The processors go before their controllers.

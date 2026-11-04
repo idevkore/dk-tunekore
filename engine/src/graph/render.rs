@@ -18,6 +18,12 @@
 //! render and waits for the graph to come back first (`Engine::close_output`),
 //! so no device is lost and no plugin runs after the output has let go of it.
 //!
+//! Its clocks mark every piece `offline` ([`crate::transport::ProcessContext`]),
+//! so devices leave out what is played live meanwhile (the Sampler's pads
+//! and recording, a MIDI controller's notes to a plugin) and the metronome,
+//! and the Sampler rolls step chance from each step's place in the song, so
+//! an export repeats exactly.
+//!
 //! A render plays the project as it was when it started: edits made while it
 //! runs (a track added or removed, a level moved) wait, and land once the
 //! graph is back on the output. A plugin removed meanwhile goes silent, as
@@ -50,7 +56,6 @@ use std::time::{Duration, Instant};
 use super::{Graph, MAX_FRAMES};
 use crate::limiter::Limiter;
 use crate::plugin_device::plugins_waiting;
-use crate::sampler::SamplerShared;
 use crate::snapshot::Mailbox;
 use crate::track::TrackId;
 use crate::transport::{TempoMap, Transport, TransportShared, EDGE_FRAMES};
@@ -262,8 +267,6 @@ pub struct Render {
     graph: Option<Box<Graph>>,
     home: Home,
     loan: Arc<Loan>,
-    /// The Sampler the render runs, told so while it does.
-    sampler: Arc<SamplerShared>,
     rate: u32,
     block: usize,
     phase: Phase,
@@ -309,9 +312,7 @@ impl Render {
     /// A render of `graph` (which goes to `home` when done) for `spec`,
     /// already checked, on `map`'s tempo and rate, with the master at `gain`
     /// and stems from `slots`. Off the audio thread: it allocates.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn new(mut graph: Box<Graph>, home: Home, loan: Arc<Loan>, sampler: Arc<SamplerShared>, spec: &RenderSpec, map: TempoMap, gain: f32, slots: Vec<usize>) -> Self {
-        sampler.set_rendering(true);
+    pub(crate) fn new(mut graph: Box<Graph>, home: Home, loan: Arc<Loan>, spec: &RenderSpec, map: TempoMap, gain: f32, slots: Vec<usize>) -> Self {
         let rate = map.sample_rate();
         let seconds = |s: f64| (s.max(0.0) * f64::from(rate)).round() as u64;
         let body = range_frames(&map, spec.start, spec.end);
@@ -330,22 +331,24 @@ impl Render {
         let limiter = Limiter::new(rate, 2);
         let stem_latency = graph.latency() as u64;
         let master_latency = stem_latency + limiter.latency() as u64;
+        let (mut settle, mut transport) = (Transport::new(rate), Transport::new(rate));
+        settle.set_offline(true);
+        transport.set_offline(true);
         Self {
             graph: Some(graph),
             home,
             loan,
-            sampler,
             rate,
             block: spec.block.clamp(1, MAX_FRAMES),
             phase: Phase::Settling,
-            settle: Transport::new(rate),
+            settle,
             settle_clock,
             settle_quiet: 0,
             settled: 0,
             settle_need: seconds(SETTLE_QUIET) as usize,
             settle_most: seconds(SETTLE_MAX) as usize,
             made: Instant::now(),
-            transport: Transport::new(rate),
+            transport,
             clock,
             limiter,
             gain,
@@ -554,7 +557,6 @@ impl Drop for Render {
     /// Gives the graph back: to the output callback that lent it, or to the
     /// mixer (dropping it sends its devices home).
     fn drop(&mut self) {
-        self.sampler.set_rendering(false);
         let Some(mut graph) = self.graph.take() else { return };
         graph.capture(&[]);
         graph.freeze(false);

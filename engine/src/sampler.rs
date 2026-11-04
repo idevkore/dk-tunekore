@@ -222,11 +222,6 @@ fn step_len(step: usize, swing: f32) -> f64 {
     if step.is_multiple_of(2) { 0.25 + swing_push(swing) } else { 0.25 - swing_push(swing) }
 }
 
-/// Whether the piece in `ctx` is an offline render's (the Sampler's `offline` field).
-fn rendering(_ctx: &ProcessContext, shared: &SamplerShared) -> bool {
-    shared.rendering.load(Ordering::Acquire)
-}
-
 /// `v` clamped to `lo..=hi`, or `default` when it is not a number.
 fn sane(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
     if v.is_nan() { default } else { v.clamp(lo, hi) }
@@ -458,8 +453,6 @@ pub struct SamplerShared {
     play_bank: AtomicU32,
     /// Pads (a bit each) that play a plugin instrument instead of their sample (#37).
     plugin_pads: AtomicU32,
-    /// An offline render runs the Sampler (`Engine::start_render`).
-    rendering: AtomicBool,
 }
 
 impl Default for SamplerShared {
@@ -483,7 +476,6 @@ impl Default for SamplerShared {
             switch_now: AtomicBool::new(false),
             play_bank: AtomicU32::new(NO_BANK),
             plugin_pads: AtomicU32::new(0),
-            rendering: AtomicBool::new(false),
         }
     }
 }
@@ -492,12 +484,6 @@ impl SamplerShared {
     /// A Sampler that runs on `clock`, the engine's transport.
     pub fn with_clock(clock: Arc<TransportShared>) -> Self {
         Self { clock, ..Default::default() }
-    }
-
-    /// Set while an offline render runs the Sampler: it leaves out the
-    /// metronome and what is played by hand, and rolls repeatable dice.
-    pub(crate) fn set_rendering(&self, on: bool) {
-        self.rendering.store(on, Ordering::Release);
     }
 
     /// The transport this Sampler runs on.
@@ -1441,7 +1427,7 @@ impl Sampler {
     /// The Sampler's work for `ctx.frames` frames: `out(frame, left, right,
     /// click)` takes each frame's pads and metronome click.
     fn run(&mut self, ctx: &ProcessContext, shared: &SamplerShared, mut out: impl FnMut(usize, f32, f32, f32)) {
-        self.offline = rendering(ctx, shared);
+        self.offline = ctx.offline;
         self.take_samples();
         self.notes.clear();
         self.frame_now = 0;

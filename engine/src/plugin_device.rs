@@ -328,10 +328,13 @@ impl PluginDevice {
 
     /// Gathers this block's notes: live ones first (at its start), then the
     /// track's (a pad device's: its pad's only, on channel 1; an effect's:
-    /// controllers only).
-    fn gather(&mut self, events: &Events) {
+    /// controllers only). In an offline render the live ones are dropped:
+    /// an export plays the project, not what is played meanwhile.
+    fn gather(&mut self, events: &Events, offline: bool) {
         self.events.clear();
-        if self.link.role == Role::Instrument {
+        if offline {
+            while self.live.pop().is_ok() {}
+        } else if self.link.role == Role::Instrument {
             while self.events.len() < self.events.capacity() {
                 let Ok(e) = self.live.pop() else { break };
                 self.note(&e.kind);
@@ -409,7 +412,7 @@ impl Device for PluginDevice {
         }
         // An instrument or a pad adds its sound; an effect changes the track's.
         let instrument = self.link.role != Role::Effect;
-        self.gather(events);
+        self.gather(events, ctx.offline);
         if self.link.bypass.load(Ordering::Relaxed) {
             // An instrument switched off lets go of its notes first, so none hang when it comes back.
             if instrument && !self.was_bypassed && self.held.iter().any(|&k| k != 0) {
@@ -816,6 +819,37 @@ mod tests {
         assert_eq!(seen.last.load(Ordering::Relaxed), pack(0, &EventKind::NoteOff { channel: 0, key: 60, velocity: 0.0, note_id: -1 }), "C3, on the plugin's channel 1");
         drop(graph);
         assert!(m.stopped());
+    }
+
+    #[test]
+    fn live_notes_stay_out_of_an_offline_render_and_the_tracks_notes_still_play() {
+        let (_, request) = requests();
+        let (mut d, link) = plugin_device(Role::Instrument, request);
+        d.prepare(RATE, MAX_FRAMES);
+        let s = Arc::new(Seen::default());
+        link.give(fake(false, s.clone()), RATE);
+        let mut ctx = ProcessContext::stopped(RATE, 32);
+        ctx.offline = true;
+        let mut ev = Events::with_capacity(8);
+        // A MIDI controller's key, played while an export renders.
+        assert!(link.send_live(on(60)));
+        let (out, allocs) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert_eq!(allocs, 0);
+        assert!(out.iter().all(|&x| x == 0.0), "the live note is dropped, not played");
+        // The project's own notes (a clip's, a pad's) do play.
+        ev.push(Event::NoteOn { frame: 0, channel: 0, key: 62, velocity: 1.0 });
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.5));
+        // Back live, live notes play again, and none was kept from the render.
+        ev.clear();
+        ev.push(Event::NoteOff { frame: 0, channel: 0, key: 62, velocity: 0.0 });
+        ctx.offline = false;
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.0), "the dropped note never comes back");
+        ev.clear();
+        assert!(link.send_live(on(64)));
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.5));
     }
 
     #[test]

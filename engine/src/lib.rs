@@ -532,7 +532,7 @@ impl Engine {
             }
             (graph, Home::Mixer)
         };
-        Ok(Render::new(graph, home, self.loan.clone(), self.shared.sampler.clone(), &spec, map, self.master(), slots))
+        Ok(Render::new(graph, home, self.loan.clone(), &spec, map, self.master(), slots))
     }
 
     /// The rate a render runs at: the open output's, or the rate the devices
