@@ -222,6 +222,11 @@ fn step_len(step: usize, swing: f32) -> f64 {
     if step.is_multiple_of(2) { 0.25 + swing_push(swing) } else { 0.25 - swing_push(swing) }
 }
 
+/// Whether the piece in `ctx` is an offline render's (the Sampler's `offline` field).
+fn rendering(_ctx: &ProcessContext, shared: &SamplerShared) -> bool {
+    shared.rendering.load(Ordering::Acquire)
+}
+
 /// `v` clamped to `lo..=hi`, or `default` when it is not a number.
 fn sane(v: f32, lo: f32, hi: f32, default: f32) -> f32 {
     if v.is_nan() { default } else { v.clamp(lo, hi) }
@@ -401,6 +406,16 @@ impl XorShift {
         x.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
 
+    /// The dice for one hit in an export: a pure function of where the step
+    /// is (`tick`, its beat at 960 to the beat) and which pad, so every
+    /// export of a project rolls the same, whatever range or order it is
+    /// rendered in, and separate exports of the master and the stems agree.
+    fn roll_at(tick: i64, pad: usize, chance: u8) -> bool {
+        let mut g = XorShift::new(RNG_SEED ^ (tick as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ ((pad as u64 + 1) << 56));
+        g.next_u64();
+        g.roll(chance)
+    }
+
     /// True with probability `chance / 255`: never at 0, always at 255.
     fn roll(&mut self, chance: u8) -> bool {
         // 32 random bits scaled to 0..=254, so `< 255` always passes and `< 0` never does.
@@ -443,6 +458,8 @@ pub struct SamplerShared {
     play_bank: AtomicU32,
     /// Pads (a bit each) that play a plugin instrument instead of their sample (#37).
     plugin_pads: AtomicU32,
+    /// An offline render runs the Sampler (`Engine::start_render`).
+    rendering: AtomicBool,
 }
 
 impl Default for SamplerShared {
@@ -466,6 +483,7 @@ impl Default for SamplerShared {
             switch_now: AtomicBool::new(false),
             play_bank: AtomicU32::new(NO_BANK),
             plugin_pads: AtomicU32::new(0),
+            rendering: AtomicBool::new(false),
         }
     }
 }
@@ -474,6 +492,12 @@ impl SamplerShared {
     /// A Sampler that runs on `clock`, the engine's transport.
     pub fn with_clock(clock: Arc<TransportShared>) -> Self {
         Self { clock, ..Default::default() }
+    }
+
+    /// Set while an offline render runs the Sampler: it leaves out the
+    /// metronome and what is played by hand, and rolls repeatable dice.
+    pub(crate) fn set_rendering(&self, on: bool) {
+        self.rendering.store(on, Ordering::Release);
     }
 
     /// The transport this Sampler runs on.
@@ -825,6 +849,12 @@ impl SamplerShared {
         if step.is_multiple_of(2) { sixteenth + push } else { sixteenth - push }
     }
 
+    /// One pass of the pattern, in beats, with its swing (an odd length ends
+    /// on a long step, so it is a push longer than `steps / 4`).
+    pub fn pass_beats(&self) -> f64 {
+        pass_beats(self.steps(), self.swing())
+    }
+
     /// Frames that `loops` passes of the pattern last at `rate`.
     pub fn pattern_frames(&self, rate: u32, loops: usize) -> usize {
         let one: f64 = (0..self.steps()).map(|s| self.step_frames(s, rate as f64)).sum();
@@ -1157,6 +1187,9 @@ pub struct Sampler {
     click_fade_step: f32,
     /// The dice for step chance.
     rng: XorShift,
+    /// The piece being run is an offline render's (an export): no metronome,
+    /// no hits, cuts or recording from the UI or MIDI, and dice that repeat.
+    offline: bool,
     /// Where the sequencer is, as of the step that fired last.
     pos: Position,
     /// The rest of a ratcheted step, per pad: hits left, hits played, the
@@ -1316,6 +1349,7 @@ impl Sampler {
             click_decay: (-1.0 / (rate * CLICK_DECAY_SECONDS)).exp() as f32,
             click_fade_step: (1.0 / (rate * CLICK_FADE_IN_SECONDS)).min(1.0) as f32,
             rng: XorShift::new(RNG_SEED),
+            offline: false,
             pos: Position { chain_pos: NO_POS, song_bank: 0, plain_bank: 0 },
             ratchet_left: [0; PADS],
             ratchet_done: [0; PADS],
@@ -1407,6 +1441,7 @@ impl Sampler {
     /// The Sampler's work for `ctx.frames` frames: `out(frame, left, right,
     /// click)` takes each frame's pads and metronome click.
     fn run(&mut self, ctx: &ProcessContext, shared: &SamplerShared, mut out: impl FnMut(usize, f32, f32, f32)) {
+        self.offline = rendering(ctx, shared);
         self.take_samples();
         self.notes.clear();
         self.frame_now = 0;
@@ -1450,18 +1485,24 @@ impl Sampler {
             self.relay(shared, steps);
         }
         self.next_at = self.due_at(self.next_beat);
-        let recording = playing && shared.recording.load(Ordering::Relaxed);
+        let recording = playing && !self.offline && shared.recording.load(Ordering::Relaxed);
 
         for slot in 0..SLOTS {
             let c = &shared.pads[slot];
             let cuts = c.cuts.load(Ordering::Acquire);
             if cuts != self.cuts[slot] {
                 self.cuts[slot] = cuts;
-                self.release_slot(slot);
+                if !self.offline {
+                    self.release_slot(slot);
+                }
             }
             let hits = c.hits.load(Ordering::Acquire);
             if hits != self.hits[slot] {
                 self.hits[slot] = hits;
+                // An export plays the project, not what is played by hand meanwhile.
+                if self.offline {
+                    continue;
+                }
                 let vel = sane(f32::from_bits(c.hit_vel.load(Ordering::Relaxed)), 0.0, 1.0, 1.0);
                 if recording && slot < PADS {
                     self.record_hit(shared, slot, steps, vel);
@@ -1671,7 +1712,9 @@ impl Sampler {
             let on = bank.patterns[pad].load(Ordering::Relaxed) & (1u64 << step) != 0;
             if on && c.flags.load(Ordering::Relaxed) & MUTE == 0 && skip & (1 << pad) == 0 {
                 let chance = bank.chances[pad][step].load(Ordering::Relaxed);
-                if chance == VEL_MAX || (chance > 0 && self.rng.roll(chance)) {
+                let hit = chance == VEL_MAX
+                    || (chance > 0 && if self.offline { XorShift::roll_at((at * 960.0).round() as i64, pad, chance) } else { self.rng.roll(chance) });
+                if hit {
                     let vel = bank.velocities[pad][step].load(Ordering::Relaxed) as f32 / VEL_MAX as f32;
                     let n = bank.ratchets[pad][step].load(Ordering::Relaxed).clamp(1, RATCHET_MAX);
                     let gap = length / f64::from(n);
@@ -1689,7 +1732,7 @@ impl Sampler {
                 }
             }
         }
-        if step.is_multiple_of(STEPS_PER_BEAT) && shared.metronome.load(Ordering::Relaxed) {
+        if step.is_multiple_of(STEPS_PER_BEAT) && !self.offline && shared.metronome.load(Ordering::Relaxed) {
             self.start_click(step == 0);
         }
         shared.step.store(step as u32, Ordering::Relaxed);

@@ -11,7 +11,6 @@
 //!   render is dropped. The devices stay prepared at the output's rate,
 //!   plugins stay activated as they are (a plugin can't be copied, and its
 //!   controller is the main thread's), and nothing waits for the main thread.
-//!   Edits made meanwhile reach the render's graph as they would the output's.
 //! - **No output is open.** The mixer starts a graph at the rate the devices
 //!   last ran at, and `Engine::finish_render` takes the devices back after.
 //!
@@ -19,9 +18,15 @@
 //! render and waits for the graph to come back first (`Engine::close_output`),
 //! so no device is lost and no plugin runs after the output has let go of it.
 //!
+//! A render plays the project as it was when it started: edits made while it
+//! runs (a track added or removed, a level moved) wait, and land once the
+//! graph is back on the output. A plugin removed meanwhile goes silent, as
+//! its processor goes stale.
+//!
 //! A render starts by letting the graph settle on a stopped clock: whatever
 //! still sounds from live play (a release, a reverb's tail) dies away there
-//! and is thrown away. Then its own transport plays from the range's start
+//! and is thrown away, and every plugin still starting up gets its activation
+//! from the main thread ([`plugins_waiting`]). Then its own transport plays from the range's start
 //! beat. At the range's end the transport stops, as a stop does live (the
 //! Sampler's pads let go, clips fade out, plugins get their note-offs), and
 //! the tail runs on until everything has been below [`TAIL_FLOOR`] for
@@ -40,9 +45,12 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use super::{Graph, MAX_FRAMES};
 use crate::limiter::Limiter;
+use crate::plugin_device::plugins_waiting;
+use crate::sampler::SamplerShared;
 use crate::snapshot::Mailbox;
 use crate::track::TrackId;
 use crate::transport::{TempoMap, Transport, TransportShared, EDGE_FRAMES};
@@ -58,6 +66,8 @@ pub const TAIL_FADE: f64 = 0.01;
 const SETTLE_QUIET: f64 = 1.0;
 /// ...or after this long, whatever still sounds.
 const SETTLE_MAX: f64 = 10.0;
+/// The longest the settle waits, by the clock, for plugins still starting up.
+const PLUGIN_WAIT: Duration = Duration::from_secs(10);
 
 // What the graph's loan is doing.
 const IDLE: u8 = 0;
@@ -252,6 +262,8 @@ pub struct Render {
     graph: Option<Box<Graph>>,
     home: Home,
     loan: Arc<Loan>,
+    /// The Sampler the render runs, told so while it does.
+    sampler: Arc<SamplerShared>,
     rate: u32,
     block: usize,
     phase: Phase,
@@ -262,6 +274,8 @@ pub struct Render {
     settled: usize,
     settle_need: usize,
     settle_most: usize,
+    /// When the render was made: the plugins' wait counts from here.
+    made: Instant,
     /// The render's own clock, which plays the range.
     transport: Transport,
     clock: TransportShared,
@@ -295,12 +309,15 @@ impl Render {
     /// A render of `graph` (which goes to `home` when done) for `spec`,
     /// already checked, on `map`'s tempo and rate, with the master at `gain`
     /// and stems from `slots`. Off the audio thread: it allocates.
-    pub(crate) fn new(mut graph: Box<Graph>, home: Home, loan: Arc<Loan>, spec: &RenderSpec, map: TempoMap, gain: f32, slots: Vec<usize>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(mut graph: Box<Graph>, home: Home, loan: Arc<Loan>, sampler: Arc<SamplerShared>, spec: &RenderSpec, map: TempoMap, gain: f32, slots: Vec<usize>) -> Self {
+        sampler.set_rendering(true);
         let rate = map.sample_rate();
         let seconds = |s: f64| (s.max(0.0) * f64::from(rate)).round() as u64;
         let body = range_frames(&map, spec.start, spec.end);
         let tail = if spec.tail_seconds.is_finite() { seconds(spec.tail_seconds) } else { 0 };
         graph.capture(&slots);
+        graph.freeze(true);
         let clock = TransportShared::default();
         clock.set_tempo(map.tempo_at(spec.start));
         let sig = map.signature_at(spec.start);
@@ -317,6 +334,7 @@ impl Render {
             graph: Some(graph),
             home,
             loan,
+            sampler,
             rate,
             block: spec.block.clamp(1, MAX_FRAMES),
             phase: Phase::Settling,
@@ -326,6 +344,7 @@ impl Render {
             settled: 0,
             settle_need: seconds(SETTLE_QUIET) as usize,
             settle_most: seconds(SETTLE_MAX) as usize,
+            made: Instant::now(),
             transport: Transport::new(rate),
             clock,
             limiter,
@@ -351,6 +370,12 @@ impl Render {
     /// The rate the files are at: the rate the devices run at.
     pub fn rate(&self) -> u32 {
         self.rate
+    }
+
+    /// Frames the graph has run so far, the settle's included: what a render
+    /// held to real time keeps level with the clock.
+    pub fn frames_run(&self) -> u64 {
+        self.settled as u64 + self.ran
     }
 
     /// Frames in the range.
@@ -416,7 +441,11 @@ impl Render {
             });
             self.settle_quiet = if sound { 0 } else { self.settle_quiet + self.block };
             self.settled += self.block;
-            if self.settle_quiet >= self.settle_need || self.settled >= self.settle_most {
+            // Quiet (or as long as it can be), and no plugin still being activated
+            // by the main thread, which the clock, not the audio, has to wait for.
+            let done = self.settle_quiet >= self.settle_need || self.settled >= self.settle_most;
+            let starting = plugins_waiting() > 0 && self.made.elapsed() < PLUGIN_WAIT;
+            if done && !starting {
                 self.phase = Phase::Playing;
             }
             return true;
@@ -525,8 +554,10 @@ impl Drop for Render {
     /// Gives the graph back: to the output callback that lent it, or to the
     /// mixer (dropping it sends its devices home).
     fn drop(&mut self) {
+        self.sampler.set_rendering(false);
         let Some(mut graph) = self.graph.take() else { return };
         graph.capture(&[]);
+        graph.freeze(false);
         match self.home {
             Home::Output => drop(self.loan.back.put(graph)),
             Home::Mixer => drop(graph),

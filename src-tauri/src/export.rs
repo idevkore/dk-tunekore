@@ -36,7 +36,7 @@ use serde_json::Value;
 use tauri::async_runtime::spawn_blocking;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::{AppHandle, Emitter, Manager, Runtime};
-use tunekore_engine::{range_frames, Render, RenderPhase, RenderProgress, RenderSpec, SamplerShared, TrackId, TrackInfo, PADS, SAMPLER_TRACK};
+use tunekore_engine::{range_frames, Render, RenderPhase, RenderProgress, RenderSpec, SamplerShared, TrackId, TrackInfo, TrackKind, PADS, SAMPLER_TRACK};
 
 use crate::project;
 pub use wav::Format;
@@ -110,6 +110,8 @@ pub struct Info {
     loop_on: bool,
     loop_seconds: f64,
     tail_seconds: f64,
+    /// The project plays through plugins, so it renders at real-time pace.
+    real_time: bool,
     tracks: Vec<TrackOut>,
     /// An export is running.
     busy: bool,
@@ -145,10 +147,31 @@ fn safe(name: &str) -> String {
     s.trim().trim_start_matches('.').to_string()
 }
 
+/// Whether the project plays through a plugin: today every device in a
+/// chain is one (an effect, or a Sampler pad's instrument), and so is every
+/// instrument track's source. Those projects render at real-time pace until
+/// plugins get their offline process mode in an export: a plugin that
+/// streams samples from disk, told it runs in real time, may not keep up
+/// with a render that runs faster.
+fn has_plugins(tracks: &[TrackInfo]) -> bool {
+    tracks.iter().any(|t| t.chain > 0 || (t.kind == TrackKind::Instrument && t.has_source))
+}
+
 /// Whether each track is heard: not muted, and soloed while any track is.
 fn heard(tracks: &[TrackInfo]) -> Vec<bool> {
     let any_solo = tracks.iter().any(|t| t.mix.solo);
     tracks.iter().map(|t| !t.mix.mute && (!any_solo || t.mix.solo)).collect()
+}
+
+/// `path` ending in `.wav`: kept if it does, added if not, so "Mix v1.2"
+/// becomes "Mix v1.2.wav" rather than "Mix v1.wav".
+fn with_wav(path: &Path) -> PathBuf {
+    if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("wav")) {
+        return path.to_path_buf();
+    }
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    name.push(".wav");
+    path.with_file_name(name)
 }
 
 /// Every file an export writes, and the render that fills them.
@@ -175,7 +198,7 @@ fn plan(req: &Request, tracks: &[TrackInfo], start: f64, end: f64, project: &str
     if req.path.trim().is_empty() {
         return Err("Choose where the files go.".into());
     }
-    let master = req.master.then(|| path.with_extension("wav"));
+    let master = req.master.then(|| with_wav(&path));
     let name = match &master {
         Some(m) => m.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default(),
         None => safe(project),
@@ -227,7 +250,7 @@ fn sampler_lengths(pads: &SamplerShared, heard: bool) -> (Option<f64>, Option<f6
     if !heard {
         return (None, None);
     }
-    let pass = pads.steps() as f64 / 4.0;
+    let pass = pads.pass_beats();
     let chain = pads.chain().len();
     let song = (pads.song_mode() && chain > 0).then_some(chain as f64 * pass);
     let pattern = (0..PADS).any(|p| pads.pattern(p) != 0).then_some(pass);
@@ -287,6 +310,7 @@ fn info(app: &AppHandle) -> Info {
         loop_on: transport.looping(),
         loop_seconds: seconds(l.start, l.end),
         tail_seconds: TAIL_SECONDS,
+        real_time: has_plugins(&tracks),
         tracks: tracks.iter().zip(heard).map(|(t, heard)| TrackOut { id: t.id, name: t.name.clone(), heard }).collect(),
         busy: job().is_some(),
     }
@@ -339,43 +363,67 @@ fn failed(what: &Path, e: impl std::fmt::Display) -> Stop {
     Stop::Failed(format!("Couldn't write {}: {e}", what.display()))
 }
 
-/// Runs `render` to its end, writing `plan`'s files as it goes, then moves
-/// them into place. `progress` hears after each block. Stopped short
-/// (`cancel`, the output closing, an error), it removes every file it
-/// started and leaves what was there before as it was.
-fn write(render: &mut Render, plan: &Plan, cancel: &AtomicBool, mut progress: impl FnMut(RenderProgress)) -> Result<Written, Stop> {
-    let mut folder = Folder(None);
-    if let Some(f) = &plan.folder {
-        if !f.is_dir() {
-            std::fs::create_dir_all(f).map_err(|e| failed(f, e))?;
-            folder.0 = Some(f.clone());
+/// Blocks in flight between the render and the file writer: the render runs
+/// at most this far ahead of the disk.
+const IN_FLIGHT: usize = 16;
+
+/// One block on its way to the writer: the master's frames and each stem's,
+/// in buffers made once and handed back to be filled again.
+struct Block {
+    master: [Vec<f32>; 2],
+    stems: Vec<[Vec<f32>; 2]>,
+}
+
+impl Block {
+    fn new(stems: usize) -> Self {
+        let side = || Vec::with_capacity(tunekore_engine::graph::MAX_FRAMES);
+        Self { master: [side(), side()], stems: (0..stems).map(|_| [side(), side()]).collect() }
+    }
+}
+
+fn fill(to: &mut [Vec<f32>; 2], part: tunekore_engine::Part<'_>) {
+    to[0].clear();
+    to[0].extend_from_slice(part.left);
+    to[1].clear();
+    to[1].extend_from_slice(part.right);
+}
+
+enum ToWriter {
+    Block(Block),
+    /// The render is done: cut every file to this many frames and move it in place.
+    Finish(u64),
+}
+
+/// The writer thread: writes each block it gets and hands the buffers back;
+/// on `Finish` cuts the files to length and moves them in place, all at the
+/// end. Its channel closing before then means the export stopped: dropping the
+/// writers removes their part files. `failed` tells the render to stop.
+fn writer(mut master: Option<wav::Writer>, mut stems: Vec<wav::Writer>, blocks: mpsc::Receiver<ToWriter>, empties: mpsc::Sender<Block>, failed_flag: Arc<AtomicBool>) -> Result<Written, Stop> {
+    let mut error = None;
+    let mut frames = None;
+    for msg in blocks {
+        match msg {
+            ToWriter::Block(b) => {
+                if error.is_none() {
+                    let put = |w: &mut wav::Writer, side: &[Vec<f32>; 2]| w.write(&side[0], &side[1]).map_err(|e| failed(w.path(), e));
+                    let r = master.as_mut().map_or(Ok(()), |w| put(w, &b.master)).and_then(|_| stems.iter_mut().zip(&b.stems).try_for_each(|(w, s)| put(w, s)));
+                    if let Err(e) = r {
+                        error = Some(e);
+                        failed_flag.store(true, Ordering::Relaxed);
+                    }
+                }
+                let _ = empties.send(b);
+            }
+            ToWriter::Finish(n) => {
+                frames = Some(n);
+                break;
+            }
         }
     }
-    let rate = render.rate();
-    let create = |p: &PathBuf| wav::Writer::create(p, rate, plan.format).map_err(|e| failed(p, e));
-    let mut master = plan.master.as_ref().map(create).transpose()?;
-    let mut stems = plan.stems.iter().map(create).collect::<Result<Vec<_>, _>>()?;
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            return Err(Stop::Cancelled);
-        }
-        if !render.next() {
-            break;
-        }
-        if let Some(w) = &mut master {
-            let m = render.master();
-            w.write(m.left, m.right).map_err(|e| failed(w.path(), e))?;
-        }
-        for (i, w) in stems.iter_mut().enumerate() {
-            let s = render.stem(i);
-            w.write(s.left, s.right).map_err(|e| failed(w.path(), e))?;
-        }
-        progress(render.progress());
+    if let Some(e) = error {
+        return Err(e);
     }
-    if render.cancelled() {
-        return Err(Stop::Interrupted);
-    }
-    let frames = render.length().ok_or_else(|| Stop::Failed("the render stopped before its end".into()))?;
+    let Some(frames) = frames else { return Err(Stop::Cancelled) };
     let mut parts = Parts(Vec::new());
     let mut done = Vec::new();
     let mut clipped = Vec::new();
@@ -392,8 +440,133 @@ fn write(render: &mut Render, plan: &Plan, cancel: &AtomicBool, mut progress: im
         std::fs::rename(part, path).map_err(|e| failed(path, e))?;
     }
     parts.0.clear();
-    folder.0 = None;
     Ok(Written { files: done, clipped, frames })
+}
+
+/// Runs `render` to its end and has `plan`'s files written as it goes, on a
+/// thread of their own, then moved into place. `progress` hears after each
+/// block. With `real_time` the render keeps level with the clock, never
+/// faster (see [`has_plugins`]). Stopped short (`cancel`, the output closing,
+/// an error), it removes every file it started and leaves what was there
+/// before as it was. The render is dropped, giving the graph back, as soon as
+/// it stops, whatever the disk is doing.
+fn write(mut render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, mut progress: impl FnMut(RenderProgress)) -> Result<Written, Stop> {
+    let mut folder = Folder(None);
+    if let Some(f) = &plan.folder {
+        if !f.is_dir() {
+            std::fs::create_dir_all(f).map_err(|e| failed(f, e))?;
+            folder.0 = Some(f.clone());
+        }
+    }
+    let rate = render.rate();
+    let create = |p: &PathBuf| wav::Writer::create(p, rate, plan.format).map_err(|e| failed(p, e));
+    let master = plan.master.as_ref().map(create).transpose()?;
+    let stems = plan.stems.iter().map(create).collect::<Result<Vec<_>, _>>()?;
+    let (to_writer, blocks) = mpsc::sync_channel(IN_FLIGHT);
+    let (to_render, empties) = mpsc::channel();
+    for _ in 0..IN_FLIGHT {
+        let _ = to_render.send(Block::new(plan.stems.len()));
+    }
+    let failed_flag = Arc::new(AtomicBool::new(false));
+    let thread = {
+        let failed_flag = failed_flag.clone();
+        std::thread::Builder::new()
+            .name("tunekore-export-files".into())
+            .spawn(move || writer(master, stems, blocks, to_render, failed_flag))
+            .map_err(|e| Stop::Failed(e.to_string()))?
+    };
+
+    // Waits a moment at a time, never past a cancel, the output closing or the writer failing.
+    let stop = |render: &Render| {
+        if render.cancelled() {
+            Some(Stop::Interrupted)
+        } else if cancel.load(Ordering::Relaxed) {
+            Some(Stop::Cancelled)
+        } else if failed_flag.load(Ordering::Relaxed) {
+            Some(Stop::Failed(String::new()))
+        } else {
+            None
+        }
+    };
+    let began = Instant::now();
+    let rendered = (|| {
+        loop {
+            if let Some(s) = stop(&render) {
+                return Err(s);
+            }
+            if !render.next() {
+                break;
+            }
+            progress(render.progress());
+            if real_time {
+                let due = Duration::from_secs_f64(render.frames_run() as f64 / f64::from(rate));
+                while let Some(ahead) = due.checked_sub(began.elapsed()).filter(|d| !d.is_zero()) {
+                    if let Some(s) = stop(&render) {
+                        return Err(s);
+                    }
+                    std::thread::sleep(ahead.min(Duration::from_millis(10)));
+                }
+            }
+            // The settle writes nothing.
+            if render.master().left.is_empty() && (0..render.stems()).all(|i| render.stem(i).left.is_empty()) {
+                continue;
+            }
+            let mut b = loop {
+                match empties.recv_timeout(Duration::from_millis(10)) {
+                    Ok(b) => break b,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if let Some(s) = stop(&render) {
+                            return Err(s);
+                        }
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => return Err(Stop::Failed(String::new())),
+                }
+            };
+            fill(&mut b.master, render.master());
+            for (i, s) in b.stems.iter_mut().enumerate() {
+                fill(s, render.stem(i));
+            }
+            let mut msg = ToWriter::Block(b);
+            loop {
+                match to_writer.try_send(msg) {
+                    Ok(()) => break,
+                    Err(mpsc::TrySendError::Full(m)) => {
+                        if let Some(s) = stop(&render) {
+                            return Err(s);
+                        }
+                        msg = m;
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(mpsc::TrySendError::Disconnected(_)) => return Err(Stop::Failed(String::new())),
+                }
+            }
+        }
+        if render.cancelled() {
+            return Err(Stop::Interrupted);
+        }
+        render.length().ok_or_else(|| Stop::Failed("the render stopped before its end".into()))
+    })();
+    // The graph goes back to the output now, before anything waits on the disk.
+    drop(render);
+    let result = match rendered {
+        Ok(frames) => {
+            let _ = to_writer.send(ToWriter::Finish(frames));
+            thread.join().unwrap_or_else(|_| Err(Stop::Failed("the file writer stopped".into())))
+        }
+        Err(stop) => {
+            drop(to_writer);
+            let wrote = thread.join().unwrap_or_else(|_| Err(Stop::Failed("the file writer stopped".into())));
+            // A write that failed says why; otherwise the reason the render stopped.
+            Err(match wrote {
+                Err(e @ Stop::Failed(_)) => e,
+                _ => stop,
+            })
+        }
+    };
+    if result.is_ok() {
+        folder.0 = None;
+    }
+    result
 }
 
 // ---- The job ----
@@ -409,6 +582,15 @@ fn phase(p: RenderPhase) -> &'static str {
 /// The export thread: plans, takes the graph, writes, gives it back and says
 /// how it went. `started` hears once the render has begun, or why it couldn't.
 fn run(app: AppHandle, req: Request, cancel: Arc<AtomicBool>, started: mpsc::SyncSender<Result<(), String>>) {
+    /// Clears the running export however `run` ends, a panic included, so
+    /// the next export isn't refused.
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            *job() = None;
+        }
+    }
+    let _clear = Clear;
     let began = Instant::now();
     let ended = project::exclusive(&app, || {
         let prepared = (|| {
@@ -416,9 +598,9 @@ fn run(app: AppHandle, req: Request, cancel: Arc<AtomicBool>, started: mpsc::Syn
             let (start, end) = range_of(&app, req.range, &tracks)?;
             let plan = plan(&req, &tracks, start, end, &project::name(&app))?;
             let render = crate::audio(&app).lock().unwrap_or_else(|e| e.into_inner()).engine.start_render(plan.spec.clone())?;
-            Ok::<_, String>((plan, render))
+            Ok::<_, String>((plan, render, has_plugins(&tracks)))
         })();
-        let (plan, mut render) = match prepared {
+        let (plan, render, real_time) = match prepared {
             Ok(p) => p,
             Err(e) => {
                 let _ = started.send(Err(e));
@@ -429,18 +611,17 @@ fn run(app: AppHandle, req: Request, cancel: Arc<AtomicBool>, started: mpsc::Syn
         let rate = f64::from(render.rate());
         let range = render.range() as f64 / rate;
         let mut last: Option<Instant> = None;
-        let result = write(&mut render, &plan, &cancel, |p| {
+        // `write` gives the graph back as soon as the render stops.
+        let result = write(render, &plan, &cancel, real_time, |p| {
             if last.is_none_or(|t| t.elapsed() >= PROGRESS_EVERY) {
                 last = Some(Instant::now());
                 let _ = app.emit("export:progress", ProgressEvent { phase: phase(p.phase), seconds: p.frames.min(p.range) as f64 / rate, range });
             }
         });
-        // The graph goes back to the output before anything else waits on the engine.
-        drop(render);
         crate::audio(&app).lock().unwrap_or_else(|e| e.into_inner()).engine.finish_render();
         Some((result, rate))
     });
-    *job() = None;
+    drop(_clear);
     let shown = |p: &[PathBuf]| p.iter().map(|f| f.display().to_string()).collect::<Vec<_>>();
     match ended {
         None => {}

@@ -190,6 +190,12 @@ export default function ProjectExport({ onClose, onMessage }: Props) {
         left out. Every file starts on the same frame.
         {format === "pcm16" ? " 16-bit files are dithered." : ""}
       </p>
+      {info?.realTime && (
+        <p className="small export-note" role="note">
+          This project plays through plugins, so it exports in real time: a song takes as long as it plays, so
+          sampled instruments keep up.
+        </p>
+      )}
 
       {running && (
         <div className="export-progress" role="status" aria-live="polite">

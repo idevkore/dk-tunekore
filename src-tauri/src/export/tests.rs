@@ -134,7 +134,11 @@ fn files_are_named_after_the_export_and_each_heard_track() {
     let mut r = request(&dir.join("Mix.aiff"), true, false, Format::Float32);
     r.tail = true;
     let p = plan(&r, &tracks, 0.0, 4.0, "x").unwrap();
-    assert_eq!((p.master.unwrap(), p.stems.len(), p.spec.tail_seconds), (dir.join("Mix.wav"), 0, TAIL_SECONDS));
+    assert_eq!((p.master.unwrap(), p.stems.len(), p.spec.tail_seconds), (dir.join("Mix.aiff.wav"), 0, TAIL_SECONDS));
+    let p = plan(&request(&dir.join("Mix v1.2"), true, false, Format::Pcm24), &tracks, 0.0, 4.0, "x").unwrap();
+    assert_eq!(p.master.unwrap(), dir.join("Mix v1.2.wav"), "a dotted name keeps its last part");
+    let p = plan(&request(&dir.join("Mix.WAV"), true, true, Format::Pcm24), &tracks, 0.0, 4.0, "x").unwrap();
+    assert_eq!((p.master.unwrap(), p.folder.unwrap()), (dir.join("Mix.WAV"), dir.join("Mix stems")));
 }
 
 #[test]
@@ -174,6 +178,10 @@ fn the_song_ends_at_the_last_heard_clip_or_the_samplers_song() {
     pads.set_song_mode(true);
     assert_eq!(sampler_lengths(&pads, true), (Some(12.0), Some(4.0)), "three entries of a bar");
     assert_eq!(sampler_lengths(&pads, false), (None, None), "a muted Sampler sets no end");
+    pads.set_steps(7);
+    pads.set_swing(1.0);
+    let (song, pass) = sampler_lengths(&pads, true);
+    assert!(pass.unwrap() > 7.0 / 4.0 && (song.unwrap() - 3.0 * pass.unwrap()).abs() < 1e-12, "an odd swung pattern ends on a long step: {pass:?}");
 }
 
 // ---- WAV files ----
@@ -252,13 +260,12 @@ fn an_export_writes_the_master_and_a_stem_per_heard_track_all_lined_up() {
     let dir = tempfile::tempdir().unwrap();
     let (mut engine, tracks) = engine();
     let p = plan(&request(&dir.path().join("Song.wav"), true, true, Format::Float32), &tracks, 0.0, 4.0, "x").unwrap();
-    let mut render = engine.start_render(p.spec.clone()).unwrap();
+    let render = engine.start_render(p.spec.clone()).unwrap();
     let calls = AtomicUsize::new(0);
-    let w = write(&mut render, &p, &AtomicBool::new(false), |_| {
+    let w = write(render, &p, &AtomicBool::new(false), false, |_| {
         calls.fetch_add(1, Ordering::Relaxed);
     })
     .unwrap();
-    drop(render);
     engine.finish_render();
     assert!(calls.load(Ordering::Relaxed) > 0, "progress was reported");
     assert_eq!(w.frames, 4 * BEAT as u64);
@@ -288,10 +295,10 @@ fn a_cancelled_export_leaves_no_half_written_file_and_keeps_what_was_there() {
     std::fs::write(&old, b"the export before").unwrap();
     let (mut engine, tracks) = engine();
     let p = plan(&request(&old, true, true, Format::Pcm16), &tracks, 0.0, 400.0, "x").unwrap();
-    let mut render = engine.start_render(RenderSpec { block: 512, ..p.spec.clone() }).unwrap();
+    let render = engine.start_render(RenderSpec { block: 512, ..p.spec.clone() }).unwrap();
     let cancel = AtomicBool::new(false);
     let mut playing = 0;
-    let r = write(&mut render, &p, &cancel, |progress| {
+    let r = write(render, &p, &cancel, false, |progress| {
         if progress.phase == RenderPhase::Playing {
             playing += 1;
         }
@@ -301,7 +308,6 @@ fn a_cancelled_export_leaves_no_half_written_file_and_keeps_what_was_there() {
             cancel.store(true, Ordering::Relaxed);
         }
     });
-    drop(render);
     engine.finish_render();
     assert_eq!(r.unwrap_err(), Stop::Cancelled);
     assert_eq!(listing(dir.path()), ["Song.wav"], "no part files, and the stems folder it made is gone");
@@ -317,7 +323,7 @@ fn an_export_stops_cleanly_when_the_output_closes_under_it() {
     let (engine, tracks) = engine();
     let engine = Arc::new(Mutex::new(engine));
     let p = plan(&request(&folder, false, true, Format::Pcm24), &tracks, 0.0, 10_000.0, "Song").unwrap();
-    let mut render = engine.lock().unwrap().start_render(RenderSpec { block: 256, ..p.spec.clone() }).unwrap();
+    let render = engine.lock().unwrap().start_render(RenderSpec { block: 256, ..p.spec.clone() }).unwrap();
     let closer = {
         let engine = engine.clone();
         std::thread::spawn(move || {
@@ -326,8 +332,7 @@ fn an_export_stops_cleanly_when_the_output_closes_under_it() {
             engine.lock().unwrap().close_output();
         })
     };
-    let r = write(&mut render, &p, &AtomicBool::new(false), |_| {});
-    drop(render);
+    let r = write(render, &p, &AtomicBool::new(false), false, |_| {});
     closer.join().unwrap();
     assert_eq!(r.unwrap_err(), Stop::Interrupted);
     assert!(listing(&folder).is_empty(), "the folder that was there stays, empty: {:?}", listing(&folder));
@@ -335,4 +340,36 @@ fn an_export_stops_cleanly_when_the_output_closes_under_it() {
     e.finish_render();
     assert!(!e.is_rendering());
     assert!(e.mixer().tracks().iter().all(|t| t.has_source), "the devices came home");
+}
+
+#[test]
+fn projects_with_plugins_are_held_to_real_time() {
+    let plain = [track(1, "Sampler", TrackMix::default()), track(2, "Clips", TrackMix::default())];
+    assert!(!has_plugins(&plain));
+    let mut fx = plain.clone();
+    fx[1].chain = 1;
+    assert!(has_plugins(&fx), "an effect in a chain is a plugin");
+    let mut synth = plain.clone();
+    synth[1].kind = TrackKind::Instrument;
+    assert!(has_plugins(&synth), "an instrument track plays a plugin");
+    synth[1].has_source = false;
+    assert!(!has_plugins(&synth), "an empty instrument track has none");
+
+    // 0.25 s of song after a 1 s settle: held to the clock it takes as long, unheld far less.
+    let dir = tempfile::tempdir().unwrap();
+    for real_time in [false, true] {
+        let (mut engine, tracks) = engine();
+        let p = plan(&request(&dir.path().join(format!("{real_time}.wav")), true, false, Format::Pcm24), &tracks, 0.0, 0.5, "x").unwrap();
+        let render = engine.start_render(p.spec.clone()).unwrap();
+        let began = Instant::now();
+        let w = write(render, &p, &AtomicBool::new(false), real_time, |_| {}).unwrap();
+        let took = began.elapsed().as_secs_f64();
+        engine.finish_render();
+        assert_eq!(w.frames, BEAT as u64 / 2);
+        if real_time {
+            assert!(took >= 1.2, "real time: {took} s for 1.25 s of audio");
+        } else {
+            assert!(took < 0.6, "unheld: {took} s");
+        }
+    }
 }

@@ -25,7 +25,7 @@
 //! [`Device::process`] allocates, locks and logs nothing: the channel tables,
 //! scratch buffers and event lists are made in [`plugin_device`].
 
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -47,6 +47,17 @@ const LIVE_EVENTS: usize = 512;
 const RETURNS: usize = 8;
 /// What the plugin sends out (notes, its own parameter moves), kept for later.
 const OUT_EVENTS: usize = 256;
+
+/// Plugin devices prepared but still waiting for the main thread to hand them
+/// a plugin activated at their rate. An offline render settles until this is
+/// 0 (or for at most its settle time), so a plugin that is still starting up
+/// isn't missing from the start of the file.
+static WAITING: AtomicUsize = AtomicUsize::new(0);
+
+/// How many plugin devices are waiting for their activation. Any thread.
+pub fn plugins_waiting() -> usize {
+    WAITING.load(Ordering::Acquire)
+}
 
 /// Where the device sits on its track.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,6 +178,8 @@ pub struct PluginDevice {
     /// A pad device's gains, and the ones it ended the last block at.
     gains: Option<PadGains>,
     last_gains: [f32; 2],
+    /// Counted in [`WAITING`]: prepared, with no plugin at its rate yet.
+    waiting: bool,
 }
 
 /// A device for a plugin in `role`, and the link the main thread keeps.
@@ -211,6 +224,7 @@ fn plugin_device_with(role: Role, gains: Option<PadGains>, request: Box<dyn Fn()
         was_bypassed: false,
         last_gains: gains.as_ref().map_or([1.0; 2], |g| g()),
         gains,
+        waiting: false,
     };
     (device, link)
 }
@@ -275,9 +289,20 @@ impl PluginDevice {
         self.publish_ready();
     }
 
-    fn publish_ready(&self) {
+    /// Says whether a plugin at the device's rate is in, and keeps
+    /// [`WAITING`] counting it while one is asked for and not yet in.
+    fn publish_ready(&mut self) {
         let ready = self.current.as_ref().is_some_and(|a| a.rate == self.rate && self.rate != 0);
         self.link.ready.store(ready, Ordering::Release);
+        let waiting = !ready && self.rate != 0;
+        if waiting != self.waiting {
+            self.waiting = waiting;
+            if waiting {
+                WAITING.fetch_add(1, Ordering::AcqRel);
+            } else {
+                WAITING.fetch_sub(1, Ordering::AcqRel);
+            }
+        }
     }
 
     fn note(&mut self, kind: &EventKind) {
@@ -438,6 +463,14 @@ impl Device for PluginDevice {
 
     fn latency(&self) -> usize {
         self.current.as_ref().filter(|a| a.rate == self.rate).map_or(0, |a| a.plugin.latency_samples() as usize)
+    }
+}
+
+impl Drop for PluginDevice {
+    fn drop(&mut self) {
+        if self.waiting {
+            WAITING.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 }
 

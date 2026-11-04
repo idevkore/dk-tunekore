@@ -29,6 +29,8 @@ export interface ExportInfo {
   loopSeconds: number;
   /** The longest tail. */
   tailSeconds: number;
+  /** The project plays through plugins, so it renders in real time. */
+  realTime: boolean;
   tracks: TrackOut[];
   /** An export is running already. */
   busy: boolean;

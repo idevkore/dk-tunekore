@@ -504,6 +504,10 @@ pub struct Graph {
     /// Each track's sound after its level, by slot, for an offline render's
     /// stems. Empty unless a render asked for that slot.
     stems: Vec<[Vec<f32>; 2]>,
+    /// Set while an offline render runs: edits wait in the mailbox (and land
+    /// once the graph is back on the output), so a render plays the project
+    /// as it was when it started.
+    frozen: bool,
 }
 
 impl Graph {
@@ -532,6 +536,7 @@ impl Graph {
             meters,
             home: Some(home),
             stems: Vec::new(),
+            frozen: false,
         };
         g.sync_state();
         g
@@ -588,6 +593,16 @@ impl Graph {
         };
     }
 
+    /// Off the audio thread: takes the newest edits now, then (`on`) leaves
+    /// later ones waiting until [`freeze`](Self::freeze) is called with false.
+    pub(crate) fn freeze(&mut self, on: bool) {
+        self.frozen = false;
+        if on {
+            self.take_snapshot();
+        }
+        self.frozen = on;
+    }
+
     /// A captured slot's sound for the last block run, left and right
     /// (empty when the slot isn't captured).
     pub(crate) fn stem(&self, slot: usize) -> (&[f32], &[f32]) {
@@ -609,6 +624,9 @@ impl Graph {
     /// Sends back what is waiting, then, once nothing is, switches to the
     /// newest snapshot and installs its devices.
     fn take_snapshot(&mut self) {
+        if self.frozen {
+            return;
+        }
         while let Some(g) = self.spill.pop() {
             if let Err(PushError::Full(g)) = self.garbage.push(g) {
                 self.spill.push(g); // room again: it was just popped

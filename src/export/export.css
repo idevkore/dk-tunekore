@@ -11,3 +11,4 @@
 .export-progress progress::-moz-progress-bar { background: var(--violet); }
 .export-progress .mono { color: var(--dim); min-width: 9em; text-align: right; }
 .export-error { color: var(--danger-text); line-height: 1.45; }
+.export-note { color: var(--warn); line-height: 1.45; }

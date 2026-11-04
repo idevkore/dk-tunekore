@@ -518,25 +518,40 @@ fn fixture_bundle() -> &'static std::path::Path {
     })
 }
 
+/// A constant while the transport plays, silent when stopped: quiet in the settle.
+struct Playing(f32);
+impl Device for Playing {
+    fn process(&mut self, ctx: &ProcessContext, _: &mut Events, audio: Buffers<'_>) {
+        if ctx.playing {
+            audio.left.iter_mut().for_each(|x| *x += self.0);
+            audio.right.iter_mut().for_each(|x| *x += self.0);
+        }
+    }
+}
+
+/// The app activates plugins for real time (`src-tauri/src/plugins/mod.rs`
+/// `setup_at`), and the shell holds a project with plugins to real-time pace
+/// in an export until offline mode is wired in. This renders through the
+/// output's borrowed graph, with the plugins activated as the app does.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_project_with_plugins_renders_through_them_in_offline_mode() {
+fn a_project_with_plugins_renders_through_them() {
     use crate::plugin_device::{plugin_device, plugin_device_for_pad, Role};
     use tunekore_plugins::{vst3, ProcessSetup};
 
     let classes = vst3::classes(fixture_bundle()).unwrap();
     let load = |name: &str| vst3::load(classes.iter().find(|c| c.name == name).unwrap()).unwrap();
-    // As an export will activate them (kOffline): see the report's follow-up for the shell's part.
-    let offline = ProcessSetup { sample_rate: f64::from(RATE), max_block_size: MAX_FRAMES as u32, realtime: false, ..Default::default() };
+    let as_the_app = ProcessSetup { sample_rate: f64::from(RATE), max_block_size: MAX_FRAMES as u32, realtime: true, ..Default::default() };
     let mut gain = load("Fixture Gain");
     let mut synth = load("Fixture Synth");
 
     let mut engine = Engine::new();
+    let (out, _voice) = engine.output(RATE, 2);
     // An effect: a constant through Fixture Gain, x1.8 from the edit its controller makes on load.
     let fx = engine.mixer().add_track("Fx").unwrap();
     engine.mixer().set_source(fx, Some(Box::new(Dc(0.25)))).unwrap();
     let (mut effect, _effect_link) = plugin_device(Role::Effect, Box::new(|| {}));
-    effect.install(gain.activate(&offline).unwrap(), RATE);
+    effect.install(gain.activate(&as_the_app).unwrap(), RATE);
     engine.mixer().insert(fx, 0, Box::new(effect)).unwrap();
     // An instrument: Fixture Synth on Sampler pad 3, played by the pattern's first step.
     let pads = engine.sampler();
@@ -544,13 +559,16 @@ fn a_project_with_plugins_renders_through_them_in_offline_mode() {
     pads.set_pattern(2, 1);
     let p = pads.clone();
     let (mut pad, _pad_link) = plugin_device_for_pad(2, Box::new(move || p.pad_gains(2)), Box::new(|| {}));
-    pad.install(synth.activate(&offline).unwrap(), RATE);
+    pad.install(synth.activate(&as_the_app).unwrap(), RATE);
     engine.mixer().insert(SAMPLER_TRACK, 0, Box::new(pad)).unwrap();
+    let cb = Callback::start(out, f32::NAN);
+    while cb.runs.load(Ordering::Relaxed) < 3 {
+        std::thread::sleep(Duration::from_millis(1));
+    }
 
     let mut render = engine.start_render(spec(0.0, 2.0, vec![SAMPLER_TRACK, fx], MAX_FRAMES)).unwrap();
     let f = collect(&mut render);
     drop(render);
-    engine.finish_render();
 
     assert_eq!(f.master[0].len(), 2 * BEAT);
     let wet = &f.stems[1][0];
@@ -560,10 +578,49 @@ fn a_project_with_plugins_renders_through_them_in_offline_mode() {
     let s = &f.stems[0][0];
     assert!(s[0] > 0.0 && s[..sixteenth].iter().all(|&x| x == s[0]), "the synth sounds from the step's first frame: {}", s[0]);
     assert!(s[sixteenth..].iter().all(|&x| x == 0.0), "and stops with the step");
+    let (out, _) = cb.stop();
+    drop(out);
+    engine.after_stream();
     assert_eq!(engine.mixer().track(fx).map(|t| t.chain), Some(1), "the plugin came home on its track");
     // The processors go before their controllers.
     drop(engine);
     drop((gain, synth));
+}
+
+/// A plugin the main thread hasn't activated yet when the render starts (no
+/// output was open, so the mixer prepared it just now) is in the file from
+/// its first frame: the settle waits for it.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_plugin_still_starting_up_is_in_the_export_from_its_first_frame() {
+    use crate::plugin_device::{plugin_device, Role};
+    use tunekore_plugins::{vst3, ProcessSetup};
+
+    let classes = vst3::classes(fixture_bundle()).unwrap();
+    let info = classes.iter().find(|c| c.name == "Fixture Gain").unwrap().clone();
+    let (asked, wait) = std::sync::mpsc::channel::<()>();
+    let (effect, link) = plugin_device(Role::Effect, Box::new(move || {
+        let _ = asked.send(());
+    }));
+    // The main thread, slow to answer: activates once asked, a while later.
+    let main = std::thread::spawn(move || {
+        let mut gain = vst3::load(&info).unwrap();
+        wait.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let setup = ProcessSetup { sample_rate: f64::from(link.rate()), max_block_size: MAX_FRAMES as u32, ..Default::default() };
+        link.give(gain.activate(&setup).unwrap(), link.rate());
+        gain
+    });
+    let mut engine = Engine::new();
+    let fx = engine.mixer().add_track("Fx").unwrap();
+    engine.mixer().set_source(fx, Some(Box::new(Playing(0.25)))).unwrap();
+    engine.mixer().insert(fx, 0, Box::new(effect)).unwrap();
+    let f = collect(&mut engine.start_render(spec(0.0, 1.0, vec![fx], MAX_FRAMES)).unwrap());
+    engine.finish_render();
+    let gain = main.join().unwrap();
+    assert!((f.stems[0][0][0] - 0.45).abs() < 1e-6, "the plugin is on from the first frame, not the dry 0.25: {}", f.stems[0][0][0]);
+    drop(engine);
+    drop(gain);
 }
 
 /// The same through a real output device's callback. Skips on CI and on
@@ -605,4 +662,100 @@ fn a_render_borrows_the_graph_from_a_real_output() {
     engine.close_output();
     assert!(worker.join().unwrap(), "the render was cancelled");
     assert_eq!(engine.mixer().track(t).map(|i| i.has_source), Some(true), "no device was lost");
+}
+
+/// A kit on pads 1 and 2, every step of pad 1 at 50% chance, ratchets on pad 2.
+fn chancy(engine: &mut Engine) {
+    let kick: Track = Arc::new(vec![(0..2_000).map(|i| 0.5 * (i as f32 * 0.03).sin()).collect()]);
+    let hat: Track = Arc::new(vec![(0..500).map(|i| if i % 3 == 0 { 0.3 } else { -0.2 }).collect()]);
+    engine.load_sample(0, Some((RATE, kick))).unwrap();
+    engine.load_sample(1, Some((RATE, hat))).unwrap();
+    let pads = engine.sampler();
+    pads.set_pattern(0, 0xFFFF);
+    pads.set_pattern(1, 0x5555);
+    for step in 0..16 {
+        pads.set_chance(0, 0, step, 0.5);
+        pads.set_ratchet(0, 1, step, 1 + (step % 4) as u8);
+    }
+}
+
+#[test]
+fn an_export_never_has_the_metronome_in_it() {
+    let mut engine = Engine::new();
+    engine.sampler().set_metronome(true);
+    let f = collect(&mut engine.start_render(spec(0.0, 4.0, vec![SAMPLER_TRACK], MAX_FRAMES)).unwrap());
+    engine.finish_render();
+    assert!(f.master[0].iter().chain(&f.stems[0][0]).all(|&x| x == 0.0), "no click in the master or the Sampler's stem");
+    assert!(engine.sampler().metronome(), "the user's metronome stays on");
+}
+
+#[test]
+fn renders_with_chance_and_ratchets_come_out_the_same_every_time() {
+    let mut engine = Engine::new();
+    chancy(&mut engine);
+    let mut render = |start: f64, end: f64| {
+        let f = collect(&mut engine.start_render(spec(start, end, vec![SAMPLER_TRACK], 700)).unwrap());
+        engine.finish_render();
+        f
+    };
+    let a = render(0.0, 8.0);
+    let b = render(0.0, 8.0);
+    assert_eq!(a.master, b.master, "the master repeats exactly");
+    assert_eq!(a.stems, b.stems, "so do the stems");
+    let hits = a.stems[0][0].windows(2).filter(|w| w[0] == 0.0 && w[1] != 0.0).count();
+    assert!(hits > 8 && hits < 40, "chance played some steps and left out others: {hits} onsets");
+    // The dice go with the step, not the order: a later bar alone rolls as it did in the song.
+    let bar = render(4.0, 8.0);
+    assert_eq!(bar.stems[0][0][..], a.stems[0][0][4 * BEAT..], "the second bar on its own is the song's second bar");
+}
+
+#[test]
+fn what_is_played_or_edited_during_an_export_stays_out_of_it() {
+    let reference = {
+        let mut engine = Engine::new();
+        chancy(&mut engine);
+        let t = engine.mixer().add_track("Dc").unwrap();
+        engine.mixer().set_source(t, Some(Box::new(Dc(0.125)))).unwrap();
+        collect(&mut engine.start_render(spec(0.0, 4.0, vec![SAMPLER_TRACK, t], 1_000)).unwrap())
+    };
+    let mut engine = Engine::new();
+    chancy(&mut engine);
+    let t = engine.mixer().add_track("Dc").unwrap();
+    engine.mixer().set_source(t, Some(Box::new(Dc(0.125)))).unwrap();
+    let pads = engine.sampler();
+    pads.set_recording(true);
+    let pattern = pads.pattern(1);
+    let mut render = engine.start_render(spec(0.0, 4.0, vec![SAMPLER_TRACK, t], 1_000)).unwrap();
+    let mut f = Files { master: [Vec::new(), Vec::new()], stems: vec![[Vec::new(), Vec::new()], [Vec::new(), Vec::new()]] };
+    let mut edited = false;
+    while render.next() {
+        // Pads played by hand (or from MIDI) while it renders, with record armed...
+        pads.trigger(1);
+        pads.trigger(2);
+        // ...and the track list edited: the Dc track removed and another added in its slot.
+        if !edited && render.progress().phase == Phase::Playing && render.progress().frames > 2 * BEAT as u64 {
+            edited = true;
+            engine.mixer().remove_track(t).unwrap();
+            let u = engine.mixer().add_track("New").unwrap();
+            engine.mixer().set_source(u, Some(Box::new(Dc(0.5)))).unwrap();
+        }
+        append(&mut f.master, render.master());
+        for i in 0..2 {
+            append(&mut f.stems[i], render.stem(i));
+        }
+    }
+    assert!(edited, "the edits came part way through the range");
+    let len = render.length().unwrap() as usize;
+    for file in std::iter::once(&mut f.master).chain(f.stems.iter_mut()) {
+        file[0].truncate(len);
+        file[1].truncate(len);
+    }
+    drop(render);
+    engine.finish_render();
+    assert_eq!(f.master, reference.master, "nothing played by hand is in the export");
+    assert_eq!(f.stems, reference.stems, "and each stem holds its own track only");
+    assert_eq!(pads.pattern(1), pattern, "nothing was recorded into the pattern");
+    // The edits waited, and are there now.
+    let names: Vec<String> = engine.tracks().into_iter().map(|t| t.name).collect();
+    assert_eq!(names, ["Sampler", "New"]);
 }
