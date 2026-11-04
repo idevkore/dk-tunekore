@@ -144,7 +144,8 @@ flowchart LR
   sources.
 - **Delay compensation.** Every plugin reports its latency, and the graph
   delays the other paths to match. Input-monitored tracks get a low-latency
-  mode, as in Live.
+  mode, as in Live. The graph reports the delay it adds as a whole through
+  `Graph::latency()`, which an offline render trims.
 - **Transport.** One beat clock drives both the timeline and the clip grid,
   with launch quantization. Plugins get tempo, position and play state every
   block. Serum's synced LFOs and Splice Bridge depend on this.
@@ -225,6 +226,33 @@ rather than edit the same ones.
   `RTSAN_ENABLE=1`; CI runs `RTSAN_ENABLE=1 cargo test -p tunekore-engine`
   on macOS. Engine tests run audio-thread code through `testing::realtime`,
   which also counts heap calls, so the checks mean something without RTSan.
+- **Offline render** (`engine/src/graph/render.rs`, #44).
+  `Engine::start_render` takes the running graph off the open output (the
+  callback lends it through a lock-free hand-off, plays on without it, and
+  takes it back once the `Render` drops), or starts one from the mixer when
+  no output is open, so no plugin is copied or activated again and nothing
+  waits for the main thread. Closing the output cancels a render and takes
+  the graph back first. A render settles on a stopped clock (what still
+  sounds from live play dies away unrecorded), plays the range on a
+  transport of its own, stops at its end as a live stop does, and lets the
+  tail ring out until everything is below -100 dBFS for 2 s (at most the
+  tail asked for). The master goes through the output callback's own code,
+  so it is the live output sample for sample; files skip the limiter's
+  lookahead and `Graph::latency()`, so every file starts on the range's
+  first frame and the stems (each track after its level, before the master)
+  line up with it. Nothing is allocated per block. Delay compensation (#43)
+  reports its delay through `Graph::latency()`, and the render's API stays
+  as it is. Every piece a render runs is marked `ProcessContext::offline`:
+  devices leave out live input (the Sampler's hits and recording, a
+  controller's notes to a plugin) and the metronome, let go of every key,
+  pedal and pad held when the render starts, and the Sampler rolls step
+  chance from each step's place, so an export repeats exactly. The graph's
+  snapshots are frozen while it runs, so edits land after it. The settle
+  also waits (up to 10 s by the clock, 3 s without progress) for plugins the
+  main thread is still activating. **Not yet:** plugins keep their real-time
+  process mode in an export, so a project with plugins exports at real-time
+  pace; offline mode (VST3 `kOffline`, reactivating each plugin on the main
+  thread before and after) is a follow-up in `src-tauri/src/plugins/mod.rs`.
 - **Projects** (`src-tauri/src/project.rs`). Format v2: one JSON object with
   a section per module. Every section reads and checks its part before any
   applies; a section that still fails leaves the project untitled and
@@ -244,12 +272,13 @@ rather than edit the same ones.
   lines, each in an alphabetical list of one line per module: its `mod`,
   its `commands()` and its `setup`.
 - **The main window** (`src/App.tsx`) is a shell with the Sampler / Timeline
-  switch and the window's status line. ⌘1 is the Sampler and ⌘2 the
-  Timeline (Nate's decision, 2026-10-29), from the keyboard, the View menu
-  and the switch; ⌘3 is kept for the Clip Grid. Tab also flips between them,
-  but only while nothing has focus. The Sampler is
-  `src/sampler/SamplerView.tsx` and stays mounted behind the Timeline;
-  `src/timeline/Timeline.tsx` is the Timeline's.
+  switch and the window's status line. ⌘1 is the Sampler and ⌘2 the Timeline
+  (Nate's decision, 2026-10-29), from the keyboard, the View menu and the
+  switch; ⌘3 is kept for the Clip Grid. File > Export Project… and ⇧⌘R open
+  the project export dialog over either view (`src/export/`); ⌘E stays the
+  Sampler's own export. Tab also flips between them, but only while nothing
+  has focus. The Sampler is `src/sampler/SamplerView.tsx` and stays mounted
+  behind the Timeline; `src/timeline/Timeline.tsx` is the Timeline's.
 
 - **The Timeline** (#36, `engine/src/clip.rs`, `src-tauri/src/timeline.rs`,
   `src/timeline/`). An audio track's source is a `ClipPlayer`. A clip starts at a beat and plays a span of its
@@ -292,6 +321,7 @@ Where the next pieces go:
 | Plugins in the app (#37, built) | `engine/src/plugin_device.rs`: a `PluginDevice` runs a plugin's audio half as an instrument (source slot), an effect (chain), or a pad's instrument (the Sampler track's chain, ahead of its effects). `prepare` only records the rate and asks the main thread, through the device's `PluginLink`, for a plugin activated at it; the link hands it over and takes back the old one. `process` maps `ProcessContext` to the plugin's transport and `Events` (plus live notes from the link) to its notes. The Sampler sends a plugin pad's hits as notes on the pad's channel (`SamplerShared::set_plugin_pad`). `Mixer::move_in_chain` reorders effects. | `src-tauri/src/plugins/`: the document of devices (main thread only), commands, editor windows, the `plugins` section, MIDI targets `plugin.<device>.<param>`, and the live-note route for a MIDI controller. `src/plugins/`: the device chain under the Timeline's tracks, the plugin picker, a pad's plugin in the Sampler's Inspector. |
 | Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
 | MIDI learn (#20, built) | none needed | `midi.rs` and `midi/`: the mappings are the `midi` section. Targets are ids such as `sampler.pad.selected.cutoff`, `sampler.pad.3.level`, `transport.tempo`, `master.level` and `track.1.volume`. A module adds its own by implementing `midi::Targets` for its prefix (`plugin.<id>.<param>` for #37) and calling `midi::register_targets` from its setup. |
+| Project export (#44, part 1, built) | `engine/src/graph/render.rs`: `Engine::start_render` renders the graph offline (see "Offline render"). | `src-tauri/src/export.rs`: the range (song end from the Timeline's clips and the Sampler's song), the files (`export/wav.rs`: 16-bit dithered, 24-bit, float; written on a thread of their own as `.part` and moved in place once all are done), real-time pace for projects with plugins until their offline mode is wired in, progress and cancel, File > Export Project… (⇧⌘R). `src/export/`: the dialog. Freeze, flatten and bounce to a clip are part 2. |
 
 ### Plugin hosting
 
@@ -329,9 +359,9 @@ Where the next pieces go:
     chain, the Sampler's included; a **Sampler pad** can play a plugin
     instrument instead of its sample. Its steps play C3 plus the pad's pitch
     for a step, by hand for as long as it is held, at the pad's level and pan,
-    with its choke group and mute. Its sample stays loaded. The Sampler's
-    export, bounce and stems leave plugin pads out until export renders the
-    graph (#44).
+    with its choke group and mute. Its sample stays loaded. The Sampler's own
+    export, bounce and stems still leave plugin pads out; the project export
+    (#44) renders them, since it renders the graph.
   - The **device chain** shows under the Timeline's tracks for the selected
     track (a clip's inspector takes its place while a clip is selected):
     on/off, the plugin's window, move along the chain, remove, Reload for a
@@ -438,7 +468,7 @@ something to release.
 | 3. Plugins | Scanner, VST3 and CLAP instruments and effects, editor windows, MIDI keyboard input, state saved with the project. Starts from soundCraft's host crates. A plugin instrument can sit on a pad. | Every plugin in the test list (section 5) loads, plays, opens its editor and comes back after save and reopen | 2 to 3 sprints |
 | 4. Timeline | Tracks, audio and MIDI clips, recording, MIDI editor, automation lanes, undo | A short song can be recorded with Serum and Arturia, saved and reopened | 4 sprints |
 | 5. Clip Grid | Clip slots, scenes, launch quantization, recording into slots, moving clips to the Timeline. Sampler patterns become clips. | Scenes launch on the bar, in sync with the Timeline's clock | 2 sprints |
-| 6. Mixer and export | Sends and returns, groups, sidechain, delay compensation, bounce, freeze, export | A test set with high-latency plugins exports sample-aligned | 3 sprints |
+| 6. Mixer and export | Sends and returns, groups, sidechain, delay compensation, bounce, freeze, export (project export to WAV and stems built ahead of the Mixer, #44 part 1) | A test set with high-latency plugins exports sample-aligned | 3 sprints |
 | 7. Library and Splice | Places, plugin browser, preview in tempo and key, drag from the Splice app | Splice samples and Splice Bridge work in a set | 1 sprint |
 | 8. Warp | Signalsmith Stretch, warp markers, tempo detection | A song from the Analyzer follows the set's tempo | 2 sprints |
 | 9. Windows | WASAPI and ASIO, VST3 and CLAP, WebView2, signed installer | The plugin test list passes on Windows | 2 sprints |
