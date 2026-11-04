@@ -5,6 +5,21 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.19: stem sends never overwrite
+
+idevkore/dk-tunekore#53
+
+- Fixed: sending a stem from the Analyzer to the pads again no longer writes
+  over the first file, so pads and saved projects that use it keep their
+  sound. A new send goes to a new file, numbered " 2", " 3"… as the Timeline
+  send already did, and a file of that name from another project is never
+  touched. A chopped set keeps one number for all its slices.
+- Both sends, to the pads and to the Timeline, claim each file before they
+  write it, so two sends at once can't pick the same name, and a send that
+  fails part way leaves no empty files. Tests send a whole stem and a chop
+  twice, and over another project's file, and check that the first files are
+  unchanged byte for byte.
+
 ## 0.1.18: plugins on tracks and pads
 
 idevkore/dk-tunekore#37
