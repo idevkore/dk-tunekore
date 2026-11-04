@@ -3,9 +3,9 @@
 //! - **Fixture CLAP Gain** (`dev.tunekore.fixture.gain`): an effect with a stereo main input, a
 //!   stereo sidechain and a stereo output. Output = main input × Gain, or the input when bypassed.
 //!   Parameters: 7 Gain (0 to 2, default 1), 3 Mode (stepped, 0 to 2), 9 Hidden, 11 Bypass,
-//!   12 Frequency (20 to 20,000 Hz, default 1,000), and three read-only counters the tests read:
-//!   20 timer ticks, 21 main-thread callbacks, 22 thread errors (calls the host's own thread check
-//!   says came on the wrong thread). Latency 3 samples, 5 in mode C: switching mode C in or out
+//!   12 Frequency (20 to 20,000 Hz, default 1,000), and read-only ones the tests read: 20 timer
+//!   ticks, 21 main-thread callbacks, 22 errors, 23 the sample rate it was activated at, 24 how
+//!   many times its module is initialised right now. Latency 3 samples, 5 in mode C: switching mode C in or out
 //!   asks the host for a restart (and, while off, says the latency changed); activating with a
 //!   new latency says so too. Tail 100. State: `FXCG` and gain, mode and frequency as
 //!   little-endian f64s; loading one tells the host the values changed. It turns ports on and off
@@ -18,11 +18,18 @@
 //!
 //!   It checks the buffers it is given: every port gets as many channels as it declares, and a
 //!   port the host switched off is marked constant. If not, it writes -1.
+//!
+//! Every plugin counts errors (the Gain shows the count as parameter 22), from its own records,
+//! not only the host's word: a main-thread call on another thread than the one that made it (or
+//! while the host says it is an audio thread), `process` on another thread than
+//! `start_processing`, audio-thread calls that overlap, or calls out of CLAP's order (activating
+//! twice, deactivating while processing, processing while not started).
 //! - **Fixture CLAP Synth** (`.synth`): an instrument (CLAP and MIDI notes, CLAP preferred) with a
 //!   stereo output: the held note's velocity from the note's frame, 0 after its note-off. MIDI CC 7
 //!   sets the level to its value / 127. Parameter 7 Volume (0 to 1) scales it. No state.
 //! - **Fixture CLAP Thru** (`.thru`): passes audio through and hands back every note, MIDI
-//!   message and parameter value it gets (notes as MIDI only), allocating nothing.
+//!   message and parameter value it gets (notes as MIDI only), allocating nothing. Its state is
+//!   empty: it saves nothing and loads only nothing.
 #![allow(clippy::missing_safety_doc)]
 
 use clap_sys::audio_buffer::clap_audio_buffer;
@@ -48,7 +55,29 @@ use clap_sys::string_sizes::{CLAP_NAME_SIZE, CLAP_PATH_SIZE};
 use clap_sys::version::CLAP_VERSION;
 use std::cell::UnsafeCell;
 use std::ffi::{c_char, c_void, CStr};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+/// `clap_entry.init` calls not yet balanced by `deinit`: CLAP allows one at a time.
+static MODULE_INITS: AtomicI32 = AtomicI32::new(0);
+
+/// The calling thread's OS id, for the plugin's own thread records.
+fn os_thread() -> usize {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn pthread_self() -> usize;
+        }
+        unsafe { pthread_self() }
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetCurrentThreadId() -> u32;
+        }
+        unsafe { GetCurrentThreadId() as usize }
+    }
+}
 
 struct Features<const N: usize>([*const c_char; N]);
 // SAFETY: pointers to static strings, never written.
@@ -91,10 +120,12 @@ const BYPASS: clap_id = 11;
 const FREQ: clap_id = 12;
 const TICKS: clap_id = 20;
 const CALLBACKS: clap_id = 21;
-const THREAD_ERRORS: clap_id = 22;
+const ERRORS: clap_id = 22;
+const RATE: clap_id = 23;
+const INITS: clap_id = 24;
 
 /// (id, name, min, max, default, flags) for the Gain's parameters.
-const GAIN_PARAMS: [(clap_id, &CStr, f64, f64, f64, u32); 8] = [
+const GAIN_PARAMS: [(clap_id, &CStr, f64, f64, f64, u32); 10] = [
     (GAIN, c"Gain", 0.0, 2.0, 1.0, CLAP_PARAM_IS_AUTOMATABLE),
     (MODE, c"Mode", 0.0, 2.0, 0.0, CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_IS_STEPPED | CLAP_PARAM_IS_ENUM),
     (HIDDEN, c"Hidden", 0.0, 1.0, 0.0, CLAP_PARAM_IS_HIDDEN),
@@ -102,7 +133,9 @@ const GAIN_PARAMS: [(clap_id, &CStr, f64, f64, f64, u32); 8] = [
     (FREQ, c"Frequency", 20.0, 20_000.0, 1_000.0, CLAP_PARAM_IS_AUTOMATABLE),
     (TICKS, c"Timer ticks", 0.0, 1e6, 0.0, CLAP_PARAM_IS_READONLY),
     (CALLBACKS, c"Main-thread calls", 0.0, 1e6, 0.0, CLAP_PARAM_IS_READONLY),
-    (THREAD_ERRORS, c"Thread errors", 0.0, 1e6, 0.0, CLAP_PARAM_IS_READONLY),
+    (ERRORS, c"Errors", 0.0, 1e6, 0.0, CLAP_PARAM_IS_READONLY),
+    (RATE, c"Sample rate", 0.0, 1e6, 0.0, CLAP_PARAM_IS_READONLY),
+    (INITS, c"Module inits", 0.0, 100.0, 0.0, CLAP_PARAM_IS_READONLY),
 ];
 const SYNTH_PARAMS: [(clap_id, &CStr, f64, f64, f64, u32); 1] = [(GAIN, c"Volume", 0.0, 1.0, 1.0, CLAP_PARAM_IS_AUTOMATABLE)];
 
@@ -160,7 +193,15 @@ struct Plug {
     ports_off: AtomicU32,
     ticks: AtomicU32,
     callbacks: AtomicU32,
-    thread_errors: AtomicU32,
+    errors: AtomicU32,
+    /// The thread that made it (its main thread) and the one that started processing.
+    main_tid: AtomicUsize,
+    audio_tid: AtomicUsize,
+    processing: AtomicBool,
+    /// Audio-thread calls running now (never more than one).
+    in_audio: AtomicU32,
+    /// The sample rate it was last activated at.
+    rate: Value,
     /// The editor "turned the gain knob": hand it back at the next flush or block.
     pending_edit: AtomicBool,
     /// The synth's level (audio thread only).
@@ -172,18 +213,46 @@ unsafe fn plug<'a>(p: *const clap_plugin) -> &'a Plug {
     unsafe { &*((*p).plugin_data as *const Plug) }
 }
 
-impl Plug {
-    fn main_thread(&self) {
-        let ok = unsafe { self.host_check.as_ref() }.and_then(|c| c.is_main_thread).is_none_or(|f| unsafe { f(self.host) });
-        if !ok {
-            self.thread_errors.fetch_add(1, Ordering::Relaxed);
+/// An audio-thread call, for as long as it runs: checks it doesn't overlap another one and that
+/// the host calls this an audio thread (and not the main thread, unless it is).
+struct AudioCall<'a>(&'a Plug);
+
+impl<'a> AudioCall<'a> {
+    fn new(x: &'a Plug) -> AudioCall<'a> {
+        if x.in_audio.fetch_add(1, Ordering::AcqRel) != 0 {
+            x.error();
         }
+        if !x.host_says(|c| c.is_audio_thread) {
+            x.error();
+        }
+        if os_thread() != x.main_tid.load(Ordering::Acquire) && x.host_says(|c| c.is_main_thread) {
+            x.error();
+        }
+        AudioCall(x)
+    }
+}
+
+impl Drop for AudioCall<'_> {
+    fn drop(&mut self) {
+        self.0.in_audio.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Plug {
+    fn error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
     }
 
-    fn audio_thread(&self) {
-        let ok = unsafe { self.host_check.as_ref() }.and_then(|c| c.is_audio_thread).is_none_or(|f| unsafe { f(self.host) });
-        if !ok {
-            self.thread_errors.fetch_add(1, Ordering::Relaxed);
+    /// What the host's thread check answers (true when it has none).
+    fn host_says(&self, f: impl Fn(&clap_host_thread_check) -> Option<unsafe extern "C" fn(*const clap_host) -> bool>) -> bool {
+        unsafe { self.host_check.as_ref() }.and_then(f).is_none_or(|f| unsafe { f(self.host) })
+    }
+
+    /// A main-thread call: on the thread that made the plugin, which the host calls the main
+    /// thread and not an audio thread.
+    fn main_thread(&self) {
+        if os_thread() != self.main_tid.load(Ordering::Acquire) || !self.host_says(|c| c.is_main_thread) || (!self.host_check.is_null() && self.host_says(|c| c.is_audio_thread)) {
+            self.error();
         }
     }
 
@@ -204,7 +273,9 @@ impl Plug {
             (Kind::Gain, FREQ) => Some(self.freq.get()),
             (Kind::Gain, TICKS) => Some(f64::from(self.ticks.load(Ordering::Relaxed))),
             (Kind::Gain, CALLBACKS) => Some(f64::from(self.callbacks.load(Ordering::Relaxed))),
-            (Kind::Gain, THREAD_ERRORS) => Some(f64::from(self.thread_errors.load(Ordering::Relaxed))),
+            (Kind::Gain, ERRORS) => Some(f64::from(self.errors.load(Ordering::Relaxed))),
+            (Kind::Gain, RATE) => Some(self.rate.get()),
+            (Kind::Gain, INITS) => Some(f64::from(MODULE_INITS.load(Ordering::Acquire))),
             _ => None,
         }
     }
@@ -305,6 +376,7 @@ unsafe extern "C" fn init(p: *const clap_plugin) -> bool {
     x.host_timer = ext(CLAP_EXT_TIMER_SUPPORT).cast();
     x.host_check = ext(CLAP_EXT_THREAD_CHECK).cast();
     x.host_latency = ext(CLAP_EXT_LATENCY).cast();
+    x.main_tid.store(os_thread(), Ordering::Release);
     x.main_thread();
     true
 }
@@ -313,9 +385,13 @@ unsafe extern "C" fn destroy(p: *const clap_plugin) {
     drop(unsafe { Box::from_raw((*p).plugin_data as *mut Plug) });
 }
 
-unsafe extern "C" fn activate(p: *const clap_plugin, _rate: f64, min: u32, max: u32) -> bool {
+unsafe extern "C" fn activate(p: *const clap_plugin, rate: f64, min: u32, max: u32) -> bool {
     let x = unsafe { plug(p) };
     x.main_thread();
+    if x.active.load(Ordering::Acquire) {
+        x.error();
+    }
+    x.rate.set(rate);
     // A latency the host hasn't heard yet is told while activating, as CLAP allows.
     if x.kind == Kind::Gain
         && x.told_latency.swap(x.latency(), Ordering::AcqRel) != x.latency()
@@ -330,20 +406,36 @@ unsafe extern "C" fn activate(p: *const clap_plugin, _rate: f64, min: u32, max: 
 unsafe extern "C" fn deactivate(p: *const clap_plugin) {
     let x = unsafe { plug(p) };
     x.main_thread();
+    if !x.active.load(Ordering::Acquire) || x.processing.load(Ordering::Acquire) {
+        x.error();
+    }
     x.active.store(false, Ordering::Release);
 }
 
 unsafe extern "C" fn start_processing(p: *const clap_plugin) -> bool {
-    unsafe { plug(p) }.audio_thread();
+    let x = unsafe { plug(p) };
+    let _call = AudioCall::new(x);
+    if !x.active.load(Ordering::Acquire) || x.processing.swap(true, Ordering::AcqRel) {
+        x.error();
+    }
+    x.audio_tid.store(os_thread(), Ordering::Release);
     true
 }
 
 unsafe extern "C" fn stop_processing(p: *const clap_plugin) {
-    unsafe { plug(p) }.audio_thread();
+    let x = unsafe { plug(p) };
+    let _call = AudioCall::new(x);
+    if !x.processing.swap(false, Ordering::AcqRel) {
+        x.error();
+    }
 }
 
 unsafe extern "C" fn reset(p: *const clap_plugin) {
-    unsafe { plug(p) }.audio_thread();
+    let x = unsafe { plug(p) };
+    let _call = AudioCall::new(x);
+    if !x.active.load(Ordering::Acquire) {
+        x.error();
+    }
 }
 
 /// Channel `c` of buffer `b`.
@@ -376,7 +468,11 @@ fn output_fits(pr: &clap_process) -> bool {
 
 unsafe extern "C" fn process(p: *const clap_plugin, pr: *const clap_process) -> clap_process_status {
     let x = unsafe { plug(p) };
-    x.audio_thread();
+    let _call = AudioCall::new(x);
+    // Only between start_processing and stop_processing, on the thread that started it.
+    if !x.processing.load(Ordering::Acquire) || os_thread() != x.audio_tid.load(Ordering::Acquire) {
+        x.error();
+    }
     let pr = unsafe { &*pr };
     let n = pr.frames_count as usize;
     let ins = unsafe { &*pr.in_events };
@@ -474,7 +570,7 @@ unsafe extern "C" fn get_extension(p: *const clap_plugin, id: *const c_char) -> 
         (&LATENCY as *const clap_plugin_latency).cast()
     } else if id == CLAP_EXT_TAIL && gain {
         (&TAIL as *const clap_plugin_tail).cast()
-    } else if id == CLAP_EXT_STATE && gain {
+    } else if id == CLAP_EXT_STATE && kind != Kind::Synth {
         (&STATE as *const clap_plugin_state).cast()
     } else if id == CLAP_EXT_GUI && gain {
         (&GUI as *const clap_plugin_gui).cast()
@@ -563,11 +659,13 @@ unsafe extern "C" fn params_text_to_value(_p: *const clap_plugin, _id: clap_id, 
 
 unsafe extern "C" fn params_flush(p: *const clap_plugin, ins: *const clap_input_events, out: *const clap_output_events) {
     let x = unsafe { plug(p) };
-    if x.active.load(Ordering::Acquire) {
-        x.audio_thread();
+    // While active it belongs to the audio thread (never during a block); while off, to the main.
+    let _call = if x.active.load(Ordering::Acquire) {
+        Some(AudioCall::new(x))
     } else {
         x.main_thread();
-    }
+        None
+    };
     if let Some(ins) = unsafe { ins.as_ref() } {
         let count = ins.size.map_or(0, |f| unsafe { f(ins) });
         for k in 0..count {
@@ -701,6 +799,10 @@ unsafe extern "C" fn state_save(p: *const clap_plugin, stream: *const clap_ostre
     x.main_thread();
     let s = unsafe { &*stream };
     let Some(write) = s.write else { return false };
+    if x.kind == Kind::Thru {
+        // Nothing to keep: an empty state, and that is a success.
+        return true;
+    }
     let mut values = Vec::with_capacity(24);
     for v in [x.gain.get(), x.mode.get(), x.freq.get()] {
         values.extend_from_slice(&v.to_le_bytes());
@@ -714,6 +816,10 @@ unsafe extern "C" fn state_load(p: *const clap_plugin, stream: *const clap_istre
     x.main_thread();
     let s = unsafe { &*stream };
     let Some(read) = s.read else { return false };
+    if x.kind == Kind::Thru {
+        let mut one = [0u8; 1];
+        return unsafe { read(s, one.as_mut_ptr().cast(), 1) } == 0;
+    }
     let mut data = Vec::new();
     let mut buf = [0u8; 5];
     loop {
@@ -959,7 +1065,12 @@ unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const
         ports_off: AtomicU32::new(0),
         ticks: AtomicU32::new(0),
         callbacks: AtomicU32::new(0),
-        thread_errors: AtomicU32::new(0),
+        errors: AtomicU32::new(0),
+        main_tid: AtomicUsize::new(0),
+        audio_tid: AtomicUsize::new(0),
+        processing: AtomicBool::new(false),
+        in_audio: AtomicU32::new(0),
+        rate: Value::new(0.0),
         pending_edit: AtomicBool::new(false),
         level: UnsafeCell::new(0.0),
         gui: UnsafeCell::new(Gui::default()),
@@ -973,10 +1084,13 @@ unsafe extern "C" fn factory_create(_f: *const clap_plugin_factory, host: *const
 static FACTORY: clap_plugin_factory = clap_plugin_factory { get_plugin_count: Some(factory_count), get_plugin_descriptor: Some(factory_desc), create_plugin: Some(factory_create) };
 
 unsafe extern "C" fn entry_init(_path: *const c_char) -> bool {
+    MODULE_INITS.fetch_add(1, Ordering::AcqRel);
     true
 }
 
-unsafe extern "C" fn entry_deinit() {}
+unsafe extern "C" fn entry_deinit() {
+    MODULE_INITS.fetch_sub(1, Ordering::AcqRel);
+}
 
 unsafe extern "C" fn entry_get_factory(id: *const c_char) -> *const c_void {
     if !id.is_null() && unsafe { CStr::from_ptr(id) } == CLAP_PLUGIN_FACTORY_ID {

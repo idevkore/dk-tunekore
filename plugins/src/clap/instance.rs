@@ -10,12 +10,13 @@
 //! ramped parameter changes and the transport, and allocates, locks and logs nothing; values set
 //! from the UI wait in a per-parameter mailbox and parameters are normalized at the interface;
 //! `start_processing` runs on the audio thread; the plugin's main-thread requests (callbacks,
-//! timers, flushes, resizes) are served from `poll`; and the plugin is destroyed on the
-//! controller's thread, never on the audio thread.
+//! timers, flushes, resizes) are served from `poll`, which flushes in the audio thread's place
+//! when no block runs; and the plugin is destroyed on the controller's thread, never on the audio
+//! thread.
 
 use super::editor::Editor;
 use super::events::{self, Dialects, InEvents, OutEvents};
-use super::host::Host;
+use super::host::{Host, HostShared};
 use super::module::{read_chars, Module};
 use super::shim;
 use crate::plugin::*;
@@ -49,8 +50,8 @@ const MAX_PORTS: u32 = 16;
 const MAX_PORT_CHANNELS: u32 = 64;
 /// Most parameters read from one plugin.
 const MAX_PARAMS: u32 = 4096;
-/// Largest plugin state we take from or give to a plugin.
-pub(crate) const MAX_STATE_BYTES: usize = 128 << 20;
+/// Largest plugin state we take from or give to a plugin: what the app's project takes.
+pub(crate) const MAX_STATE_BYTES: usize = 256 << 20;
 /// How long stopping or shutting down waits for a block still running on the audio thread (as
 /// for VST3: an offline render can spend seconds in one block).
 const PROCESS_WAIT: Duration = Duration::from_secs(10);
@@ -185,6 +186,12 @@ pub(crate) struct Instance {
     activating: AtomicBool,
     /// Latency at the last activation.
     latency: AtomicU32,
+    /// Plugin calls the processor has made (blocks and flushes): how the controller tells whether
+    /// blocks are running.
+    blocks: AtomicU64,
+    /// The main thread is making an audio-thread call in the audio thread's place, while no block
+    /// runs; a block that starts meanwhile is skipped.
+    stand_in: AtomicBool,
     // Last: the module keeps the plugin's code mapped until everything above is gone.
     module: Arc<Module>,
 }
@@ -271,6 +278,8 @@ impl Instance {
             processing: AtomicBool::new(false),
             activating: AtomicBool::new(false),
             latency: AtomicU32::new(0),
+            blocks: AtomicU64::new(0),
+            stand_in: AtomicBool::new(false),
             module: module.clone(),
         }))
     }
@@ -456,11 +465,11 @@ impl Instance {
         if was_processing {
             // CLAP stops processing on the audio thread. No block runs now and the processor is
             // stale, so this thread stands in for it (and says so to the plugin's thread checks).
-            let shared = &self.host.shared;
-            shared.set_audio_thread();
-            // SAFETY: a live, processing plugin; no `process` call is running or can start.
-            let r = unsafe { shim::v_p(vt.stop_processing, o.plugin) };
-            shared.clear_audio_thread();
+            let r = {
+                let _audio = AudioThread::mark(&self.host.shared);
+                // SAFETY: a live, processing plugin; no `process` call is running or can start.
+                unsafe { shim::v_p(vt.stop_processing, o.plugin) }
+            };
             if self.guard("clap_plugin.stop_processing", r).is_err() {
                 return;
             }
@@ -526,6 +535,25 @@ impl Instance {
         self.host.shared.latency_changed.store(false, Ordering::Release);
         // `stop` above retired the previous processor; the new one belongs to this generation.
         Ok((layout, self.generation.load(Ordering::SeqCst), latency, dialects))
+    }
+
+    /// Runs `f` on this thread as the audio thread, in its place, when no block is running; a
+    /// block that starts meanwhile is skipped ([`ProcessError::Busy`]). `None` when a block is
+    /// running. Main thread.
+    fn as_audio_thread<R>(&self, f: impl FnOnce() -> R) -> Option<R> {
+        // As with `process`: each side says what it is doing, then looks at the other (SeqCst on
+        // both), so at most one of them goes ahead.
+        self.stand_in.store(true, Ordering::SeqCst);
+        if self.in_process.load(Ordering::SeqCst) != 0 {
+            self.stand_in.store(false, Ordering::SeqCst);
+            return None;
+        }
+        let r = {
+            let _audio = AudioThread::mark(&self.host.shared);
+            f()
+        };
+        self.stand_in.store(false, Ordering::SeqCst);
+        Some(r)
     }
 
     // ---- shutdown -------------------------------------------------------------------------
@@ -600,6 +628,23 @@ impl Instance {
                 }
             }
         }
+    }
+}
+
+/// Marks the calling thread as the audio thread for as long as it lives. The audio thread is the
+/// one inside an audio-thread call; between calls, no thread is one.
+struct AudioThread<'a>(&'a HostShared);
+
+impl<'a> AudioThread<'a> {
+    fn mark(shared: &'a HostShared) -> AudioThread<'a> {
+        shared.set_audio_thread();
+        AudioThread(shared)
+    }
+}
+
+impl Drop for AudioThread<'_> {
+    fn drop(&mut self) {
+        self.0.clear_audio_thread();
     }
 }
 
@@ -678,6 +723,9 @@ pub struct ClapController {
     ranges: Vec<Range>,
     editor: Option<Editor>,
     failure_reported: bool,
+    /// The plugin asked for a flush while active, at this many processor calls: if no block runs
+    /// by the next `poll`, the main thread flushes in its place.
+    flush_wait: Option<u64>,
     /// Losses already logged: controller events, mailbox writes refused, audio-thread log lines.
     logged_losses: (u32, u32, u32),
 }
@@ -691,6 +739,7 @@ impl ClapController {
             ranges: Vec::new(),
             editor: None,
             failure_reported: false,
+            flush_wait: None,
             logged_losses: (0, 0, 0),
             inst,
         };
@@ -705,29 +754,43 @@ impl ClapController {
         self.inst.objs().ok_or_else(|| PluginError::Failed("the plugin is gone".into()))
     }
 
-    /// Hands values waiting in the mailbox to an inactive plugin through `params.flush`, on the
-    /// main thread (an active one gets them in its next block), and reports what it says back.
-    fn flush_now(&mut self) {
+    /// Hands values waiting in the mailbox to the plugin through `params.flush`, and reports what
+    /// it hands back (edits in its window): on the main thread while the plugin is off, and in the
+    /// audio thread's place while it is on but no block runs (its device is switched off, or no
+    /// output is open). `false` when a block is running right now: that block delivers them.
+    fn flush_now(&mut self) -> bool {
         let shared = &self.inst.host.shared;
-        if self.inst.is_active() || !shared.is_main_thread() {
-            return;
+        if !shared.is_main_thread() {
+            return false;
         }
-        let Some(o) = self.inst.live() else { return };
-        let Some(p) = o.params() else { return };
+        let Some(o) = self.inst.live() else { return true };
+        let Some(p) = o.params() else { return true };
         if p.flush.is_none() {
-            return;
+            return true;
         }
-        let mut ins = Box::new(InEvents::new());
+        let (mut ins, mut outs) = (Box::new(InEvents::new()), Box::new(OutEvents::new()));
         let ranges = &self.ranges;
-        shared.mailbox.drain(|id, v| ins.can_take(id) && ins.add_param(id, 0, plain_of(ranges, id, v)));
-        ins.seal();
-        let mut outs = Box::new(OutEvents::new());
-        let (i, out) = (ins.as_clap(), outs.as_clap());
-        // SAFETY: a live, inactive plugin; main thread; both lists outlive the call.
-        if self.inst.guard("clap_plugin_params.flush", unsafe { shim::v_ppp(p.flush, o.plugin, &i as *const _, &out as *const _) }).is_err() {
-            return;
+        let call = |ins: &mut InEvents, outs: &mut OutEvents| {
+            shared.mailbox.drain(|id, v| ins.can_take(id) && ins.add_param(id, 0, plain_of(ranges, id, v)));
+            ins.seal();
+            let (i, out) = (ins.as_clap(), outs.as_clap());
+            // SAFETY: a live plugin; main thread while it is off, or standing in for the audio
+            // thread (no block can run) while it is on; both lists outlive the call.
+            unsafe { shim::v_ppp(p.flush, o.plugin, &i as *const _, &out as *const _) }
+        };
+        let r = if self.inst.is_active() {
+            match self.inst.as_audio_thread(|| call(&mut ins, &mut outs)) {
+                Some(r) => r,
+                None => return false,
+            }
+        } else {
+            call(&mut ins, &mut outs)
+        };
+        if self.inst.guard("clap_plugin_params.flush", r).is_err() {
+            return true;
         }
         report_out(&self.inst, &self.ranges, &outs, None);
+        true
     }
 
     /// The parameter's value now, in its own units, as the plugin's main thread sees it.
@@ -881,7 +944,10 @@ impl PluginController for ClapController {
             return;
         }
         self.inst.host.shared.mailbox.post(id, normalized.clamp(0.0, 1.0));
-        self.flush_now();
+        // An active plugin gets it in its next block (a zero-frame one is enough).
+        if !self.inst.is_active() {
+            self.flush_now();
+        }
     }
 
     fn param_text(&mut self, id: ParamId, normalized: f64) -> Option<String> {
@@ -927,7 +993,11 @@ impl PluginController for ClapController {
         let Some(s) = o.state() else {
             return if data.is_empty() { Ok(()) } else { Err(PluginError::Unsupported("this plugin keeps no state".into())) };
         };
-        if data.is_empty() || data.len() > MAX_STATE_BYTES {
+        // A plugin that saved nothing has nothing to load (a stateless utility does that).
+        if data.is_empty() {
+            return Ok(());
+        }
+        if data.len() > MAX_STATE_BYTES {
             return Err(PluginError::Failed("not a plugin state".into()));
         }
         let mut r = Reader { data, at: 0 };
@@ -941,10 +1011,23 @@ impl PluginController for ClapController {
 
     fn poll(&mut self, out: &mut Vec<ControllerEvent>) {
         self.inst.serve();
-        let shared = &self.inst.host.shared;
-        if shared.flush.swap(false, Ordering::AcqRel) {
-            // An active plugin hands its edits back in its next block.
-            self.flush_now();
+        let requested = self.inst.host.shared.flush.swap(false, Ordering::AcqRel);
+        if !self.inst.is_active() {
+            self.flush_wait = None;
+            if requested {
+                self.flush_now();
+            }
+        } else {
+            // An active plugin hands its edits back in its next block. Asked at the last poll and
+            // no block since: its device isn't running blocks (it is switched off), so the main
+            // thread flushes in the audio thread's place. (If a block starts that moment, it
+            // hands them back itself.)
+            if self.flush_wait.take() == Some(self.inst.blocks.load(Ordering::Acquire)) {
+                self.flush_now();
+            }
+            if requested {
+                self.flush_wait = Some(self.inst.blocks.load(Ordering::Acquire));
+            }
         }
         let size = self.inst.host.shared.resize.swap(0, Ordering::AcqRel);
         if size != 0
@@ -1202,7 +1285,7 @@ impl ClapProcessor {
             return Err(ProcessError::BadBlock);
         }
         let inst = Arc::clone(&self.inst);
-        inst.host.shared.set_audio_thread();
+        let _audio = AudioThread::mark(&inst.host.shared);
         self.events.clear();
         self.out.clear();
         // Offsets past the block would send the plugin outside its buffers: they land on its last
@@ -1223,6 +1306,7 @@ impl ClapProcessor {
             // SAFETY: a live, active plugin; the audio thread; no `process` runs; both lists live on
             // this frame and in `self` for the call.
             let r = unsafe { shim::v_ppp_rt(flush, o.plugin, &ins as *const _, &outs as *const _) };
+            inst.blocks.fetch_add(1, Ordering::Release);
             self.take_counts();
             if let Some(Err(Thrown)) = r {
                 inst.fail_rt("clap_plugin_params.flush", None);
@@ -1288,6 +1372,7 @@ impl ClapProcessor {
         // this processor's own buffers; the port tables, event lists and transport live in `self`
         // or on this frame, untouched until the call returns.
         let r = unsafe { shim::i_pp_rt(vt.process, o.plugin, &process as *const clap_process) };
+        inst.blocks.fetch_add(1, Ordering::Release);
         self.take_counts();
         match r {
             Some(Ok(status)) if status != CLAP_PROCESS_ERROR => {}
@@ -1352,13 +1437,15 @@ impl Plugin for ClapProcessor {
             block.outputs.silence(block.frames);
             return Err(ProcessError::Failed);
         }
-        // Say a call is running, then look again: either `stop`/`shutdown` sees us and waits, or
-        // we see what it changed and do not call the plugin.
+        // Say a call is running, then look again: either `stop`/`shutdown` (or the main thread
+        // standing in for this one) sees us and waits, or we see what it changed and do not call
+        // the plugin.
         inst.in_process.fetch_add(1, Ordering::SeqCst);
-        if inst.dead.load(Ordering::SeqCst) || inst.generation.load(Ordering::SeqCst) != self.generation || inst.is_failed() {
+        let busy = inst.stand_in.load(Ordering::SeqCst);
+        if busy || inst.dead.load(Ordering::SeqCst) || inst.generation.load(Ordering::SeqCst) != self.generation || inst.is_failed() {
             inst.in_process.fetch_sub(1, Ordering::SeqCst);
             block.outputs.silence(block.frames);
-            return Err(ProcessError::Stale);
+            return Err(if busy { ProcessError::Busy } else { ProcessError::Stale });
         }
         let r = self.run(block);
         self.inst.in_process.fetch_sub(1, Ordering::SeqCst);

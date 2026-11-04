@@ -2,12 +2,14 @@
 //!
 //! Derived from soundCraft's `clap-host` (`ffi.rs`: `Bundle`), MIT OR Apache-2.0; see
 //! `third_party/soundcraft/`. What changed: every call into plugin code goes through the
-//! exception-catching shim (`clap_entry.init`, `get_factory` and `deinit` included); loaded modules
-//! are never unloaded, and `deinit` runs once, from [`exit_modules`] at quit, for modules with no
-//! live or leaked instance; errors are [`PluginError`].
+//! exception-catching shim (`clap_entry.init`, `get_factory` and `deinit` included); modules are
+//! known by their real path (a link to one is the same module, initialised once) and are never
+//! unloaded, and `deinit` runs once, from [`exit_modules`] at quit, for modules with no live or
+//! leaked instance; no lock is held while `clap_entry.init` runs; errors are [`PluginError`].
 
 use super::shim;
 use crate::plugin::PluginError;
+use crate::rt::os_thread;
 use crate::scan::bundles;
 use clap_sys::entry::clap_plugin_entry;
 use clap_sys::factory::plugin_factory::{clap_plugin_factory, CLAP_PLUGIN_FACTORY_ID};
@@ -18,7 +20,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::mem::ManuallyDrop;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, TryLockError};
 
 /// Most plugins one factory may report (hostile-input cap).
 const MAX_PLUGINS: u32 = 1024;
@@ -54,12 +56,21 @@ unsafe impl Send for Module {}
 // SAFETY: as above.
 unsafe impl Sync for Module {}
 
-type Loaded = Vec<(PathBuf, Arc<Module>)>;
+/// The loaded modules, by real path, oldest first (deinitialised newest first), and the ones
+/// being loaded now, with the thread loading each.
+#[derive(Default)]
+struct Loaded {
+    modules: Vec<(PathBuf, Arc<Module>)>,
+    loading: Vec<(PathBuf, usize)>,
+}
 
-/// Loaded modules, oldest first (deinitialised newest first).
-fn loaded() -> &'static Mutex<Loaded> {
-    static L: OnceLock<Mutex<Loaded>> = OnceLock::new();
-    L.get_or_init(|| Mutex::new(Vec::new()))
+fn loaded() -> &'static (Mutex<Loaded>, Condvar) {
+    static L: OnceLock<(Mutex<Loaded>, Condvar)> = OnceLock::new();
+    L.get_or_init(|| (Mutex::new(Loaded::default()), Condvar::new()))
+}
+
+fn lock_loaded() -> MutexGuard<'static, Loaded> {
+    loaded().0.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Set once the modules were deinitialised: loading another one after that is refused.
@@ -86,18 +97,41 @@ pub(crate) fn read_chars(buf: &[c_char]) -> String {
 }
 
 impl Module {
-    /// Loads (once per path, then cached for the life of the process) and initialises a `.clap`.
+    /// Loads (once per real path, then cached for the life of the process) and initialises a
+    /// `.clap`. A link to a loaded one is the same module.
+    ///
+    /// `clap_entry.init` runs with no lock held: a plugin may run the event loop in it (a licence
+    /// dialog), and a load from there must not deadlock. Another thread loading the same module
+    /// waits for it; the same thread asking for it again from inside `init` gets an error.
     pub fn load(path: &Path) -> Result<Arc<Module>, PluginError> {
-        let mut cache = loaded().lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((_, m)) = cache.iter().find(|(p, _)| p == path) {
-            return Ok(m.clone());
+        let err = |m: &str| PluginError::Load { path: path.display().to_string(), reason: m.to_string() };
+        let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let me = os_thread();
+        let mut st = lock_loaded();
+        loop {
+            if let Some((_, m)) = st.modules.iter().find(|(p, _)| *p == key) {
+                return Ok(m.clone());
+            }
+            match st.loading.iter().find(|(p, _)| *p == key) {
+                Some(&(_, t)) if t == me => return Err(err("it is still starting (it asked for itself while starting)")),
+                Some(_) => st = loaded().1.wait(st).unwrap_or_else(PoisonError::into_inner),
+                None => break,
+            }
         }
         if MODULES_EXITED.load(Ordering::Acquire) {
-            return Err(PluginError::Load { path: path.display().to_string(), reason: "plugin hosting has shut down".into() });
+            return Err(err("plugin hosting has shut down"));
         }
-        let m = Arc::new(Module::open(path)?);
-        cache.push((path.to_path_buf(), m.clone()));
-        Ok(m)
+        st.loading.push((key.clone(), me));
+        drop(st);
+        let opened = Module::open(&key).map(Arc::new);
+        let mut st = lock_loaded();
+        st.loading.retain(|(p, _)| *p != key);
+        if let Ok(m) = &opened {
+            st.modules.push((key, m.clone()));
+        }
+        drop(st);
+        loaded().1.notify_all();
+        opened
     }
 
     fn open(path: &Path) -> Result<Module, PluginError> {
@@ -241,15 +275,15 @@ pub(crate) fn exit_modules() {
     if MODULES_EXITED.swap(true, Ordering::AcqRel) {
         return;
     }
-    let mut cache = match loaded().try_lock() {
+    let mut st = match loaded().0.try_lock() {
         Ok(g) => g,
         Err(TryLockError::Poisoned(p)) => p.into_inner(),
-        // Another thread is loading a module right now: leave every module as it is.
+        // Another thread is touching the cache right now: leave every module as it is.
         Err(TryLockError::WouldBlock) => return,
     };
     let mut kept = Vec::new();
     let mut exit = Vec::new();
-    while let Some((path, m)) = cache.pop() {
+    while let Some((path, m)) = st.modules.pop() {
         if m.leaked.load(Ordering::Acquire) {
             kept.push((path, m));
             continue;
@@ -260,8 +294,8 @@ pub(crate) fn exit_modules() {
         }
     }
     kept.reverse();
-    *cache = kept;
-    drop(cache);
+    st.modules = kept;
+    drop(st);
     for m in exit {
         m.deinit();
     }

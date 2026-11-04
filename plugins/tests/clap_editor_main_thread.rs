@@ -52,12 +52,23 @@ fn main() {
     assert_eq!(gain.resize_editor(EditorSize { width: 5000, height: 50 }), Some(EditorSize { width: 1000, height: 150 }), "adjusted to its limits");
     assert!(gain.editor_resizable());
 
-    // While it processes, an edit in its window comes back in the next block instead.
+    // Active, but its device runs no blocks (switched off in the device chain): the edit in its
+    // window can't wait for a block, so the main thread flushes it in the audio thread's place,
+    // one poll later, and the project hears of it.
     let mut p = gain.activate(&ProcessSetup { max_block_size: 64, ..ProcessSetup::default() }).unwrap();
     assert!(gain.open_editor(parent, Box::new(|_| {})).is_ok(), "opening again replaces the editor");
     events.clear();
     gain.poll(&mut events);
-    assert!(!events.contains(&ControllerEvent::EditEnd { id: 7 }), "not flushed on the main thread while active");
+    assert!(!events.contains(&ControllerEvent::EditEnd { id: 7 }), "first, a block gets the chance to hand it back");
+    gain.poll(&mut events);
+    assert_eq!(events, vec![ControllerEvent::EditBegin { id: 7 }, ControllerEvent::ParamEdit { id: 7, value: 0.9 }, ControllerEvent::EditEnd { id: 7 }], "no block came: flushed from the main thread");
+    assert_eq!(counter(&mut *gain, 22), 0, "as CLAP allows: in the audio thread's place, with no block running");
+
+    // While it processes, an edit in its window comes back in the next block instead.
+    assert!(gain.open_editor(parent, Box::new(|_| {})).is_ok());
+    events.clear();
+    gain.poll(&mut events);
+    assert!(!events.contains(&ControllerEvent::EditEnd { id: 7 }), "not flushed on the main thread while blocks may come");
     let ins = vec![vec![0.5f32; 64]; 2];
     let mut outs = vec![vec![0.0f32; 64]; 2];
     let mut table = ChannelTable::default();
@@ -71,6 +82,10 @@ fn main() {
     events.clear();
     gain.poll(&mut events);
     assert!(events.contains(&ControllerEvent::ParamEdit { id: 7, value: 0.9 }), "{events:?}");
+    // The block handed it back, so the main thread doesn't flush it again.
+    events.clear();
+    gain.poll(&mut events);
+    assert!(events.is_empty(), "{events:?}");
 
     gain.close_editor();
     assert_eq!(gain.resize_editor(EditorSize { width: 500, height: 400 }), None, "no editor after closing");

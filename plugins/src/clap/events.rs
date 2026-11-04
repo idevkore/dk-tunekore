@@ -441,8 +441,8 @@ pub(crate) fn transport(t: &Transport, sample_rate: f64) -> clap_event_transport
         loop_end_seconds: fixed(seconds(t.loop_end_beats), CLAP_SECTIME_FACTOR),
         bar_start: fixed(t.bar_start_beats, CLAP_BEATTIME_FACTOR),
         bar_number: if bar.is_finite() { bar.clamp(f64::from(i32::MIN), f64::from(i32::MAX)) as i32 } else { 0 },
-        tsig_num: u16::try_from(t.time_sig_numerator).unwrap_or(4),
-        tsig_denom: u16::try_from(t.time_sig_denominator).unwrap_or(4),
+        tsig_num: u16::try_from(t.time_sig_numerator.max(1)).unwrap_or(4),
+        tsig_denom: u16::try_from(t.time_sig_denominator.max(1)).unwrap_or(4),
     }
 }
 
@@ -599,5 +599,7 @@ mod tests {
         assert_eq!((c.loop_start_seconds, c.loop_end_seconds), (CLAP_SECTIME_FACTOR, 3 * CLAP_SECTIME_FACTOR), "beats at 120 bpm");
         assert_eq!((c.bar_start, c.bar_number), (3 * CLAP_BEATTIME_FACTOR, 1), "3/4: the second bar starts on beat 3");
         assert_eq!((c.tsig_num, c.tsig_denom, c.tempo), (3, 4, 120.0));
+        let odd = transport(&Transport { time_sig_numerator: 0, time_sig_denominator: 0, ..t }, 48_000.0);
+        assert_eq!((odd.tsig_num, odd.tsig_denom), (1, 1), "never a zero the plugin divides by");
     }
 }

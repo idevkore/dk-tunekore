@@ -333,7 +333,7 @@ fn the_scan_finds_clap_plugins_beside_vst3_ones_and_survives_bad_ones() {
     assert_eq!((synth.info.category, synth.buses.event_inputs, synth.buses.audio_outputs.len(), synth.buses.audio_outputs[0].channels), (Category::Instrument, 1, 1, 2));
     assert_eq!(synth.info.class_id, "dev.tunekore.fixture.synth");
     let gain = cache.find("Fixture CLAP Gain").unwrap();
-    assert_eq!((gain.buses.audio_inputs.len(), gain.params), (2, 8));
+    assert_eq!((gain.buses.audio_inputs.len(), gain.params), (2, 10));
 
     let entry = |name: &str| cache.find(name).unwrap_or_else(|| panic!("no entry for {name}"));
     let err = |name: &str| entry(name).error.clone().unwrap_or_else(|| panic!("{name} should have failed"));

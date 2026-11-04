@@ -39,7 +39,8 @@ fn setup() -> ProcessSetup {
     ProcessSetup { max_block_size: FRAMES as u32, ..ProcessSetup::default() }
 }
 
-/// One of the Gain's read-only counters (20 timer ticks, 21 main-thread calls, 22 thread errors).
+/// One of the Gain's read-only values (20 timer ticks, 21 main-thread calls, 22 errors: calls on
+/// the wrong thread or out of order, by its own records; 23 its sample rate; 24 module inits).
 fn counter(c: &mut dyn PluginController, id: ParamId) -> u32 {
     let n = c.param_value(id).expect("a counter");
     c.param_plain(id, n).unwrap().round() as u32
@@ -70,7 +71,7 @@ fn an_effect_has_ports_parameters_latency_and_changes_the_audio() {
     assert_eq!((layout.audio_inputs[0].name.as_str(), layout.audio_inputs[0].channels, layout.audio_inputs[0].kind, layout.audio_inputs[0].active), ("Main In", 2, BusKind::Main, true));
     assert_eq!((layout.audio_inputs[1].name.as_str(), layout.audio_inputs[1].kind), ("Sidechain", BusKind::Aux));
     let ids: Vec<ParamId> = c.params().iter().map(|p| p.id).collect();
-    assert_eq!(ids, vec![7, 3, 9, 11, 12, 20, 21, 22], "in the plugin's order, hidden and read-only ones included");
+    assert_eq!(ids, vec![7, 3, 9, 11, 12, 20, 21, 22, 23, 24], "in the plugin's order, hidden and read-only ones included");
     let gain = c.params().iter().find(|p| p.id == 7).unwrap().clone();
     assert_eq!((gain.name.as_str(), gain.step_count, gain.automatable, gain.hidden, gain.read_only), ("Gain", 0, true, false, false));
     assert_eq!((gain.min, gain.max, gain.default), (0.0, 2.0, 0.5), "range in the plugin's own units, default normalized");
@@ -180,9 +181,10 @@ fn state_saves_and_restores_and_a_garbage_blob_is_refused() {
     events.clear();
     c.poll(&mut events);
     assert!(events.contains(&ControllerEvent::ParamsChanged), "{events:?}");
-    assert!(c.load_state(b"").is_err());
     assert!(c.load_state(b"FXCG\xff\xff").is_err());
     assert_eq!(c.param_value(7), Some(0.75), "a refused state changes nothing");
+    assert!(c.load_state(b"").is_ok(), "an empty state is nothing to load");
+    assert_eq!(c.param_value(7), Some(0.75), "and keeps the sound it has");
 }
 
 #[test]
@@ -414,4 +416,61 @@ fn a_restart_the_plugin_asks_for_reaches_poll_and_its_new_latency_comes_with_the
     assert!(events.contains(&ControllerEvent::LatencyChanged) && events.contains(&ControllerEvent::ReloadRequested), "{events:?}");
     let p = c.activate(&setup()).unwrap();
     assert_eq!(p.latency_samples(), 3);
+}
+
+#[test]
+fn a_plugin_whose_state_is_empty_saves_it_and_takes_it_back() {
+    // The Thru has the state extension and nothing to keep: what a project writes for it ("")
+    // must open again without a "saved sound didn't load".
+    let mut c = load_clap_fixture("Fixture CLAP Thru");
+    let state = c.save_state().unwrap();
+    assert!(state.is_empty());
+    assert!(c.load_state(&state).is_ok());
+}
+
+#[test]
+fn a_new_sample_rate_reaches_the_plugin_and_the_old_processor_goes_stale() {
+    let mut c = load_clap_fixture("Fixture CLAP Gain");
+    let mut old = c.activate(&setup()).unwrap();
+    let _ = run(&mut *old, 0.5, &[], &[]);
+    assert_eq!(counter(&mut *c, 23), 48_000);
+    // What the engine asks for when the output moves to another rate.
+    let mut new = c.activate(&ProcessSetup { sample_rate: 96_000.0, ..setup() }).unwrap();
+    assert_eq!(counter(&mut *c, 23), 96_000, "stopped, deactivated and activated at the new rate");
+    let t = Transport::default();
+    let (mut midi, mut params) = (OutBuf::with_capacity(4), OutBuf::with_capacity(4));
+    let (ins, mut outs) = (vec![vec![0.5f32; FRAMES]; 2], vec![vec![0.0f32; FRAMES]; 2]);
+    let mut table = ChannelTable::default();
+    let (inputs, outputs) = table.audio(&ins, &mut outs);
+    let mut block = ProcessBlock { frames: FRAMES, inputs, outputs, events: &[], param_changes: &[], transport: &t, midi_out: &mut midi, param_out: &mut params };
+    assert_eq!(old.process(&mut block), Err(ProcessError::Stale));
+    assert_eq!(run(&mut *new, 0.5, &[], &[]), vec![0.5; FRAMES]);
+    assert_eq!(counter(&mut *c, 22), 0, "in CLAP's order: stop processing, deactivate, activate, start processing");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_to_a_plugin_is_the_same_module_initialised_once() {
+    let dir = common::scratch_dir("clap-link");
+    let link = dir.join("Linked.clap");
+    std::os::unix::fs::symlink(clap_fixture_bundle(), &link).unwrap();
+    // Loaded by its own path and by the link, as a scan of a linked plugin folder lists both.
+    let mut c = load_clap_fixture("Fixture CLAP Gain");
+    let mut through_link = clap::load(&PluginInfo { path: link.clone(), ..clap_fixture_info("Fixture CLAP Gain") }).unwrap();
+    assert_eq!(counter(&mut *c, 24), 1, "clap_entry.init ran once, not once per path");
+    assert_eq!(counter(&mut *through_link, 24), 1);
+    assert_eq!(through_link.info().path, link, "the plugin keeps the path it was named by");
+}
+
+#[test]
+fn a_zero_frame_flush_on_the_main_thread_leaves_it_the_main_thread() {
+    // The app's fallback flush runs a zero-frame block on the main thread. Afterwards that thread
+    // is the main thread again: the plugin's main-thread calls must not hear "audio thread".
+    let mut c = load_clap_fixture("Fixture CLAP Gain");
+    let mut p = c.activate(&setup()).unwrap();
+    c.set_param(7, 0.25);
+    flush(&mut *p).unwrap();
+    assert!(!c.has_pending_params());
+    assert_eq!(c.param_value(7), Some(0.25));
+    assert_eq!(counter(&mut *c, 22), 0);
 }

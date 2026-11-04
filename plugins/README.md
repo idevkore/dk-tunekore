@@ -169,18 +169,29 @@ controller's thread. What is CLAP's own:
   `audio-ports-config` yet).
 - *Threads.* `activate`, `deactivate` and every main-thread call run on the
   controller's thread; `start_processing` and `process` on the audio thread.
-  `stop_processing` belongs to the audio thread too, but stopping runs on the
-  controller's thread once no block can run, and the thread check says so for
-  that call. The host's thread check calls the thread that made the instance
-  the main thread and the one in `process` the audio thread.
+  The host's thread check calls the thread that made the instance the main
+  thread, and the thread inside an audio-thread call the audio thread (between
+  calls, no thread is one). Two audio-thread calls run on the main thread in
+  the audio thread's place, as CLAP 1.2 allows, when no block can run:
+  `stop_processing` when stopping (the processor is stale by then), and a
+  `params.flush` the plugin asked for while no blocks come (below). For the
+  second, a block that starts at that moment is skipped (`ProcessError::Busy`)
+  rather than run beside it.
 - *The main thread's errands.* The plugin's `request_callback`, its timers
   (`timer-support`, at least 10 ms apart), its parameter flush requests and
   its editor's resize requests are served by `poll`; the app polls every
   100 ms. Values set while the plugin is off go to it at once through
   `params.flush` on the main thread; while it is on, the next block (a
-  zero-frame one flushes) delivers them.
+  zero-frame one flushes) delivers them. A flush the plugin asks for while it
+  is on (an edit in its window) is left to the next block, unless no block has
+  run by the next `poll` (its device is switched off): then `poll` flushes it
+  in the audio thread's place, so the edit still reaches the app.
 - *State* is the plugin's own `clap.state`, with no container around it. A
-  plugin without the extension saves nothing and loads only nothing.
+  plugin without the extension saves nothing and loads only nothing; an empty
+  state (a plugin with nothing to keep) is nothing to load.
+- *Modules* are known by their real path, so a plugin reached through a link
+  is initialised once. `clap_entry.init` runs with no lock held; another thread
+  loading the same module waits for it.
 - *Editors* use `clap.gui`, embedded (cocoa on macOS) in the view the caller
   owns, as VST3's: `is_api_supported`, `create`, `set_parent`, `show`; `hide`
   and `destroy` to close.

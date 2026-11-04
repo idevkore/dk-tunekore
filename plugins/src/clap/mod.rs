@@ -15,7 +15,8 @@
 //! * The plugin's requests to the main thread (`request_callback`, timers, a parameter flush, a
 //!   resize) are served by `poll`. The app polls every 100 ms, so a timer runs at most that often.
 //! * Edits in the plugin's own window come back as output events of `process` (or of
-//!   `params.flush` while the plugin is inactive), and `poll` reports them as
+//!   `params.flush`: on the main thread while the plugin is inactive, and in the audio thread's
+//!   place when no block comes, as on a switched-off device), and `poll` reports them as
 //!   [`ControllerEvent`](crate::ControllerEvent)s.
 //! * State is the plugin's own (`clap.state`), with no container around it.
 //!
