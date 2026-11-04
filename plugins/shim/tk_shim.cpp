@@ -8,12 +8,14 @@
 //
 // The calls are generic over the function's signature, not over the interface: Rust takes the
 // function pointer out of the plugin object's vtable and passes it here, so the shim needs no
-// VST3 (or CLAP) headers. The name of each entry says its signature:
+// VST3 or CLAP headers. The name of each entry says its signature:
 //
 //     tk_<return>_<arguments>      p pointer   i int32   u uint32   h int16   b uint8   d double
+//                                  z bool (a C `bool` argument, as CLAP passes them)
 //
 // Every plugin method takes the object as its first argument, so that is the first `p`. A
-// function that returns bool uses `bool` as its return type (`tk_b_*`).
+// function that returns bool uses `bool` as its return type (`tk_b_*`), and one that returns
+// nothing `v` (`tk_v_*`; CLAP has many).
 //
 // On the normal path a call costs one indirect call and no allocation, lock or thread-local
 // access: the try block is free until something throws. The catch path writes the exception's
@@ -86,7 +88,28 @@ inline int invoke(const void* fn, R* out, A... a) noexcept {
     }
 }
 
+template <typename... A>
+inline int invoke_void(const void* fn, A... a) noexcept {
+    try {
+        using F = void (*)(A...);
+        reinterpret_cast<F>(const_cast<void*>(fn))(a...);
+        return TK_OK;
+    } catch (...) {
+        record_current_exception();
+        return TK_EXCEPTION;
+    }
+}
+
 }  // namespace
+
+#define TKV0(name) \
+    extern "C" int name(const void* f) { return invoke_void<>(f); }
+#define TKV1(name, T1) \
+    extern "C" int name(const void* f, T1 a1) { return invoke_void<T1>(f, a1); }
+#define TKV2(name, T1, T2) \
+    extern "C" int name(const void* f, T1 a1, T2 a2) { return invoke_void<T1, T2>(f, a1, a2); }
+#define TKV3(name, T1, T2, T3) \
+    extern "C" int name(const void* f, T1 a1, T2 a2, T3 a3) { return invoke_void<T1, T2, T3>(f, a1, a2, a3); }
 
 #define TK0(name, R) \
     extern "C" int name(const void* f, R* out) { return invoke<R>(f, out); }
@@ -134,10 +157,32 @@ TK5(tk_i_ppipi, I, P, P, I, P, I)
 TK5(tk_i_pihhp, I, P, I, H, H, P)
 
 // Module entry points, which have no object: bundleEntry(CFBundleRef), bundleExit(),
-// GetPluginFactory().
+// GetPluginFactory(). CLAP's clap_entry.init(path) and clap_plugin.init(plugin) are tk_b_p too.
 TK1(tk_b_p, bool, P)
 TK0(tk_b_, bool)
 TK0(tk_p_, P)
+
+// CLAP. Its functions take `const` objects and C `bool`s and return void or bool; the shapes
+// that the VST3 entries above don't already cover.
+typedef bool Z;
+TKV0(tk_v_)
+TKV1(tk_v_p, P)
+TKV2(tk_v_pu, P, U)
+TKV3(tk_v_ppp, P, P, P)
+TK1(tk_p_p, P, P)
+TK2(tk_p_pu, P, P, U)
+TK3(tk_p_ppp, P, P, P, P)
+TK2(tk_b_pp, bool, P, P)
+TK2(tk_b_pi, bool, P, I)
+TK2(tk_u_pz, U, P, Z)
+TK3(tk_b_pup, bool, P, U, P)
+TK3(tk_b_ppz, bool, P, P, Z)
+TK3(tk_b_ppp, bool, P, P, P)
+TK3(tk_b_puu, bool, P, U, U)
+TK4(tk_b_puzp, bool, P, U, Z, P)
+TK4(tk_b_pduu, bool, P, D, U, U)
+TK5(tk_b_pudpu, bool, P, U, D, P, U)
+TK5(tk_b_pzuzu, bool, P, Z, U, Z, U)
 
 // What the last call that returned TK_EXCEPTION on this thread threw, as "type: message".
 // Valid until the next exception on the same thread; copy it straight away.
@@ -173,3 +218,6 @@ struct Odd {
 };
 }  // namespace
 extern "C" I tk_selftest_throws_other(P, P) { throw Odd{}; }
+// CLAP-shaped doubles: a void function that throws, and one taking a C bool.
+extern "C" void tk_selftest_void_throws(P) { throw std::runtime_error("boom from a void call"); }
+extern "C" U tk_selftest_count(P, Z is_input) { return is_input ? 2 : 1; }

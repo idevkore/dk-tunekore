@@ -10,6 +10,7 @@ use super::ptr::PlugPtr;
 use super::shim;
 use super::util::{read_c8, tuid_bytes};
 use crate::plugin::PluginError;
+use crate::rt::os_thread;
 use crate::scan::bundles;
 use std::ffi::{c_int, c_void};
 use std::mem::ManuallyDrop;
@@ -82,28 +83,6 @@ fn on_main_thread() -> bool {
 
 /// The OS id of the main thread, recorded when it loads a module (0 until then).
 static MAIN_OS_THREAD: AtomicUsize = AtomicUsize::new(0);
-
-/// The OS id of the calling thread, which (unlike `std::thread::current`) exit handlers can use.
-fn os_thread() -> usize {
-    #[cfg(unix)]
-    {
-        unsafe extern "C" {
-            fn pthread_self() -> usize;
-        }
-        // SAFETY: `pthread_self` takes no arguments and cannot fail; `pthread_t` is an integer or
-        // a pointer of pointer size on the Unix systems we build for.
-        unsafe { pthread_self() }
-    }
-    #[cfg(windows)]
-    {
-        #[link(name = "kernel32")]
-        unsafe extern "system" {
-            fn GetCurrentThreadId() -> u32;
-        }
-        // SAFETY: `GetCurrentThreadId` takes no arguments and cannot fail.
-        unsafe { GetCurrentThreadId() as usize }
-    }
-}
 
 type Job = Box<dyn FnOnce() + Send>;
 

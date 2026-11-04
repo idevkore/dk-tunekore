@@ -1,9 +1,11 @@
-//! Plugins in the app (#37): VST3 instruments and effects on tracks, their
-//! editors in windows of their own, the plugin list, live notes from a MIDI
-//! controller, and their state in the project's `plugins` section.
+//! Plugins in the app (#37, CLAP since #39): VST3 and CLAP instruments and
+//! effects on tracks, their editors in windows of their own, the plugin list,
+//! live notes from a MIDI controller, and their state in the project's
+//! `plugins` section. Both formats go through the same `PluginController`, so
+//! nothing here depends on the format but loading and where plugins live.
 //!
 //! **Threads.** A plugin's controller (state, parameters, editor) is used on
-//! the main thread only, as VST3 asks, so the document here ([`Doc`]) is only
+//! the main thread only, as VST3 and CLAP ask, so the document here ([`Doc`]) is only
 //! ever locked there. Tauri runs this module's synchronous commands on the
 //! main thread; work that starts elsewhere (saving the project, the engine
 //! asking for a plugin at a new rate, MIDI learn) reaches it through
@@ -39,13 +41,17 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_engine::graph::MAX_FRAMES;
 use tunekore_engine::plugins::scan::{self, ScanCache, ScanOptions, ScanStatus};
-use tunekore_engine::plugins::{vst3, BusSelection, Category, ChannelTable, ControllerEvent, EditorSize, OutBuf, PluginController, PluginInfo, ProcessBlock, ProcessSetup, Transport};
+use tunekore_engine::plugins::{
+    classes as plugin_classes, is_hostable, load as load_plugin, shutdown as shutdown_hosts, BusSelection, Category, ChannelTable, ControllerEvent, EditorSize, Format, OutBuf, PluginController, PluginInfo,
+    ProcessBlock, ProcessSetup, Transport,
+};
 use tunekore_engine::{plugin_device, plugin_device_for_pad, Device, Mixer, PluginLink, PluginRole, SamplerHandle, TrackId, TrackInfo, TrackKind, PADS, SAMPLER_TRACK};
 
 pub use live::{control_live, has_focus as live_has_focus, play_live};
 use window::{EditorWindow, Place, WindowEvent};
 
-/// How often the main thread looks at every plugin's news (editor edits, failures).
+/// How often the main thread looks at every plugin's news (editor edits,
+/// failures) and serves what CLAP plugins asked of it (callbacks, timers).
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// The rate plugins are activated at before an output opens.
 const FALLBACK_RATE: u32 = 48_000;
@@ -431,6 +437,8 @@ fn publish(app: &AppHandle, doc: &mut Doc) -> PluginsView {
 pub struct CatalogEntry {
     path: String,
     class_id: String,
+    /// `vst3` or `clap`.
+    format: Format,
     name: String,
     vendor: String,
     version: String,
@@ -461,10 +469,11 @@ fn catalog_view(c: &Catalog) -> CatalogView {
         Some(cache) => (
             cache
                 .plugins()
-                .filter(|e| vst3::is_hostable(e.info.category))
+                .filter(|e| is_hostable(e.info.category))
                 .map(|e| CatalogEntry {
                     path: e.info.path.display().to_string(),
                     class_id: e.info.class_id.clone(),
+                    format: e.info.format,
                     name: e.info.name.clone(),
                     vendor: e.info.vendor.clone(),
                     version: e.info.version.clone(),
@@ -479,7 +488,7 @@ fn catalog_view(c: &Catalog) -> CatalogView {
         ),
         None => (Vec::new(), Vec::new()),
     };
-    plugins.sort_by_key(|p| (p.name.to_lowercase(), p.vendor.to_lowercase()));
+    plugins.sort_by_key(|p| (p.name.to_lowercase(), p.vendor.to_lowercase(), p.format == Format::Clap));
     CatalogView { plugins, failed, scanning: c.scanning, error: c.error.clone() }
 }
 
@@ -545,11 +554,12 @@ fn spawn_scan(app: &AppHandle, mode: ScanMode) {
 }
 
 /// The plugin `path` and `class_id` name, as [`resolve`] finds it: in the
-/// scan, or in a plugin folder.
-fn find_info(app: &AppHandle, path: &Path, class_id: &str) -> Result<PluginInfo, String> {
+/// scan, or in a plugin folder. Its format is `format`, or else what the
+/// path's extension says.
+fn find_info(app: &AppHandle, path: &Path, class_id: &str, format: Option<Format>) -> Result<PluginInfo, String> {
     let catalog = lock(&app.state::<Plugins>().catalog).cache.clone();
     let wanted = PluginInfo {
-        format: tunekore_engine::plugins::Format::Vst3,
+        format: format.or_else(|| scan::bundles::format_of(path)).unwrap_or(Format::Vst3),
         name: String::new(),
         vendor: String::new(),
         version: String::new(),
@@ -792,6 +802,9 @@ fn window_event(app: &AppHandle, doc: &mut Doc, id: u64, e: WindowEvent) {
 pub struct PluginRef {
     pub path: String,
     pub class_id: String,
+    /// `vst3` or `clap`; from the path's extension when not given.
+    #[serde(default)]
+    pub format: Option<Format>,
 }
 
 /// Marks pad `pad` as playing a plugin (its hits become notes) or its sample.
@@ -899,7 +912,7 @@ fn add(app: &AppHandle, doc: &mut Doc, info: PluginInfo, target: Target) -> Resu
             (kind, Some(t), 0)
         }
     };
-    let mut controller = vst3::load(&info).map_err(|e| e.to_string())?;
+    let mut controller = load_plugin(&info).map_err(|e| e.to_string())?;
     let id = doc.take_id();
     let engine_role = match role {
         Role::Instrument => PluginRole::Instrument,
@@ -1149,7 +1162,7 @@ pub fn plugins_scan(mode: ScanMode, app: AppHandle) {
 /// `track` (an effect at `index`), else on a new instrument track. See [`add`].
 #[tauri::command]
 pub fn plugins_add(plugin: PluginRef, track: Option<u32>, index: Option<usize>, pad: Option<u8>, app: AppHandle) -> Result<PluginsView, String> {
-    let info = find_info(&app, Path::new(&plugin.path), &plugin.class_id)?;
+    let info = find_info(&app, Path::new(&plugin.path), &plugin.class_id, plugin.format)?;
     let state = app.state::<Plugins>();
     let mut d = doc(&state)?;
     let target = match (pad, track) {
@@ -1299,7 +1312,7 @@ fn reload(app: &AppHandle, doc: &mut Doc, i: usize) -> Result<(), String> {
         Ok(info) => info,
         Err(e) => return Err(fail(s, e)),
     };
-    let mut controller = match vst3::load(&info) {
+    let mut controller = match load_plugin(&info) {
         Ok(c) => c,
         Err(e) => return Err(fail(s, e.to_string())),
     };
@@ -1351,17 +1364,20 @@ pub fn plugins_keep_sound(id: u64, app: AppHandle) -> Result<PluginsView, String
 
 // ---- Where plugins load from ----
 
-/// The folders VST3 plugins are installed in (`/Library/Audio/Plug-Ins/VST3`,
-/// `~/Library/Audio/Plug-Ins/VST3`, and any in `VST3_PATH`): the scan's.
+/// The folders plugins are installed in, the scan's: VST3's
+/// (`/Library/Audio/Plug-Ins/VST3`, `~/Library/Audio/Plug-Ins/VST3`, and any
+/// in `VST3_PATH`) and CLAP's (`/Library/Audio/Plug-Ins/CLAP`,
+/// `~/Library/Audio/Plug-Ins/CLAP`, and any in `CLAP_PATH`).
 fn plugin_folders() -> Vec<PathBuf> {
     scan::bundles::default_search_paths()
 }
 
-/// Whether `path` is a plugin bundle inside one of `folders`, after following
-/// links. A project file names its plugins' paths, and loading a plugin runs
-/// its code, so a path from a file is only loaded from where plugins are installed.
+/// Whether `path` is a plugin bundle (`.vst3` or `.clap`) inside one of
+/// `folders`, after following links. A project file names its plugins'
+/// paths, and loading a plugin runs its code, so a path from a file is only
+/// loaded from where plugins are installed.
 pub(crate) fn in_plugin_folders(path: &Path, folders: &[PathBuf]) -> bool {
-    if !scan::bundles::is_vst3_path(path) {
+    if scan::bundles::format_of(path).is_none() {
         return false;
     }
     let Ok(real) = std::fs::canonicalize(path) else { return false };
@@ -1369,8 +1385,9 @@ pub(crate) fn in_plugin_folders(path: &Path, folders: &[PathBuf]) -> bool {
 }
 
 /// Where to load the plugin `wanted` names from: the scan's entry for its
-/// class (where the scan found it, preferring the same path), or else the
-/// path it names, when that is in a plugin folder. Anything else stays missing.
+/// class in its format (where the scan found it, preferring the same path),
+/// or else the path it names, when that is a plugin of that format in a
+/// plugin folder. Anything else stays missing.
 fn resolve(catalog: Option<&ScanCache>, wanted: &PluginInfo, folders: &[PathBuf]) -> Result<PluginInfo, String> {
     if let Some(cache) = catalog {
         let same = |e: &&scan::ScanEntry| e.info.format == wanted.format && e.info.class_id.eq_ignore_ascii_case(&wanted.class_id);
@@ -1382,11 +1399,22 @@ fn resolve(catalog: Option<&ScanCache>, wanted: &PluginInfo, folders: &[PathBuf]
     if !in_plugin_folders(&wanted.path, folders) {
         return Err(format!("it isn't in the plugin list, and {} isn't in a plugin folder", wanted.path.display()));
     }
-    vst3::classes(&wanted.path)
+    if scan::bundles::format_of(&wanted.path) != Some(wanted.format) {
+        return Err(format!("{} isn't a {} plugin", wanted.path.display(), format_name(wanted.format)));
+    }
+    plugin_classes(wanted.format, &wanted.path)
         .map_err(|e| e.to_string())?
         .into_iter()
         .find(|i| i.class_id.eq_ignore_ascii_case(&wanted.class_id))
         .ok_or_else(|| format!("{} has no such plugin", wanted.path.display()))
+}
+
+/// A format's name as people write it.
+fn format_name(f: Format) -> &'static str {
+    match f {
+        Format::Vst3 => "VST3",
+        Format::Clap => "CLAP",
+    }
 }
 
 /// The track whose instrument a MIDI controller's keys play, or none (the pads).
@@ -1435,7 +1463,8 @@ pub fn setup(app: &AppHandle) {
 /// Main thread, as the app quits: closes every editor and takes every
 /// plugin off its track and drops it, closes the output so the engine lets
 /// go of their processors, then lets the plugin modules run their exit code
-/// (`vst3::shutdown`; Serum 2 crashes at exit without it).
+/// (`bundleExit` and `clap_entry.deinit`; Serum 2 crashes at exit without
+/// the first).
 pub fn quit(app: &AppHandle) {
     let Some(state) = app.try_state::<Plugins>() else { return };
     state.quitting.store(true, Ordering::Relaxed);
@@ -1453,7 +1482,7 @@ pub fn quit(app: &AppHandle) {
         a.engine.close_output();
         a.engine.mixer().collect();
     }
-    vst3::shutdown();
+    shutdown_hosts();
 }
 
 use crate::project;
@@ -1641,5 +1670,55 @@ mod tests {
         let cache = ScanCache::new(vec![], vec![entry("/Library/Audio/Plug-Ins/VST3/Moved.vst3")]);
         let found = resolve(Some(&cache), &info("/Users/someone/Downloads/x.vst3"), &[]).unwrap();
         assert_eq!(found.path, PathBuf::from("/Library/Audio/Plug-Ins/VST3/Moved.vst3"), "by its class, where the scan found it");
+    }
+
+    fn clap_info(path: &str) -> PluginInfo {
+        PluginInfo { format: Format::Clap, class_id: "dev.example.gain".into(), ..info(path) }
+    }
+
+    fn scanned(info: PluginInfo) -> scan::ScanEntry {
+        scan::ScanEntry { info, buses: BusLayout::default(), params: 0, load_ms: 1, status: ScanStatus::Ok, error: None, stamp: String::new(), timeouts: 0 }
+    }
+
+    #[test]
+    fn a_clap_plugin_is_found_by_its_id_in_its_own_format() {
+        // The same id in another format is another plugin.
+        let vst3 = PluginInfo { class_id: "dev.example.gain".into(), ..info("/Library/Audio/Plug-Ins/VST3/Gain.vst3") };
+        let cache = ScanCache::new(vec![], vec![scanned(vst3), scanned(clap_info("/Library/Audio/Plug-Ins/CLAP/Gain.clap"))]);
+        let found = resolve(Some(&cache), &clap_info("/Users/someone/Downloads/Gain.clap"), &[]).unwrap();
+        assert_eq!((found.format, found.path), (Format::Clap, PathBuf::from("/Library/Audio/Plug-Ins/CLAP/Gain.clap")));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clap_plugins_load_from_the_clap_folders_and_only_as_clap() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("CLAP");
+        let elsewhere = dir.path().join("Downloads");
+        for d in [folder.join("Good.clap/Contents"), elsewhere.join("Evil.clap/Contents")] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(folder.join("Single.clap"), "").unwrap();
+        let folders = vec![folder.clone()];
+        assert!(in_plugin_folders(&folder.join("Good.clap"), &folders), "a bundle, as on macOS");
+        assert!(in_plugin_folders(&folder.join("Single.clap"), &folders), "a single file, as on Linux and Windows");
+        assert!(!in_plugin_folders(&elsewhere.join("Evil.clap"), &folders), "outside the folders");
+        // A project that names a CLAP file as a VST3 plugin gets a missing plugin, not a load.
+        let e = resolve(None, &info(folder.join("Good.clap").to_str().unwrap()), &folders).unwrap_err();
+        assert!(e.contains("isn't a VST3 plugin"), "{e}");
+        let e = resolve(None, &clap_info(elsewhere.join("Evil.clap").to_str().unwrap()), &folders).unwrap_err();
+        assert!(e.contains("isn't in a plugin folder"), "{e}");
+    }
+
+    #[test]
+    fn the_plugin_list_says_each_plugins_format() {
+        let cache = ScanCache::new(vec![], vec![scanned(info("/a/Fx.vst3")), scanned(PluginInfo { name: "Fx".into(), ..clap_info("/a/Fx.clap") })]);
+        let v = serde_json::to_value(catalog_view(&Catalog { cache: Some(cache), scanning: false, error: None })).unwrap();
+        let formats: Vec<&str> = v["plugins"].as_array().unwrap().iter().map(|p| p["format"].as_str().unwrap()).collect();
+        assert_eq!(formats, vec!["vst3", "clap"], "the same plugin in both formats: VST3 first");
+        let r: PluginRef = serde_json::from_value(serde_json::json!({ "path": "/a/Fx.clap", "classId": "x" })).unwrap();
+        assert_eq!(r.format, None, "the format can be left to the path");
+        let r: PluginRef = serde_json::from_value(serde_json::json!({ "path": "/a/Fx.clap", "classId": "x", "format": "clap" })).unwrap();
+        assert_eq!(r.format, Some(Format::Clap));
     }
 }

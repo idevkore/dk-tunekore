@@ -24,8 +24,9 @@ pub struct ScanOptions {
     pub cache_path: PathBuf,
     /// Folders to search besides the standard ones.
     pub search_paths: Vec<PathBuf>,
-    /// Search the standard VST3 folders (`/Library/Audio/Plug-Ins/VST3`, the user's own, and
-    /// `VST3_PATH`).
+    /// Search the standard plugin folders: VST3's (`/Library/Audio/Plug-Ins/VST3`, the user's
+    /// own, and `VST3_PATH`) and CLAP's (`/Library/Audio/Plug-Ins/CLAP`, the user's own, and
+    /// `CLAP_PATH`).
     pub default_paths: bool,
     /// How long one bundle may take to load before its probe is killed.
     pub timeout: Duration,

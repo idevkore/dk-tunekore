@@ -6,6 +6,11 @@ export { subscribe } from "../timeline/api";
 
 export type Role = "instrument" | "effect" | "pad";
 export type Kind = "instrument" | "effect" | "other";
+/** The plugin formats tuneKore hosts. */
+export type Format = "vst3" | "clap";
+
+/** A format's name as people write it. */
+export const formatName = (f: Format) => (f === "clap" ? "CLAP" : "VST3");
 
 /** A plugin on a track. */
 export interface DeviceView {
@@ -40,6 +45,7 @@ export interface PluginsView {
 export interface CatalogEntry {
   path: string;
   classId: string;
+  format: Format;
   name: string;
   vendor: string;
   version: string;
@@ -71,7 +77,7 @@ export const scan = (mode: ScanMode) => invoke<void>("plugins_scan", { mode });
  * `index`, the end by default); else an instrument on a new instrument track.
  */
 export const add = (plugin: CatalogEntry, track: number | null, index?: number, pad?: number) =>
-  invoke<PluginsView>("plugins_add", { plugin: { path: plugin.path, classId: plugin.classId }, track, index: index ?? null, pad: pad ?? null });
+  invoke<PluginsView>("plugins_add", { plugin: { path: plugin.path, classId: plugin.classId, format: plugin.format }, track, index: index ?? null, pad: pad ?? null });
 export const remove = (id: number) => invoke<PluginsView>("plugins_remove", { id });
 export const removeTrack = (track: number) => invoke<PluginsView>("plugins_remove_track", { track });
 export const bypass = (id: number, on: boolean) => invoke<PluginsView>("plugins_bypass", { id, on });

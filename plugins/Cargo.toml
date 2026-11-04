@@ -5,10 +5,11 @@ edition = "2024"
 rust-version = "1.90"
 license = "UNLICENSED"
 publish = false
-description = "tuneKore's plugin host: scans, loads and runs VST3 plugins behind one Plugin trait"
+description = "tuneKore's plugin host: scans, loads and runs VST3 and CLAP plugins behind one Plugin trait"
 build = "build.rs"
 
 [dependencies]
+clap-sys = "0.5"
 crossbeam-queue = "0.3"
 libloading = "0.9"
 serde = { version = "1", features = ["derive"] }
@@ -32,6 +33,10 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [[test]]
 name = "editor_main_thread"
+harness = false
+
+[[test]]
+name = "clap_editor_main_thread"
 harness = false
 
 [[test]]

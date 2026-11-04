@@ -387,6 +387,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "clap-sys"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a76abbdb2907f6fd97fb6bc0b7be96b77d328f2dd9669d1075cc03369ed22154"
+
+[[package]]
 name = "com-scrape-types"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4315,7 +4321,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tunekore"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "midir",
  "objc2",
@@ -4334,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "tunekore-analyzer"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "hound",
  "rustfft",
@@ -4346,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "tunekore-engine"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "cpal",
  "rtrb",
@@ -4361,6 +4367,7 @@ name = "tunekore-plugins"
 version = "0.1.0"
 dependencies = [
  "cc",
+ "clap-sys",
  "crossbeam-queue",
  "libloading 0.9.0",
  "log",

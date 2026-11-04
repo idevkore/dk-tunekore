@@ -4,7 +4,7 @@
 //!     tunekore-scan [options]
 //!         --cache FILE           where to read and write the JSON cache
 //!         --path DIR             also search DIR (repeatable)
-//!         --no-default-paths     skip the standard VST3 folders
+//!         --no-default-paths     skip the standard VST3 and CLAP folders
 //!         --timeout SECONDS      how long one plugin may take to load (default 60)
 //!         --deadline SECONDS     how long the whole scan may take (default 1800); then the
 //!                                probes still running are stopped and the cache is written

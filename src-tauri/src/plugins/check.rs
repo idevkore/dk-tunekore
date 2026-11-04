@@ -10,8 +10,8 @@
 //!    with that parameter and plays again;
 //! 4. opens and closes each editor (Kontakt 7's last: on a Mac without its
 //!    licence it shows a dialog that waits for a click);
-//! 5. writes the report and quits, which drops every plugin and runs
-//!    `vst3::shutdown` as a real quit does.
+//! 5. writes the report and quits, which drops every plugin and shuts the
+//!    plugin hosts down as a real quit does.
 //!
 //! Run it with a dev identifier so it can't touch the installed app's files:
 //!
@@ -324,7 +324,7 @@ fn run(app: &AppHandle, out: &mut Vec<String>) -> Result<(), String> {
         }
     }
     let _ = std::fs::remove_dir_all(&dir);
-    out.push("quitting: every plugin goes, then vst3::shutdown".into());
+    out.push("quitting: every plugin goes, then the plugin hosts shut down".into());
     Ok(())
 }
 
