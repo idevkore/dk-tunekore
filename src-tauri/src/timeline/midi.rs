@@ -97,12 +97,14 @@ impl MidiClip {
         let name = self.name.trim();
         self.name = if name.is_empty() { "MIDI".into() } else { name.chars().take(64).collect() };
         self.notes.retain(|n| n.key < 128 && n.start.is_finite() && n.length.is_finite());
-        self.notes.truncate(MAX_NOTES);
         for n in &mut self.notes {
             n.start = n.start.clamp(0.0, MAX_BEATS);
             n.length = n.length.clamp(MIN_BEATS, MAX_BEATS);
             n.velocity = n.velocity.clamp(1, 127);
         }
+        // Over the limit, the earliest notes stay.
+        self.notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.key.cmp(&b.key)).then(a.id.cmp(&b.id)));
+        self.notes.truncate(MAX_NOTES);
         // Ids: kept where they are unique, the rest numbered on from the highest.
         let mut seen = std::collections::HashSet::new();
         let mut next = self.notes.iter().map(|n| n.id).max().unwrap_or(0);
@@ -257,7 +259,14 @@ mod tests {
         assert_eq!((c.start, c.offset, c.content, c.length, c.name.as_str()), (0.0, 0.0, MIN_BEATS, 4.0, "MIDI"));
         assert!(c.phase < c.content);
         let notes: Vec<(u32, u8, f64, u8)> = c.notes.iter().map(|x| (x.id, x.key, x.length, x.velocity)).collect();
-        assert_eq!(notes, [(6, 62, 1.0, 1), (5, 60, MIN_BEATS, 90)], "sorted by start; the second id 5 renumbered");
+        assert_eq!(notes, [(5, 62, 1.0, 1), (6, 60, MIN_BEATS, 90)], "sorted by start; the later id 5 renumbered");
+    }
+
+    #[test]
+    fn over_the_limit_the_earliest_notes_stay() {
+        let notes = (0..MAX_NOTES + 10).rev().map(|i| n(60, i as f64, 0.5)).collect();
+        let c = MidiClip { id: 1, name: "Keys".into(), start: 0.0, offset: 0.0, content: 4.0, phase: 0.0, length: 4.0, notes }.sane();
+        assert_eq!((c.notes.len(), c.notes[0].start, c.notes[MAX_NOTES - 1].start), (MAX_NOTES, 0.0, (MAX_NOTES - 1) as f64));
     }
 
     #[test]
