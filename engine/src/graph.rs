@@ -14,6 +14,9 @@
 //! the block the transport hands it. When the output closes, the graph is
 //! dropped off the audio thread and sends every device home to the mixer,
 //! which prepares them again for the next output.
+//!
+//! [`render`] runs a graph offline, for project export (#44): the output
+//! lends it the running graph, or the mixer starts one when no output is open.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc};
@@ -25,6 +28,8 @@ use crate::device::{Buffers, Device, Events};
 use crate::snapshot::Mailbox;
 use crate::track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMeters, TrackMix, TRACK_SLOTS};
 use crate::transport::{ProcessContext, Transport, TransportShared};
+
+pub mod render;
 
 /// The most devices the engine holds at once, over all tracks.
 pub const DEVICE_SLOTS: usize = 256;
@@ -291,6 +296,11 @@ impl Mixer {
         Ok(())
     }
 
+    /// The slot a track's state, meter and stem live in.
+    pub(crate) fn slot_of(&self, id: TrackId) -> Option<usize> {
+        self.tracks.iter().find(|t| t.id == id).map(|t| t.slot)
+    }
+
     /// A handle that reads a track's level from any thread.
     pub fn meter(&self, id: TrackId) -> Option<TrackMeter> {
         self.tracks.iter().find(|t| t.id == id).map(|t| TrackMeter { meters: self.meters.clone(), slot: t.slot })
@@ -464,6 +474,9 @@ pub struct Graph {
     events: Events,
     meters: Arc<TrackMeters>,
     home: Option<mpsc::Sender<Slots>>,
+    /// Each track's sound after its level, by slot, for an offline render's
+    /// stems. Empty unless a render asked for that slot.
+    stems: Vec<[Vec<f32>; 2]>,
 }
 
 impl Graph {
@@ -491,6 +504,7 @@ impl Graph {
             events: Events::with_capacity(TRACK_EVENTS),
             meters,
             home: Some(home),
+            stems: Vec::new(),
         };
         g.sync_state();
         g
@@ -505,6 +519,11 @@ impl Graph {
         self.frames = frames;
         self.master[0][..frames].fill(0.0);
         self.master[1][..frames].fill(0.0);
+        // A track removed during a render leaves its stem silent, not stale.
+        for [l, r] in self.stems.iter_mut().filter(|s| !s[0].is_empty()) {
+            l[..frames].fill(0.0);
+            r[..frames].fill(0.0);
+        }
         transport.run(shared, frames, |ctx, offset| self.process(ctx, offset));
         let Graph { current, state, meters, .. } = self;
         for t in &current.tracks {
@@ -517,6 +536,47 @@ impl Graph {
     /// The master, left and right, for the last block run.
     pub fn master(&self) -> (&[f32], &[f32]) {
         (&self.master[0][..self.frames], &self.master[1][..self.frames])
+    }
+
+    /// The delay from the transport to what the graph puts out, in frames.
+    /// 0 for now: each track plays as soon as its devices give it sound, so a
+    /// plugin's latency makes its own track late, live and in a render alike.
+    /// Delay compensation (#43) will delay every path to the latest one and
+    /// report that delay here; an offline render trims it, so its files still
+    /// start on their first frame and the API around it stays as it is.
+    pub fn latency(&self) -> usize {
+        0
+    }
+
+    /// Off the audio thread: keeps each listed slot's sound after its level
+    /// (post-fader, before the master), for [`stem`](Self::stem). An empty
+    /// list stops and frees it, so a graph goes back to the output as it came.
+    pub(crate) fn capture(&mut self, slots: &[usize]) {
+        self.stems = if slots.is_empty() {
+            Vec::new()
+        } else {
+            (0..TRACK_SLOTS)
+                .map(|s| if slots.contains(&s) { [vec![0.0; MAX_FRAMES], vec![0.0; MAX_FRAMES]] } else { [Vec::new(), Vec::new()] })
+                .collect()
+        };
+    }
+
+    /// A captured slot's sound for the last block run, left and right
+    /// (empty when the slot isn't captured).
+    pub(crate) fn stem(&self, slot: usize) -> (&[f32], &[f32]) {
+        match self.stems.get(slot) {
+            Some([l, r]) if !l.is_empty() => (&l[..self.frames], &r[..self.frames]),
+            _ => (&[], &[]),
+        }
+    }
+
+    /// The same, to change in place (a render's fade at the end of its tail).
+    pub(crate) fn stem_mut(&mut self, slot: usize) -> (&mut [f32], &mut [f32]) {
+        let frames = self.frames;
+        match self.stems.get_mut(slot) {
+            Some([l, r]) if !l.is_empty() => (&mut l[..frames], &mut r[..frames]),
+            _ => (&mut [], &mut []),
+        }
     }
 
     /// Sends back what is waiting, then, once nothing is, switches to the
@@ -570,7 +630,7 @@ impl Graph {
 
     fn process(&mut self, ctx: &ProcessContext, offset: usize) {
         let n = ctx.frames.min(self.frames.saturating_sub(offset));
-        let Graph { current, devices, state, left, right, master, events, ramp, .. } = self;
+        let Graph { current, devices, state, left, right, master, events, ramp, stems, .. } = self;
         let [ml, mr] = master;
         let (ml, mr) = (&mut ml[offset..offset + n], &mut mr[offset..offset + n]);
         let ctx = &ProcessContext { frames: n, ..*ctx };
@@ -586,27 +646,34 @@ impl Graph {
                     d.process(ctx, events, Buffers { left: &mut *l, right: &mut *r });
                 }
             }
+            // The track's level, pan, mute and solo, in place: what it adds
+            // to the master and what its stem holds.
             let st = &mut state[t.slot];
-            let mut peak = st.peak;
             if st.gains == t.gains {
                 let [gl, gr] = st.gains;
                 for i in 0..n {
-                    let (a, b) = (l[i] * gl, r[i] * gr);
-                    ml[i] += a;
-                    mr[i] += b;
-                    peak = peak.max(a.abs()).max(b.abs());
+                    l[i] *= gl;
+                    r[i] *= gr;
                 }
             } else {
                 for i in 0..n {
                     st.gains[0] = approach(st.gains[0], t.gains[0], *ramp);
                     st.gains[1] = approach(st.gains[1], t.gains[1], *ramp);
-                    let (a, b) = (l[i] * st.gains[0], r[i] * st.gains[1]);
-                    ml[i] += a;
-                    mr[i] += b;
-                    peak = peak.max(a.abs()).max(b.abs());
+                    l[i] *= st.gains[0];
+                    r[i] *= st.gains[1];
                 }
             }
+            let mut peak = st.peak;
+            for i in 0..n {
+                ml[i] += l[i];
+                mr[i] += r[i];
+                peak = peak.max(l[i].abs()).max(r[i].abs());
+            }
             st.peak = peak;
+            if let Some([sl, sr]) = stems.get_mut(t.slot).filter(|s| !s[0].is_empty()) {
+                sl[offset..offset + n].copy_from_slice(l);
+                sr[offset..offset + n].copy_from_slice(r);
+            }
         }
     }
 }
