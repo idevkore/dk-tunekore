@@ -282,7 +282,10 @@ function drawMidiClip(ctx: CanvasRenderingContext2D, c: MidiClipView, colour: st
   // Where a looped clip starts its content again.
   if (isLoopedMidi(c) && c.content > 0) {
     ctx.fillStyle = alpha(p.ink, 0.35);
-    for (let b = c.start - c.phase + c.content; b < midiEnd(c); b += c.content) {
+    // From the first seam in view, so a long clip with a short loop costs only what shows.
+    const base = c.start - c.phase;
+    const first = Math.max(1, Math.ceil((Math.max(s.scroll, c.start) - base) / c.content));
+    for (let b = base + first * c.content; b < midiEnd(c); b += c.content) {
       const x = Math.round(beatToX(b, s.scroll, s.zoom));
       if (x > s.width) break;
       if (x <= x0) continue;

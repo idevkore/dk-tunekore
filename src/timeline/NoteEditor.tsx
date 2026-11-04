@@ -18,6 +18,8 @@
 //
 // Each gesture goes to the Rust side as one undoable edit of the clip with
 // all its notes; the editor shows it at once and until the new state lands.
+// Edits go one at a time, each once the last has landed, so they land in the
+// order they were made, and what shows stays until the last of them has.
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import * as api from "./api";
 import { COLOURS, type MidiClipIn, type MidiClipView, type MidiNote, type TrackView } from "./api";
@@ -73,6 +75,9 @@ type Props = {
 
 const clamp = (x: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, x));
 
+/** Counts gestures for their undo keys; outlives the editor, so a remount never repeats a key. */
+let gestures = 0;
+
 /** Keeps the pointer's events coming here through a drag. */
 function capture(e: React.PointerEvent<Element>) {
   try {
@@ -101,7 +106,9 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   const head = useRef<HTMLDivElement>(null);
   const nameBox = useRef<HTMLInputElement>(null);
   const op = useRef<Op | null>(null);
-  const gesture = useRef(0);
+  /** Edits sent and not landed yet, and the last of them, which the next waits for. */
+  const pending = useRef(0);
+  const queue = useRef<Promise<unknown>>(Promise.resolve());
   const lastLength = useRef(0.25);
   const sounding = useRef<number | null>(null);
   const resize = useRef<{ y0: number; h0: number } | null>(null);
@@ -114,7 +121,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
 
   // New state from the Rust side: the edit landed, the preview goes.
   useEffect(() => {
-    if (!op.current) {
+    if (!op.current && pending.current === 0) {
       setShown(null);
       setShownClip(null);
     }
@@ -211,22 +218,45 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
 
   // ---- Edits ----
 
+  /** Sends an edit once the ones before it have landed. A refusal drops what shows. */
+  const send = useCallback(
+    (edit: MidiClipIn, key: string) => {
+      pending.current += 1;
+      const next = queue.current.catch(() => {}).then(() => onEdit(edit, key));
+      queue.current = next;
+      next
+        .catch(() => {
+          setShown(null);
+          setShownClip(null);
+        })
+        .finally(() => {
+          pending.current -= 1;
+          // The last one landed: the new state shows as it is.
+          if (pending.current === 0 && !op.current) {
+            setShown(null);
+            setShownClip(null);
+          }
+        });
+    },
+    [onEdit],
+  );
+
   const commit = useCallback(
     (next: MidiNote[], what: string, merge = false) => {
-      const key = merge ? `notes:${clip.id}:${what}` : `notes:${clip.id}:${what}:${++gesture.current}`;
+      const key = merge ? `notes:${clip.id}:${what}` : `notes:${clip.id}:${what}:${++gestures}`;
       setShown(next);
       // The clip as shown: a loop change still on its way isn't undone by this.
-      onEdit({ ...toMidiInput(shownClip ?? clip, track.id), notes: sortNotes(next) }, key).catch(() => setShown(null));
+      send({ ...toMidiInput(shownClip ?? clip, track.id), notes: sortNotes(next) }, key);
     },
-    [clip, shownClip, track.id, onEdit],
+    [clip, shownClip, track.id, send],
   );
 
   const commitClip = useCallback(
     (next: MidiClipView, what: string) => {
       setShownClip(next);
-      onEdit(toMidiInput(next, track.id), `${what}:${clip.id}`).catch(() => setShownClip(null));
+      send(toMidiInput(next, track.id), `${what}:${clip.id}`);
     },
-    [clip.id, track.id, onEdit],
+    [clip.id, track.id, send],
   );
 
   const snapTo = (beat: number, free: boolean) => (free || step <= 0 ? beat : Math.round(beat / step) * step);
@@ -235,7 +265,8 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
 
   const addNote = (beat: number, key: number, free: boolean): MidiNote => {
     const start = Math.max(0, snapDown(beat, free));
-    return { id: nextNoteId(clip.notes), key, start, length: Math.max(MIN_BEATS, lastLength.current), velocity: DEFAULT_VELOCITY };
+    // From the notes shown, so a second note drawn before the first has landed gets an id of its own.
+    return { id: nextNoteId(notes), key, start, length: Math.max(MIN_BEATS, lastLength.current), velocity: DEFAULT_VELOCITY };
   };
 
   const removeNotes = (ids: Set<number>) => {
@@ -629,7 +660,7 @@ export default function NoteEditor({ clip, track, signature, playhead, playing, 
   const count = selected.size;
   const commitName = () => {
     const n = name.trim();
-    if (n && n !== clip.name) onEdit({ ...toMidiInput(clip, track.id), name: n }, `name:${clip.id}`).catch(() => setName(clip.name));
+    if (n && n !== clip.name) send({ ...toMidiInput(shownClip ?? clip, track.id), name: n }, `name:${clip.id}`);
     else setName(clip.name);
   };
 
