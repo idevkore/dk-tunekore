@@ -396,14 +396,30 @@ enum ToWriter {
 
 /// The writer thread: writes each block it gets and hands the buffers back;
 /// on `Finish` cuts the files to length and moves them in place, all at the
-/// end. Its channel closing before then means the export stopped: dropping the
-/// writers removes their part files. `failed` tells the render to stop.
-fn writer(mut master: Option<wav::Writer>, mut stems: Vec<wav::Writer>, blocks: mpsc::Receiver<ToWriter>, empties: mpsc::Sender<Block>, failed_flag: Arc<AtomicBool>) -> Result<Written, Stop> {
+/// end. Its channel closing before then, or `stop`, means the export stopped:
+/// the blocks still queued are dropped unwritten, and dropping the writers
+/// removes their part files. `failed` tells the render to stop. `pause` slows
+/// every write down, for tests of a slow disk.
+fn writer(
+    mut master: Option<wav::Writer>,
+    mut stems: Vec<wav::Writer>,
+    blocks: mpsc::Receiver<ToWriter>,
+    empties: mpsc::Sender<Block>,
+    failed_flag: Arc<AtomicBool>,
+    stop: Arc<AtomicBool>,
+    pause: Duration,
+) -> Result<Written, Stop> {
     let mut error = None;
     let mut frames = None;
     for msg in blocks {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stop::Cancelled);
+        }
         match msg {
             ToWriter::Block(b) => {
+                if !pause.is_zero() {
+                    std::thread::sleep(pause);
+                }
                 if error.is_none() {
                     let put = |w: &mut wav::Writer, side: &[Vec<f32>; 2]| w.write(&side[0], &side[1]).map_err(|e| failed(w.path(), e));
                     let r = master.as_mut().map_or(Ok(()), |w| put(w, &b.master)).and_then(|_| stems.iter_mut().zip(&b.stems).try_for_each(|(w, s)| put(w, s)));
@@ -450,7 +466,12 @@ fn writer(mut master: Option<wav::Writer>, mut stems: Vec<wav::Writer>, blocks: 
 /// an error), it removes every file it started and leaves what was there
 /// before as it was. The render is dropped, giving the graph back, as soon as
 /// it stops, whatever the disk is doing.
-fn write(mut render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, mut progress: impl FnMut(RenderProgress)) -> Result<Written, Stop> {
+fn write(render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, progress: impl FnMut(RenderProgress)) -> Result<Written, Stop> {
+    write_paused(render, plan, cancel, real_time, Duration::ZERO, progress)
+}
+
+/// [`write`], with every file write slowed down by `pause` (tests of a slow disk).
+fn write_paused(mut render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, pause: Duration, mut progress: impl FnMut(RenderProgress)) -> Result<Written, Stop> {
     let mut folder = Folder(None);
     if let Some(f) = &plan.folder {
         if !f.is_dir() {
@@ -468,11 +489,12 @@ fn write(mut render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, 
         let _ = to_render.send(Block::new(plan.stems.len()));
     }
     let failed_flag = Arc::new(AtomicBool::new(false));
+    let stopping = Arc::new(AtomicBool::new(false));
     let thread = {
-        let failed_flag = failed_flag.clone();
+        let (failed_flag, stopping) = (failed_flag.clone(), stopping.clone());
         std::thread::Builder::new()
             .name("tunekore-export-files".into())
-            .spawn(move || writer(master, stems, blocks, to_render, failed_flag))
+            .spawn(move || writer(master, stems, blocks, to_render, failed_flag, stopping, pause))
             .map_err(|e| Stop::Failed(e.to_string()))?
     };
 
@@ -554,6 +576,8 @@ fn write(mut render: Render, plan: &Plan, cancel: &AtomicBool, real_time: bool, 
             thread.join().unwrap_or_else(|_| Err(Stop::Failed("the file writer stopped".into())))
         }
         Err(stop) => {
+            // Whatever is still queued for the disk is dropped, not written.
+            stopping.store(true, Ordering::Relaxed);
             drop(to_writer);
             let wrote = thread.join().unwrap_or_else(|_| Err(Stop::Failed("the file writer stopped".into())));
             // A write that failed says why; otherwise the reason the render stopped.
@@ -584,13 +608,16 @@ fn phase(p: RenderPhase) -> &'static str {
 fn run(app: AppHandle, req: Request, cancel: Arc<AtomicBool>, started: mpsc::SyncSender<Result<(), String>>) {
     /// Clears the running export however `run` ends, a panic included, so
     /// the next export isn't refused.
-    struct Clear;
+    struct Clear(AppHandle);
     impl Drop for Clear {
         fn drop(&mut self) {
             *job() = None;
+            if std::thread::panicking() {
+                let _ = self.0.emit("export:failed", "The export stopped on an internal error. Nothing was written.");
+            }
         }
     }
-    let _clear = Clear;
+    let _clear = Clear(app.clone());
     let began = Instant::now();
     let ended = project::exclusive(&app, || {
         let prepared = (|| {

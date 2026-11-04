@@ -373,3 +373,29 @@ fn projects_with_plugins_are_held_to_real_time() {
         }
     }
 }
+
+#[test]
+fn a_cancel_drops_what_is_queued_for_a_slow_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut engine, tracks) = engine();
+    let p = plan(&request(&dir.path().join("Slow.wav"), true, true, Format::Pcm24), &tracks, 0.0, 1_000.0, "x").unwrap();
+    let render = engine.start_render(RenderSpec { block: 512, ..p.spec.clone() }).unwrap();
+    let cancel = AtomicBool::new(false);
+    let mut playing = 0;
+    let mut cancelled_at = None;
+    // Every write takes 50 ms: the 16 queued blocks would take 0.8 s to drain.
+    let r = write_paused(render, &p, &cancel, false, Duration::from_millis(50), |progress| {
+        if progress.phase == RenderPhase::Playing {
+            playing += 1;
+        }
+        if playing == 40 && cancelled_at.is_none() {
+            cancel.store(true, Ordering::Relaxed);
+            cancelled_at = Some(Instant::now());
+        }
+    });
+    let took = cancelled_at.unwrap().elapsed();
+    engine.finish_render();
+    assert_eq!(r.unwrap_err(), Stop::Cancelled);
+    assert!(took < Duration::from_millis(300), "the queue wasn't drained to the disk first: {took:?}");
+    assert!(listing(dir.path()).is_empty(), "no part files left: {:?}", listing(dir.path()));
+}

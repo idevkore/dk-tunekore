@@ -97,6 +97,9 @@ pub struct PluginLink {
     failed: AtomicBool,
     /// Whether the device holds a plugin activated at its rate.
     ready: AtomicBool,
+    /// The main thread couldn't activate a plugin for the device: it no
+    /// longer counts as starting up (an export doesn't wait for it).
+    start_failed: AtomicBool,
     /// Asks the shell for a plugin activated at [`rate`](Self::rate). Called
     /// from `prepare`, maybe while the engine's lock is held: it must not
     /// block (the shell queues the work for its main thread).
@@ -111,7 +114,17 @@ impl PluginLink {
     /// Main thread: hands the device `plugin`, activated at `rate`. A plugin
     /// handed over before and never taken is dropped here.
     pub fn give(&self, plugin: Box<dyn Plugin>, rate: u32) {
+        self.start_failed.store(false, Ordering::Release);
         drop(self.incoming.put(Box::new(Activated { plugin, rate })));
+    }
+
+    /// Main thread: the plugin couldn't be activated at the device's rate.
+    /// The device stays silent (an effect passes its input) and stops
+    /// counting as starting up ([`plugins_waiting`]), so an export goes on
+    /// without it at once. The next [`give`](Self::give), or the next time
+    /// the device asks, clears it.
+    pub fn start_failed(&self) {
+        self.start_failed.store(true, Ordering::Release);
     }
 
     /// Main thread: drops the plugins the device replaced.
@@ -174,7 +187,11 @@ pub struct PluginDevice {
     param_out: OutBuf<ParamChange>,
     /// Notes held, a bit per key for each channel, so they can be released.
     held: [u128; 16],
+    /// Channels whose sustain pedal (CC 64) is down, a bit each.
+    pedal: u16,
     was_bypassed: bool,
+    /// The last block was an offline render's.
+    was_offline: bool,
     /// A pad device's gains, and the ones it ended the last block at.
     gains: Option<PadGains>,
     last_gains: [f32; 2],
@@ -206,6 +223,7 @@ fn plugin_device_with(role: Role, gains: Option<PadGains>, request: Box<dyn Fn()
         bypass: AtomicBool::new(false),
         failed: AtomicBool::new(false),
         ready: AtomicBool::new(false),
+        start_failed: AtomicBool::new(false),
         request,
     });
     let device = PluginDevice {
@@ -221,7 +239,9 @@ fn plugin_device_with(role: Role, gains: Option<PadGains>, request: Box<dyn Fn()
         midi_out: OutBuf::with_capacity(OUT_EVENTS),
         param_out: OutBuf::with_capacity(OUT_EVENTS),
         held: [0; 16],
+        pedal: 0,
         was_bypassed: false,
+        was_offline: false,
         last_gains: gains.as_ref().map_or([1.0; 2], |g| g()),
         gains,
         waiting: false,
@@ -286,6 +306,7 @@ impl PluginDevice {
         }
         // A new instance holds no notes.
         self.held = [0; 16];
+        self.pedal = 0;
         self.publish_ready();
     }
 
@@ -294,7 +315,7 @@ impl PluginDevice {
     fn publish_ready(&mut self) {
         let ready = self.current.as_ref().is_some_and(|a| a.rate == self.rate && self.rate != 0);
         self.link.ready.store(ready, Ordering::Release);
-        let waiting = !ready && self.rate != 0;
+        let waiting = !ready && self.rate != 0 && !self.link.start_failed.load(Ordering::Acquire);
         if waiting != self.waiting {
             self.waiting = waiting;
             if waiting {
@@ -309,12 +330,22 @@ impl PluginDevice {
         match *kind {
             EventKind::NoteOn { channel, key, .. } => self.held[usize::from(channel & 15)] |= 1u128 << (key & 127),
             EventKind::NoteOff { channel, key, .. } => self.held[usize::from(channel & 15)] &= !(1u128 << (key & 127)),
+            EventKind::ControlChange { channel, controller: 64, value } => {
+                let bit = 1u16 << (channel & 15);
+                if value >= 0.5 { self.pedal |= bit } else { self.pedal &= !bit }
+            }
             _ => {}
         }
     }
 
-    /// Adds a note-off for every held note, at the block's start.
+    /// Adds a note-off for every held note and a pedal-up for every sustain
+    /// pedal down, at the block's start.
     fn release_held(&mut self) {
+        while self.pedal != 0 && self.events.len() < self.events.capacity() {
+            let channel = self.pedal.trailing_zeros() as u8;
+            self.pedal &= self.pedal - 1;
+            self.events.push(PluginEvent { offset: 0, kind: EventKind::ControlChange { channel, controller: 64, value: 0.0 } });
+        }
         for channel in 0..16u8 {
             let mut keys = self.held[usize::from(channel)];
             while keys != 0 && self.events.len() < self.events.capacity() {
@@ -329,9 +360,16 @@ impl PluginDevice {
     /// Gathers this block's notes: live ones first (at its start), then the
     /// track's (a pad device's: its pad's only, on channel 1; an effect's:
     /// controllers only). In an offline render the live ones are dropped:
-    /// an export plays the project, not what is played meanwhile.
+    /// an export plays the project, not what is played meanwhile. Going from
+    /// live to a render, or back, first lets go of every note and pedal still
+    /// held, so a key held down when an export starts neither sounds through
+    /// the file nor hangs live after it.
     fn gather(&mut self, events: &Events, offline: bool) {
         self.events.clear();
+        if offline != self.was_offline {
+            self.was_offline = offline;
+            self.release_held();
+        }
         if offline {
             while self.live.pop().is_ok() {}
         } else if self.link.role == Role::Instrument {
@@ -398,6 +436,8 @@ impl Device for PluginDevice {
     fn prepare(&mut self, sample_rate: u32, _max_frames: usize) {
         self.rate = sample_rate;
         self.link.rate.store(sample_rate, Ordering::Release);
+        // Asking again: a failure reported before is for an old request.
+        self.link.start_failed.store(false, Ordering::Release);
         self.publish_ready();
         if !self.link.is_ready() {
             (self.link.request)();
@@ -406,6 +446,10 @@ impl Device for PluginDevice {
 
     fn process(&mut self, ctx: &ProcessContext, events: &mut Events, audio: Buffers<'_>) {
         self.swap_in();
+        if self.waiting {
+            // Its activation may have failed meanwhile: then it stops counting.
+            self.publish_ready();
+        }
         let n = audio.frames().min(ctx.frames).min(MAX_FRAMES);
         if n == 0 {
             return;
@@ -511,6 +555,9 @@ mod tests {
         layout: BusLayout,
         effect: bool,
         on: bool,
+        /// A key is down, and the sustain pedal is: a note sounds until both are up.
+        key: bool,
+        pedal: bool,
         fail: bool,
         seen: Arc<Seen>,
     }
@@ -531,7 +578,7 @@ mod tests {
             class_id: "0".repeat(32),
             path: "/fake.vst3".into(),
         };
-        Box::new(Fake { info, layout, effect, on: false, fail, seen })
+        Box::new(Fake { info, layout, effect, on: false, key: false, pedal: false, fail, seen })
     }
 
     fn fake(effect: bool, seen: Arc<Seen>) -> Box<dyn Plugin> {
@@ -557,8 +604,12 @@ mod tests {
             for e in block.events {
                 self.seen.last.store(pack(e.offset, &e.kind), Ordering::Relaxed);
                 match e.kind {
-                    EventKind::NoteOn { .. } => self.on = true,
-                    EventKind::NoteOff { .. } => self.on = false,
+                    EventKind::NoteOn { .. } => (self.on, self.key) = (true, true),
+                    EventKind::NoteOff { .. } => (self.on, self.key) = (self.pedal, false),
+                    EventKind::ControlChange { controller: 64, value, .. } => {
+                        self.pedal = value >= 0.5;
+                        self.on &= self.pedal || self.key;
+                    }
                     _ => {}
                 }
             }
@@ -850,6 +901,57 @@ mod tests {
         assert!(link.send_live(on(64)));
         let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
         assert!(out.iter().all(|&x| x == 0.5));
+    }
+
+    #[test]
+    fn a_key_and_pedal_held_when_a_render_starts_never_reach_the_file_or_hang_after() {
+        let (_, request) = requests();
+        let (mut d, link) = plugin_device(Role::Instrument, request);
+        d.prepare(RATE, MAX_FRAMES);
+        let s = Arc::new(Seen::default());
+        link.give(fake(false, s.clone()), RATE);
+        let mut ctx = ProcessContext::stopped(RATE, 32);
+        let mut ev = Events::with_capacity(8);
+        // Live: a key down and the sustain pedal down.
+        assert!(link.send_live(on(60)));
+        assert!(link.send_live(EventKind::ControlChange { channel: 0, controller: 64, value: 1.0 }));
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.5), "the held note sounds live");
+        // The export starts with both still held, and they are let go meanwhile.
+        ctx.offline = true;
+        let (out, allocs) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert_eq!(allocs, 0);
+        assert!(out.iter().all(|&x| x == 0.0), "the key and the pedal are let go before the render's first frame");
+        assert!(link.send_live(EventKind::NoteOff { channel: 0, key: 60, velocity: 0.0, note_id: -1 }));
+        assert!(link.send_live(EventKind::ControlChange { channel: 0, controller: 64, value: 0.0 }));
+        for _ in 0..3 {
+            let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+            assert!(out.iter().all(|&x| x == 0.0), "nothing held sounds in the file");
+        }
+        // After the export, nothing hangs live.
+        ctx.offline = false;
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.0), "and nothing sounds live after it");
+        assert!(link.send_live(on(62)));
+        let (out, _) = block(&mut d, &ctx, &mut ev, 0.0);
+        assert!(out.iter().all(|&x| x == 0.5), "live keys play again");
+    }
+
+    #[test]
+    fn a_device_whose_plugin_failed_to_start_stops_waiting_and_asking_again_clears_it() {
+        let (asked, request) = requests();
+        let (mut d, link) = plugin_device(Role::Instrument, request);
+        d.prepare(RATE, MAX_FRAMES);
+        assert!(d.waiting, "prepared with no plugin: starting up");
+        link.start_failed();
+        let (_, allocs) = block(&mut d, &ProcessContext::stopped(RATE, 16), &mut Events::with_capacity(4), 0.0);
+        assert_eq!(allocs, 0);
+        assert!(!d.waiting, "a failure takes it out of the wait");
+        d.prepare(96_000, MAX_FRAMES);
+        assert!(d.waiting && asked.load(Ordering::Relaxed) == 2, "asking again counts again");
+        link.give(fake(false, Arc::default()), 96_000);
+        block(&mut d, &ProcessContext::stopped(96_000, 16), &mut Events::with_capacity(4), 0.0);
+        assert!(!d.waiting && link.is_ready());
     }
 
     #[test]

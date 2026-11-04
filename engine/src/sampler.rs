@@ -1427,10 +1427,18 @@ impl Sampler {
     /// The Sampler's work for `ctx.frames` frames: `out(frame, left, right,
     /// click)` takes each frame's pads and metronome click.
     fn run(&mut self, ctx: &ProcessContext, shared: &SamplerShared, mut out: impl FnMut(usize, f32, f32, f32)) {
-        self.offline = ctx.offline;
+        let offline = ctx.offline;
         self.take_samples();
         self.notes.clear();
         self.frame_now = 0;
+        // Into a render or out of one: let go of every pad, the ones held by
+        // hand included, so nothing held carries into the file or out of it.
+        if offline != self.offline {
+            self.offline = offline;
+            for slot in 0..SLOTS {
+                self.release_slot(slot);
+            }
+        }
         // Plugin pads let go by hand since the last piece end their notes now.
         let mut held = self.note_held;
         while held != 0 {

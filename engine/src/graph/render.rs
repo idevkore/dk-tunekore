@@ -71,8 +71,12 @@ pub const TAIL_FADE: f64 = 0.01;
 const SETTLE_QUIET: f64 = 1.0;
 /// ...or after this long, whatever still sounds.
 const SETTLE_MAX: f64 = 10.0;
-/// The longest the settle waits, by the clock, for plugins still starting up.
+/// The longest the settle waits, by the clock, for plugins still starting up...
 const PLUGIN_WAIT: Duration = Duration::from_secs(10);
+/// ...or, once none has finished starting for this long, for any of them: a
+/// plugin whose activation failed (and that wasn't reported to its device)
+/// doesn't hold every export up for the whole wait.
+const PLUGIN_STALL: Duration = Duration::from_secs(3);
 
 // What the graph's loan is doing.
 const IDLE: u8 = 0;
@@ -279,6 +283,9 @@ pub struct Render {
     settle_most: usize,
     /// When the render was made: the plugins' wait counts from here.
     made: Instant,
+    /// Plugins starting up when last looked at, and when that last changed.
+    starting: usize,
+    started_one: Instant,
     /// The render's own clock, which plays the range.
     transport: Transport,
     clock: TransportShared,
@@ -348,6 +355,8 @@ impl Render {
             settle_need: seconds(SETTLE_QUIET) as usize,
             settle_most: seconds(SETTLE_MAX) as usize,
             made: Instant::now(),
+            starting: plugins_waiting(),
+            started_one: Instant::now(),
             transport,
             clock,
             limiter,
@@ -447,7 +456,11 @@ impl Render {
             // Quiet (or as long as it can be), and no plugin still being activated
             // by the main thread, which the clock, not the audio, has to wait for.
             let done = self.settle_quiet >= self.settle_need || self.settled >= self.settle_most;
-            let starting = plugins_waiting() > 0 && self.made.elapsed() < PLUGIN_WAIT;
+            let waiting = plugins_waiting();
+            if waiting != self.starting {
+                (self.starting, self.started_one) = (waiting, Instant::now());
+            }
+            let starting = waiting > 0 && self.made.elapsed() < PLUGIN_WAIT && self.started_one.elapsed() < PLUGIN_STALL;
             if done && !starting {
                 self.phase = Phase::Playing;
             }

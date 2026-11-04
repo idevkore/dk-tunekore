@@ -771,3 +771,62 @@ fn what_is_played_or_edited_during_an_export_stays_out_of_it() {
     let names: Vec<String> = engine.tracks().into_iter().map(|t| t.name).collect();
     assert_eq!(names, ["Sampler", "New"]);
 }
+
+#[test]
+fn a_pad_held_by_hand_when_an_export_starts_is_let_go_before_its_first_frame() {
+    let mut engine = Engine::new();
+    let (out, _voice) = engine.output(RATE, 2);
+    // Longer than the longest settle, so only letting it go keeps it out.
+    let long: Track = Arc::new(vec![vec![0.25; RATE as usize * 16]]);
+    engine.load_sample(0, Some((RATE, long))).unwrap();
+    let pads = engine.sampler();
+    pads.set_pad(0, &PadParams { gate: true, ..Default::default() }); // sounds while held
+    let meter = engine.meter();
+    let cb = Callback::start(out, f32::NAN);
+    pads.trigger(0); // pressed, and held through the export
+    let t0 = Instant::now();
+    while meter.take_peak() < 0.2 {
+        assert!(t0.elapsed() < Duration::from_secs(5), "the held pad sounds live");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let f = collect(&mut engine.start_render(spec(0.0, 1.0, vec![SAMPLER_TRACK], MAX_FRAMES)).unwrap());
+    assert!(f.stems[0][0].iter().chain(&f.master[0]).all(|&x| x == 0.0), "the held pad isn't in the export");
+    // Back on the output, with the pad still held: nothing sounds.
+    std::thread::sleep(Duration::from_millis(60));
+    meter.take_peak();
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(meter.take_peak(), 0.0, "nothing held sounds live after the export");
+    pads.release(0);
+    let (out, _) = cb.stop();
+    drop(out);
+    engine.after_stream();
+}
+
+/// A plugin whose activation failed, as the main thread reports it to its
+/// device, doesn't hold the export up: it plays on without it (an effect
+/// passes its input), straight away.
+#[test]
+fn a_plugin_that_failed_to_start_doesnt_hold_up_an_export() {
+    use crate::plugin_device::{plugin_device, PluginLink, Role};
+    let link: Arc<std::sync::OnceLock<Arc<PluginLink>>> = Arc::default();
+    let reported = link.clone();
+    // The main thread, asked for an activation, fails it and says so.
+    let (effect, l) = plugin_device(
+        Role::Effect,
+        Box::new(move || {
+            let reported = reported.clone();
+            std::thread::spawn(move || reported.get().unwrap().start_failed());
+        }),
+    );
+    link.set(l).ok().unwrap();
+    let mut engine = Engine::new();
+    let fx = engine.mixer().add_track("Fx").unwrap();
+    engine.mixer().set_source(fx, Some(Box::new(Playing(0.25)))).unwrap();
+    engine.mixer().insert(fx, 0, Box::new(effect)).unwrap();
+    let began = Instant::now();
+    let f = collect(&mut engine.start_render(spec(0.0, 1.0, vec![fx], MAX_FRAMES)).unwrap());
+    let took = began.elapsed();
+    engine.finish_render();
+    assert!(took < Duration::from_secs(2), "it didn't wait for the plugin: {took:?}");
+    assert!(f.stems[0][0].iter().all(|&x| x == 0.25), "the effect passes its input");
+}
