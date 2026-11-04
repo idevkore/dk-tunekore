@@ -13,6 +13,8 @@
 //!   audio track's source slot; [`peaks`]: their waveforms.
 //! - [`plugin_device`]: a hosted plugin (VST3, through `tunekore_plugins`)
 //!   as an instrument in a source slot or an effect in a chain.
+//! - [`graph::render`]: the whole graph rendered offline for export (#44),
+//!   through [`Engine::start_render`].
 //!
 //! Control calls (`list_outputs`, `open_output`, `close_output`,
 //! `load_clip`, the track calls) come from one thread at a time; callers
@@ -50,6 +52,7 @@ pub use sampler::{
     FILTER_LOW_PASS, FILTER_OFF, MAX_STEPS, PADS, PREVIEW, SLOTS,
 };
 pub use device::{Buffers, Device, Event, Events};
+pub use graph::render::{range_frames, Part, Phase as RenderPhase, Progress as RenderProgress, Render, RenderSpec, TAIL_FADE, TAIL_FLOOR, TAIL_QUIET};
 pub use graph::Mixer;
 pub use peaks::{Peaks, PEAK_LEVELS};
 pub use plugin_device::{plugin_device, plugin_device_for_pad, Activated, PadGains, PluginDevice, PluginLink, Role as PluginRole};
@@ -61,9 +64,12 @@ pub use track::{TrackId, TrackInfo, TrackKind, TrackMeter, TrackMix};
 pub use transport::{LoopRange, ProcessContext, TempoMap, TimeSignature, Transport, TransportShared};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use graph::render::{Home, Loan};
+use graph::Graph;
 use serde::Serialize;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -74,6 +80,12 @@ pub const SAMPLER_TRACK: TrackId = TrackId(1);
 
 /// Rates we offer when a device reports a range.
 const COMMON_RATES: [u32; 6] = [44_100, 48_000, 88_200, 96_000, 176_400, 192_000];
+/// The rate devices are prepared at before any output has opened.
+const FIRST_RATE: u32 = 48_000;
+/// How long a render waits for the output callback to lend it the graph.
+const LEND_WAIT: Duration = Duration::from_secs(2);
+/// How long closing the output waits for a cancelled render to give the graph back.
+const RECLAIM_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +175,12 @@ pub struct Engine {
     sampler_link: sampler::SamplerLink,
     /// Each slot's sample at its own rate, kept to send again when the device changes.
     samples: Vec<Option<(u32, Track)>>,
+    /// How the output callback lends its graph to a render; a new one with each output.
+    loan: Arc<Loan>,
+    /// An output callback holds the graph (the stream's, or a test's).
+    live: bool,
+    /// A render runs, or ran, on a graph the mixer started (no output was open).
+    render_from_mixer: bool,
 }
 
 impl Default for Engine {
@@ -189,6 +207,9 @@ impl Engine {
             mixer,
             sampler_link,
             samples: vec![None; SLOTS],
+            loan: Arc::new(Loan::new()),
+            live: false,
+            render_from_mixer: false,
         }
     }
 
@@ -314,7 +335,7 @@ impl Engine {
             }
         }
         self.samples[slot] = sample;
-        if self.stream.is_some() {
+        if self.live {
             self.send_sample(slot)?;
         }
         Ok(())
@@ -326,14 +347,14 @@ impl Engine {
     }
 
     fn send_sample(&mut self, slot: usize) -> Result<(), String> {
+        if !self.live && !self.render_from_mixer {
+            return Err("no output is open".into());
+        }
         let data = match &self.samples[slot] {
             None => None,
             Some((rate, t)) if *rate == self.rate => Some(t.clone()),
             Some((rate, t)) => Some(Arc::new(resample(t, *rate, self.rate)?)),
         };
-        if self.stream.is_none() {
-            return Err("no output is open".into());
-        }
         self.sampler_link.send(slot, data)
     }
 
@@ -424,16 +445,19 @@ impl Engine {
     /// them into its graph.
     fn output(&mut self, rate: u32, channels: usize) -> (Output, player::VoiceLink) {
         let (voice, link) = player::voice(rate);
-        let graph = self.mixer.start(rate);
+        let graph = Box::new(self.mixer.start(rate));
         self.shared.peak.store(0, Ordering::Relaxed);
         self.rate = rate;
+        self.loan = Arc::new(Loan::new());
+        self.live = true;
         let out = Output {
             shared: self.shared.clone(),
             channels,
             tone: Tone::new(rate as f64),
             voice,
             transport: Transport::new(rate),
-            graph,
+            graph: Some(graph),
+            loan: self.loan.clone(),
             limiter: Limiter::new(rate, channels),
             scratch: vec![0.0f32; BLOCK_FRAMES * channels],
         };
@@ -441,6 +465,8 @@ impl Engine {
     }
 
     pub fn close_output(&mut self) {
+        // A render holding the graph stops and gives it back first.
+        self.reclaim();
         let was_open = self.stream.is_some();
         self.stream = None; // dropping the stream stops it and frees its clip
         self.link = None;
@@ -453,10 +479,114 @@ impl Engine {
     /// Once the stream and its graph are dropped: takes the devices back, and
     /// puts the Sampler back if they were lost with the stream.
     fn after_stream(&mut self) {
+        self.live = false;
+        // A graph a render gave back that the callback never took in:
+        // dropping it sends its devices home.
+        drop(self.loan.unclaimed());
         self.sampler_link.collect();
         if !self.mixer.stopped() || self.mixer.track(SAMPLER_TRACK).is_none_or(|t| !t.has_source) {
             self.restore_sampler();
         }
+    }
+
+    /// Starts an offline render of the whole graph (see [`graph::render`]).
+    /// It stops playback, then takes the graph from the open output, whose
+    /// callback plays on without it until the render is dropped; with no
+    /// output open it prepares the devices at the rate they last ran at.
+    /// The render runs on its own clock, at this transport's tempo and time
+    /// signature and the master's level now. Waits up to a couple of seconds
+    /// for the output's callback; never for the main thread.
+    pub fn start_render(&mut self, spec: RenderSpec) -> Result<Render, String> {
+        if !(spec.start.is_finite() && spec.end.is_finite() && spec.start >= 0.0 && spec.end > spec.start) {
+            return Err("the range to render must end after it starts".into());
+        }
+        if self.loan.is_out() {
+            return Err("an export is already running".into());
+        }
+        // A graph the mixer started for an earlier render comes home first.
+        self.finish_render();
+        let mut slots = Vec::with_capacity(spec.stems.len());
+        for id in &spec.stems {
+            slots.push(self.mixer.slot_of(*id).ok_or(format!("there is no track {}", id.0))?);
+        }
+        let rate = self.render_rate();
+        let map = self.shared.transport.tempo_map(rate);
+        if range_frames(&map, spec.start, spec.end) == 0 {
+            return Err("the range to render is shorter than a frame".into());
+        }
+        self.shared.transport.stop();
+        let (graph, home) = if self.live {
+            (self.borrow_graph()?, Home::Output)
+        } else {
+            if !self.loan.hold() {
+                return Err("an export is already running".into());
+            }
+            self.rate = rate;
+            self.render_from_mixer = true;
+            let graph = Box::new(self.mixer.start(rate));
+            // Preparing restarted the Sampler, which drops its samples: send them again.
+            for slot in 0..SLOTS {
+                if self.samples[slot].is_some() {
+                    let _ = self.send_sample(slot);
+                }
+            }
+            (graph, Home::Mixer)
+        };
+        Ok(Render::new(graph, home, self.loan.clone(), &spec, map, self.master(), slots))
+    }
+
+    /// The rate a render runs at: the open output's, or the rate the devices
+    /// last ran at (48 kHz before any output opened).
+    pub fn render_rate(&self) -> u32 {
+        if self.rate == 0 { FIRST_RATE } else { self.rate }
+    }
+
+    /// Whether a render holds the graph.
+    pub fn is_rendering(&self) -> bool {
+        self.loan.is_out()
+    }
+
+    /// After a render is dropped: when it ran on a graph the mixer started
+    /// (no output was open), takes its devices back. Opening an output, and
+    /// the next render, do this too.
+    pub fn finish_render(&mut self) {
+        if self.render_from_mixer && !self.loan.is_out() {
+            self.render_from_mixer = false;
+            self.sampler_link.collect();
+            if !self.mixer.stopped() || self.mixer.track(SAMPLER_TRACK).is_none_or(|t| !t.has_source) {
+                self.restore_sampler();
+            }
+        }
+    }
+
+    /// Asks the output callback for its graph and waits for it.
+    fn borrow_graph(&self) -> Result<Box<Graph>, String> {
+        if !self.loan.ask() {
+            return Err("an export is already running".into());
+        }
+        let asked = Instant::now();
+        loop {
+            if let Some(g) = self.loan.take() {
+                return Ok(g);
+            }
+            if asked.elapsed() > LEND_WAIT && self.loan.give_up() {
+                return Err("the audio output isn't running, so the project can't be rendered".into());
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Cancels a render holding the graph and waits for it to give the graph
+    /// back; then takes in the devices of a graph the mixer started for one.
+    fn reclaim(&mut self) {
+        if self.loan.is_out() {
+            self.loan.cancel();
+            let asked = Instant::now();
+            while self.loan.is_out() && asked.elapsed() < RECLAIM_WAIT {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+        self.finish_render();
     }
 
     pub fn is_open(&self) -> bool {
@@ -496,7 +626,9 @@ struct Output {
     tone: Tone,
     voice: player::Voice,
     transport: Transport,
-    graph: graph::Graph,
+    /// The tracks; lent to an offline render while one runs.
+    graph: Option<Box<Graph>>,
+    loan: Arc<Loan>,
     limiter: Limiter,
     /// Interleaved, `BLOCK_FRAMES * channels`.
     scratch: Vec<f32>,
@@ -509,16 +641,20 @@ impl Output {
     fn render<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, out: &mut [T]) {
         #[cfg(debug_assertions)]
         rtsan_standalone::realtime_enter();
-        let Output { shared, channels, tone, voice, transport, graph, limiter, scratch } = self;
+        let Output { shared, channels, tone, voice, transport, graph, loan, limiter, scratch } = self;
         let channels = *channels;
+        // The graph comes back from a render, or goes to one that asked.
+        loan.at_callback(graph);
         let mut peak = 0.0f32;
         for block in out.chunks_mut(BLOCK_FRAMES * channels) {
             let frames = block.len() / channels;
             let buf = &mut scratch[..block.len()];
             tone.render(&shared.tone, buf, channels);
             voice.render(&shared.player, buf, channels);
-            graph.run(transport, &shared.transport, frames);
-            mix_into(buf, channels, graph.master());
+            if let Some(graph) = graph.as_deref_mut() {
+                graph.run(transport, &shared.transport, frames);
+                mix_into(buf, channels, graph.master());
+            }
             let master = f32::from_bits(shared.master.load(Ordering::Relaxed));
             shared.lower_limiting(limiter.process(buf, master));
             for (o, &s) in block.iter_mut().zip(buf.iter()) {

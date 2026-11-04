@@ -56,12 +56,15 @@ offers LGPL-2.1-or-later as one of three choices; we use it as MIT.
 
 `plugins/` (`tunekore-plugins`) joined the root workspace and its lockfile in
 #37, so `npm run licenses` and CI check it with everything else. The engine
-and the shell use it. Its test plugin (`plugins/tests/fixture`) is still a
-workspace of its own, built only by the tests and never shipped.
+and the shell use it. Its test plugins (`plugins/tests/fixture` for VST3,
+`plugins/tests/clap_fixture` for CLAP, #39) are workspaces of their own, each
+with its own lockfile, built only by the tests and never shipped; the CLAP one
+uses only `clap-sys`.
 
 | Crate | Version | Licence | Use |
 | --- | --- | --- | --- |
 | [vst3](https://github.com/coupler-rs/vst3-rs) | 0.3.0 | MIT OR Apache-2.0 | VST 3 API bindings, generated from Steinberg's MIT-licensed headers |
+| [clap-sys](https://github.com/micahrj/clap-sys) | 0.5.0 | MIT OR Apache-2.0 | CLAP API bindings (CLAP 1.2.2), written from the MIT-licensed [CLAP](https://github.com/free-audio/clap) headers. Since #39; no dependencies of its own |
 | [libloading](https://github.com/nagisa/rust_libloading) | 0.9.0 | ISC | Loads plugin binaries |
 | [crossbeam-queue](https://github.com/crossbeam-rs/crossbeam) | 0.3.14 | MIT OR Apache-2.0 | Lock-free queue for edits made in a plugin's editor |
 | serde, serde_json | 1.0.229, 1.0.154 | MIT OR Apache-2.0 | The plugin scan cache |
@@ -78,7 +81,10 @@ dispatch2, bitflags, cfg-if, itoa, memchr, proc-macro2, quote, syn,
 unicode-ident, serde_core, serde_derive, thiserror-impl, shlex,
 find-msvc-tools, windows-link and zmij. Steinberg's VST 3 API licence (MIT) is
 kept in `plugins/third_party/steinberg/LICENSE.txt` for the `vst3` crate's
-bindings; no Steinberg file is copied.
+bindings; no Steinberg file is copied. No CLAP header is copied either: the
+CLAP host uses `clap-sys`, and the misbehaving C++ test plugin
+(`plugins/tests/bad_clap/bad_clap.cpp`) declares the few CLAP structs it needs
+itself, as the ABI lays them out.
 
 ## Code adapted from other projects
 
@@ -92,6 +98,7 @@ as a dependency. The adapted code carries a header comment naming its source.
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/playback/src/record.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The input recorder's guard against a panicking callback, the silence a full ring owes to keep a take's timing, the NaN guard and the stream-lost check (we use `rtrb` and an in-memory take in place of its atomics ring and file writer) | `engine/src/input.rs` |
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/midi/src/rng.rs` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The xorshift64* generator behind step probability, so an offline render repeats exactly | `engine/src/sampler.rs` (`XorShift`) |
 | [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/vst3-host` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The VST3 host: module loading, host interfaces, events, instances, editors (`ffi.rs`), the bundle scan (`scan.rs`), the test plugin fixture and its build helper. Its licence and NOTICE are kept in `plugins/third_party/soundcraft/`, with what changed. | `plugins/src/vst3/`, `plugins/src/editor_window.rs`, `plugins/src/scan/bundles.rs`, `plugins/tests/fixture/`, `plugins/tests/common/mod.rs` |
+| [soundCraft](https://github.com/storytold/soundcraft) (ArtCraft), commit 7dc56a4, `crates/clap-host` | MIT OR Apache-2.0, Copyright (c) 2026 ArtCraft Team and the SoundCraft contributors | The CLAP host's starting point (`ffi.rs`): loading a `.clap` and reading its factory, the host callbacks, the event list and stream callbacks, the transport in fixed point, the embedded editor sequence. Rewritten around our two-half design, the shim and the scanner (#39); its test plugin was not taken. The licence and NOTICE in `plugins/third_party/soundcraft/` cover it too, with what changed. | `plugins/src/clap/` (`module.rs`, `host.rs`, `events.rs`, `instance.rs`, `editor.rs`) |
 
 ## UI (TypeScript)
 

@@ -8,7 +8,7 @@
 //! ```no_run
 //! use tunekore_plugins::scan::{self, ScanOptions};
 //!
-//! // Scan the standard VST3 folders (or reuse what is cached), then list what loaded.
+//! // Scan the standard VST3 and CLAP folders (or reuse what is cached), then list what loaded.
 //! let cache = scan::scan(&ScanOptions::default())?;
 //! for p in cache.plugins() {
 //!     println!("{} ({}) {:?}", p.info.name, p.info.vendor, p.info.category);

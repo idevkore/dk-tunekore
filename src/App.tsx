@@ -9,11 +9,16 @@
 // Grid. Tab also flips between them, but only while nothing has focus; the
 // flip then focuses the shown view's switch, so the next Tab moves into the
 // view's controls. On any control Tab moves focus as usual.
+//
+// Project export (#44): File > Export Project… and ⇧⌘R (Ctrl+Shift+R) open
+// its dialog over either view. ⌘E stays the Sampler's own export.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import SamplerView from "./sampler/SamplerView";
 import Timeline from "./timeline/Timeline";
 import ThemePicker from "./theme/ThemePicker";
+import ProjectExport from "./export/ProjectExport";
+import { onOpen as onExportOpen } from "./export/api";
 import type { Message } from "./StatusBar";
 
 type MainView = "sampler" | "timeline";
@@ -35,6 +40,8 @@ const mod = isMac ? "⌘" : "Ctrl+";
 export default function App() {
   const [view, setView] = useState<MainView>("sampler");
   const [message, setMessage] = useState<Message | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const closeExport = useCallback(() => setExporting(false), []);
   // Bumped by a switch from the keyboard or the menu: focus moves to the shown view's switch.
   const [focusSwitch, setFocusSwitch] = useState(0);
 
@@ -51,6 +58,12 @@ export default function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (document.querySelector("dialog[open]")) return;
+      // ⇧⌘R: Export Project… (the menu item has it too; either opens the one dialog).
+      if ((e.metaKey || e.ctrlKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "r") {
+        e.preventDefault();
+        setExporting(true);
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
         const v = VIEWS.find((x) => x.key === e.key);
         if (v) {
@@ -67,24 +80,30 @@ export default function App() {
       setFocusSwitch((n) => n + 1);
     };
     window.addEventListener("keydown", onKey);
-    // The View menu's Sampler and Timeline items.
-    let off: (() => void) | undefined;
+    // The View menu's Sampler and Timeline items, and File > Export Project….
+    const offs: (() => void)[] = [];
     let gone = false;
+    const keep = (p: Promise<() => void>) => p.then((u) => (gone ? u() : offs.push(u))).catch(() => {});
     try {
-      listen<string>("view:show", (e) => {
-        // As with the keys: a dialog open in the Sampler stays on screen.
-        if (document.querySelector("dialog[open]")) return;
-        const v = VIEWS.find((x) => x.id === e.payload);
-        if (v) show(v.id, true);
-      })
-        .then((u) => (gone ? u() : (off = u)))
-        .catch(() => {});
+      keep(
+        listen<string>("view:show", (e) => {
+          // As with the keys: a dialog open in the Sampler stays on screen.
+          if (document.querySelector("dialog[open]")) return;
+          const v = VIEWS.find((x) => x.id === e.payload);
+          if (v) show(v.id, true);
+        }),
+      );
+      keep(
+        onExportOpen(() => {
+          if (!document.querySelector("dialog[open]")) setExporting(true);
+        }),
+      );
     } catch {
       // not in Tauri (the dev mock): the keys still work
     }
     return () => {
       gone = true;
-      off?.();
+      offs.forEach((u) => u());
       window.removeEventListener("keydown", onKey);
     };
   }, [show]);
@@ -113,6 +132,7 @@ export default function App() {
     <>
       <SamplerView active={view === "sampler"} switcher={switcher} message={message} onMessage={setMessage} />
       <Timeline active={view === "timeline"} switcher={switcher} message={message} onMessage={setMessage} />
+      {exporting && <ProjectExport onClose={closeExport} onMessage={setMessage} />}
     </>
   );
 }
