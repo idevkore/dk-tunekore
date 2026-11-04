@@ -1,7 +1,7 @@
-//! Opens a VST3 plugin's editor in a window, keeps the plugin processing while it is open, and
+//! Opens a VST3 or CLAP plugin's editor in a window, keeps the plugin processing while it is open, and
 //! reports what the editor did (resizes, edits) when it closes.
 //!
-//!     cargo run --release --example editor -- <plugin.vst3> [--name NAME] [--seconds N] [--resize WxH]
+//!     cargo run --release --example editor -- <plugin.vst3|plugin.clap> [--name NAME] [--seconds N] [--resize WxH]
 //!
 //! macOS only for now. The window closes by itself after `--seconds` (default 5); closing it
 //! sooner ends the run too.
@@ -52,7 +52,7 @@ mod mac {
         app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
         app.finishLaunching();
 
-        let infos = vst3::classes(&bundle).map_err(|e| e.to_string())?;
+        let infos = classes(scan::bundles::format_of(&bundle).unwrap_or(Format::Vst3), &bundle).map_err(|e| e.to_string())?;
         let info = match &name {
             Some(n) => infos.iter().find(|i| i.name.eq_ignore_ascii_case(n)),
             None => infos.first(),
@@ -60,7 +60,7 @@ mod mac {
         .ok_or("no such plugin in the bundle")?
         .clone();
         let t = Instant::now();
-        let mut c = vst3::load(&info).map_err(|e| e.to_string())?;
+        let mut c = load(&info).map_err(|e| e.to_string())?;
         println!("plugin: {} ({}) loaded in {} ms", info.name, info.vendor, t.elapsed().as_millis());
         let setup = ProcessSetup { sample_rate: 48_000.0, max_block_size: 512, ..ProcessSetup::default() };
         let mut plugin = c.activate(&setup).map_err(|e| e.to_string())?;
@@ -153,7 +153,7 @@ mod mac {
         window.close();
         drop(plugin);
         drop(c);
-        vst3::shutdown();
+        shutdown();
         println!("closed cleanly");
         Ok(())
     }

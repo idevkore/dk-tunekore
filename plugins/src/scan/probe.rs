@@ -6,7 +6,6 @@
 use super::bundles;
 use super::cache::{ScanEntry, ScanStatus};
 use crate::plugin::{BusLayout, Category, Format, PluginInfo};
-use crate::vst3;
 use std::path::Path;
 use std::time::Instant;
 
@@ -26,7 +25,7 @@ pub fn failed_entry(bundle: &Path, status: ScanStatus, error: String) -> ScanEnt
     let name = bundle.file_stem().map_or_else(|| bundle.display().to_string(), |s| s.to_string_lossy().into_owned());
     ScanEntry {
         info: PluginInfo {
-            format: Format::Vst3,
+            format: bundles::format_of(bundle).unwrap_or(Format::Vst3),
             name,
             vendor: String::new(),
             version: String::new(),
@@ -54,18 +53,19 @@ pub fn failed_entry(bundle: &Path, status: ScanStatus, error: String) -> ScanEnt
 /// process that is about to end.
 pub fn probe_bundle(bundle: &Path) -> Vec<ScanEntry> {
     let stamp = stamp(bundle);
-    let infos = match vst3::classes(bundle) {
+    let format = bundles::format_of(bundle).unwrap_or(Format::Vst3);
+    let infos = match crate::classes(format, bundle) {
         Ok(i) => i,
         Err(e) => return vec![failed_entry(bundle, ScanStatus::Failed, e.to_string())],
     };
     if infos.is_empty() {
-        return vec![failed_entry(bundle, ScanStatus::Failed, "no audio plugins in this bundle".into())];
+        return vec![failed_entry(bundle, ScanStatus::Failed, "no plugins in this bundle".into())];
     }
     infos
         .into_iter()
         .map(|info| {
             let t = Instant::now();
-            match vst3::load(&info) {
+            match crate::load(&info) {
                 Ok(c) => {
                     let entry = ScanEntry {
                         buses: c.default_layout().clone(),

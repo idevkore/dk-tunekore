@@ -17,8 +17,9 @@ use super::ptr::PlugPtr;
 use super::shim::{self, Exception};
 use super::util::{parse_hex, read_c16, tuid_bytes};
 use crate::plugin::*;
+use crate::rt::RtMessage;
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use vst3::Steinberg::{self as sb, Vst as sv};
@@ -46,8 +47,6 @@ const STATE_MAGIC: &[u8; 4] = b"TKV3";
 const PROCESS_WAIT: Duration = Duration::from_secs(10);
 /// The MIDI controllers `IMidiMapping` is asked about: CCs 0-127, aftertouch, pitch bend.
 const MIDI_CONTROLLERS: usize = PITCH_BEND + 1;
-/// Bytes kept of a failure message written on the audio thread.
-const RT_MESSAGE: usize = 512;
 
 fn ok(r: i32) -> bool {
     r == sb::kResultOk
@@ -66,52 +65,6 @@ struct Objects {
     controller: Option<PlugPtr<sv::IEditController>>,
     /// The component's and the controller's connection points, linked to each other.
     connections: Option<(PlugPtr<sv::IConnectionPoint>, PlugPtr<sv::IConnectionPoint>)>,
-}
-
-/// A failure message written on the audio thread without allocating, read on the main thread.
-struct RtMessage {
-    /// 0 empty, 1 being written, 2 written, 3 taken.
-    state: AtomicU8,
-    len: AtomicUsize,
-    buf: UnsafeCell<[u8; RT_MESSAGE]>,
-}
-
-impl RtMessage {
-    fn new() -> RtMessage {
-        RtMessage { state: AtomicU8::new(0), len: AtomicUsize::new(0), buf: UnsafeCell::new([0; RT_MESSAGE]) }
-    }
-
-    /// Records `during` and this thread's last exception, the first time only. No allocation.
-    fn write(&self, during: &'static str) {
-        if self.state.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return;
-        }
-        // SAFETY: the compare-exchange above makes this the only writer, and readers wait for 2.
-        let buf = unsafe { &mut *self.buf.get() };
-        let mut n = 0;
-        for part in [during.as_bytes(), b": "] {
-            let k = part.len().min(RT_MESSAGE - n);
-            buf[n..n + k].copy_from_slice(&part[..k]);
-            n += k;
-        }
-        n += shim::copy_last_exception(&mut buf[n..]);
-        self.len.store(n, Ordering::Relaxed);
-        self.state.store(2, Ordering::Release);
-    }
-
-    /// The message, once. Allocates: main thread.
-    fn take(&self) -> Option<String> {
-        if self.state.compare_exchange(2, 3, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return None;
-        }
-        // SAFETY: state 2 means the writer is done; nobody writes again.
-        let buf = unsafe { &*self.buf.get() };
-        let raw = String::from_utf8_lossy(&buf[..self.len.load(Ordering::Relaxed)]).into_owned();
-        Some(match raw.split_once(": ") {
-            Some((during, rest)) => format!("{during}: {}", shim::readable(rest)),
-            None => raw,
-        })
-    }
 }
 
 /// The state both halves share.
@@ -1313,16 +1266,5 @@ mod tests {
         let (table, slots) = bus_table(&buses, &mut ptrs);
         assert_eq!(table.iter().map(|b| b.numChannels).collect::<Vec<_>>(), vec![2, 0, 1]);
         assert_eq!(slots.iter().map(|s| (s.first, s.channels)).collect::<Vec<_>>(), vec![(0, 2), (2, 0), (2, 1)]);
-    }
-
-    #[test]
-    fn a_failure_message_from_the_audio_thread_is_kept_once() {
-        let m = RtMessage::new();
-        assert_eq!(m.take(), None);
-        m.write("IAudioProcessor::process");
-        m.write("ignored: only the first failure is kept");
-        let s = m.take().unwrap();
-        assert!(s.starts_with("IAudioProcessor::process: "), "{s}");
-        assert_eq!(m.take(), None, "taken once");
     }
 }

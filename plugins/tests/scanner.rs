@@ -3,11 +3,11 @@
 
 mod common;
 
-use common::{bad_plugin, fixture_bundle, scratch_dir, Misbehaviour};
+use common::{bad_clap, bad_plugin, clap_fixture_bundle, fixture_bundle, scratch_dir, ClapMisbehaviour, Misbehaviour};
 use std::time::{Duration, Instant};
 use tunekore_plugins::scan::{self, ScanCache, ScanOptions, ScanStatus};
-use tunekore_plugins::vst3;
-use tunekore_plugins::{Category, PluginError};
+use tunekore_plugins::{clap, vst3};
+use tunekore_plugins::{Category, Format, PluginError};
 
 /// Scan options for a test folder. The per-plugin timeout is long: probes of plugins that do not
 /// hang must never time out, however busy the machine (a loaded Mac running other builds can take
@@ -246,4 +246,120 @@ fn a_missing_scanner_is_an_error_and_a_missing_folder_scans_empty() {
     assert!(cache.entries.is_empty());
     opts.scanner = Some(dir.join("no-such-program"));
     assert!(matches!(scan::scan(&opts), Err(scan::ScanError::Start(..))));
+}
+
+// ---- CLAP ----------------------------------------------------------------------------------
+
+/// Every `.vst3` and `.clap` in `dir` has at least one entry in `cache`.
+fn assert_every_plugin_listed(dir: &std::path::Path, cache: &ScanCache) {
+    let listing = || cache.entries.iter().map(|e| format!("{} [{:?}] {}", e.info.path.display(), e.status, e.error.as_deref().unwrap_or(""))).collect::<Vec<_>>().join("\n");
+    for b in std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "vst3" || x == "clap")) {
+        assert!(cache.entries.iter().any(|e| e.info.path == b), "{} has no entry; the cache has:\n{}", b.display(), listing());
+    }
+}
+
+/// A plugin folder with both fixtures (VST3 and CLAP) and the misbehaving CLAP plugins (the one
+/// that hangs only if `hang`); `None` without a C++ compiler.
+fn clap_folder(tag: &str, hang: bool) -> Option<std::path::PathBuf> {
+    let dir = scratch_dir(&format!("scan-clap-{tag}"));
+    for (name, mode) in [("ClapThrows", ClapMisbehaviour::ThrowsInInit), ("ClapAborts", ClapMisbehaviour::AbortsOnLoad), ("ClapThrowsEarly", ClapMisbehaviour::ThrowsOnLoad)] {
+        bad_clap(&dir, name, mode)?;
+    }
+    if hang {
+        bad_clap(&dir, "ClapHangs", ClapMisbehaviour::HangsOnLoad)?;
+    }
+    for (from, to) in [(clap_fixture_bundle(), "Fixture.clap"), (fixture_bundle(), "Fixture.vst3")] {
+        let status = std::process::Command::new("cp").arg("-R").arg(from).arg(dir.join(to)).status().ok()?;
+        if !status.success() {
+            return None;
+        }
+    }
+    Some(dir)
+}
+
+#[test]
+fn a_clap_plugin_that_throws_from_init_is_an_error_not_an_abort() {
+    let dir = scratch_dir("clap-throws-in-process");
+    let Some(bundle) = bad_clap(&dir, "ClapThrows", ClapMisbehaviour::ThrowsInInit) else { return eprintln!("skipped: no C++ compiler") };
+    // Loaded in this very process: without the shim, this would abort the test run.
+    let infos = clap::classes(&bundle).expect("the plugin list is readable");
+    assert_eq!(infos.len(), 1);
+    assert_eq!((infos[0].name.as_str(), infos[0].category), ("Bad CLAP Plugin", Category::Instrument));
+    match clap::load(&infos[0]) {
+        Err(PluginError::Exception { during, message }) => {
+            assert_eq!(during, "clap_plugin.init");
+            assert!(message.contains("boom from init"), "{message}");
+        }
+        Err(e) => panic!("wrong error: {e}"),
+        Ok(_) => panic!("loaded a plugin that throws"),
+    }
+    // And the host is still usable afterwards.
+    assert!(clap::load(&common::clap_fixture_info("Fixture CLAP Synth")).is_ok());
+}
+
+#[test]
+fn a_clap_file_that_throws_while_loading_is_an_error_too() {
+    let dir = scratch_dir("clap-throws-on-load");
+    let Some(bundle) = bad_clap(&dir, "ClapThrowsEarly", ClapMisbehaviour::ThrowsOnLoad) else { return eprintln!("skipped: no C++ compiler") };
+    let err = clap::classes(&bundle).unwrap_err().to_string();
+    assert!(err.contains("clap_entry.init threw") && err.contains("boom from clap_entry.init"), "{err}");
+    // Not a CLAP plugin at all: a plain error too.
+    let fake = dir.join("NotAPlugin.clap");
+    std::fs::write(&fake, b"nothing loadable").unwrap();
+    assert!(matches!(clap::classes(&fake), Err(PluginError::Load { .. })));
+}
+
+#[test]
+fn the_scan_finds_clap_plugins_beside_vst3_ones_and_survives_bad_ones() {
+    let Some(dir) = clap_folder("survives", false) else { return eprintln!("skipped: no C++ compiler") };
+    let cache_path = dir.join("cache.json");
+    let cache = scan::scan(&options(&dir, &cache_path)).expect("the scan runs");
+    assert_every_plugin_listed(&dir, &cache);
+
+    let good: Vec<(&str, Format)> = cache.plugins().map(|e| (e.info.name.as_str(), e.info.format)).collect();
+    assert_eq!(
+        good,
+        vec![
+            ("Fixture CLAP Gain", Format::Clap),
+            ("Fixture CLAP Synth", Format::Clap),
+            ("Fixture CLAP Thru", Format::Clap),
+            ("Fixture Gain", Format::Vst3),
+            ("Fixture Synth", Format::Vst3),
+            ("Fixture Thru", Format::Vst3)
+        ],
+        "both formats, despite the bad ones"
+    );
+    let synth = cache.find("Fixture CLAP Synth").unwrap();
+    assert_eq!((synth.info.category, synth.buses.event_inputs, synth.buses.audio_outputs.len(), synth.buses.audio_outputs[0].channels), (Category::Instrument, 1, 1, 2));
+    assert_eq!(synth.info.class_id, "dev.tunekore.fixture.synth");
+    let gain = cache.find("Fixture CLAP Gain").unwrap();
+    assert_eq!((gain.buses.audio_inputs.len(), gain.params), (2, 8));
+
+    let entry = |name: &str| cache.find(name).unwrap_or_else(|| panic!("no entry for {name}"));
+    let err = |name: &str| entry(name).error.clone().unwrap_or_else(|| panic!("{name} should have failed"));
+    // Read far enough to have its name, then its init threw.
+    assert_eq!((entry("Bad CLAP Plugin").status, entry("Bad CLAP Plugin").info.format), (ScanStatus::Failed, Format::Clap));
+    assert!(err("Bad CLAP Plugin").contains("boom from init"));
+    // These never got as far as a name: listed by file, still as CLAP.
+    assert_eq!((entry("ClapThrowsEarly").status, entry("ClapThrowsEarly").info.format), (ScanStatus::Failed, Format::Clap));
+    assert!(err("ClapThrowsEarly").contains("boom from clap_entry.init"));
+    assert_eq!(entry("ClapAborts").status, ScanStatus::Crashed);
+    assert!(err("ClapAborts").contains("crashed while loading (SIGABRT"));
+    assert_eq!(cache.failures().count(), 3);
+    assert_eq!(ScanCache::read(&cache_path), Some(cache));
+}
+
+#[test]
+fn a_clap_plugin_that_hangs_while_loading_times_out_and_the_scan_goes_on() {
+    let Some(dir) = clap_folder("hangs", true) else { return eprintln!("skipped: no C++ compiler") };
+    let opts = ScanOptions { timeout: Duration::from_secs(2), ..options(&dir, &dir.join("cache.json")) };
+    let cache = scan::scan(&opts).unwrap();
+    assert_every_plugin_listed(&dir, &cache);
+    let hang = cache.find("ClapHangs").unwrap();
+    assert_eq!((hang.status, hang.timeouts), (ScanStatus::TimedOut, 1));
+    assert!(cache.find("Fixture CLAP Gain").is_some_and(|e| e.status == ScanStatus::Ok));
+    // A second scan reuses everything that didn't change, the good CLAP plugins included.
+    let again = scan::scan(&opts).unwrap();
+    let good = |c: &ScanCache| c.plugins().cloned().collect::<Vec<_>>();
+    assert_eq!(good(&again), good(&cache));
 }

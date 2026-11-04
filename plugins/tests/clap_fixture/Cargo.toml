@@ -1,0 +1,18 @@
+# tuneKore's CLAP test plugins, used only by the plugin host's tests. Not part of the root
+# workspace (the empty [workspace] table makes it its own root); the tests build it with
+# `cargo build --locked` and load the library it makes. Never shipped.
+[package]
+name = "clap-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "UNLICENSED"
+
+[lib]
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+clap-sys = "0.5"
+
+[workspace]

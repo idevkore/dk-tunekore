@@ -16,7 +16,7 @@ mod editor;
 mod events;
 mod host;
 mod instance;
-mod mailbox;
+pub(crate) mod mailbox;
 mod module;
 mod ptr;
 pub(crate) mod shim;

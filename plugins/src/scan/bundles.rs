@@ -1,10 +1,12 @@
-//! Finding VST3 plugins on disk (safe, pure `std::fs`), resolving bundles to their binaries and
-//! mapping VST3 sub-categories to our categories (instrument, effect or other).
+//! Finding VST3 and CLAP plugins on disk (safe, pure `std::fs`), resolving bundles to their
+//! binaries and mapping VST3 sub-categories and CLAP features to our categories (instrument,
+//! effect or other).
 //!
 //! Derived from soundCraft's `vst3-host` (`scan.rs`), MIT OR Apache-2.0; see
-//! `third_party/soundcraft/`. What changed: the category mapping.
+//! `third_party/soundcraft/`. What changed: the category mapping, and CLAP's folders, files and
+//! features (soundCraft's `clap-host` `scan.rs` names the same folders).
 
-use crate::Category;
+use crate::{Category, Format};
 use std::path::{Path, PathBuf};
 
 /// Directory recursion limit while scanning (vendors nest folders, never deeply).
@@ -36,22 +38,67 @@ impl Os {
     }
 }
 
+/// Every standard plugin folder for this OS: the VST3 ones, then the CLAP ones.
+pub fn default_search_paths() -> Vec<PathBuf> {
+    let mut v = vst3_search_paths();
+    v.extend(clap_search_paths());
+    v
+}
+
 /// The standard VST3 search locations for this OS (existing or not), followed by every entry of
 /// the `VST3_PATH` environment variable.
-pub fn default_search_paths() -> Vec<PathBuf> {
-    let mut v = os_search_paths(
-        Os::current(),
-        std::env::var_os("HOME").map(PathBuf::from),
-        std::env::var_os("COMMONPROGRAMFILES").map(PathBuf::from),
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-    );
-    if let Some(cp) = std::env::var_os("VST3_PATH") {
-        v.extend(std::env::split_paths(&cp).filter(|p| !p.as_os_str().is_empty()));
+pub fn vst3_search_paths() -> Vec<PathBuf> {
+    let mut v = os_search_paths(Os::current(), env_path("HOME"), env_path("COMMONPROGRAMFILES"), env_path("LOCALAPPDATA"));
+    v.extend(env_list("VST3_PATH"));
+    v
+}
+
+/// The standard CLAP search locations for this OS (existing or not), followed by every entry of
+/// the `CLAP_PATH` environment variable (`:`-separated, `;` on Windows), as CLAP's `entry.h` lists
+/// them.
+pub fn clap_search_paths() -> Vec<PathBuf> {
+    let mut v = os_clap_search_paths(Os::current(), env_path("HOME"), env_path("COMMONPROGRAMFILES"), env_path("LOCALAPPDATA"));
+    v.extend(env_list("CLAP_PATH"));
+    v
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name).map(PathBuf::from)
+}
+
+fn env_list(name: &str) -> Vec<PathBuf> {
+    std::env::var_os(name).map(|v| std::env::split_paths(&v).filter(|p| !p.as_os_str().is_empty()).collect()).unwrap_or_default()
+}
+
+/// The OS-specific standard CLAP locations, given the relevant environment values.
+pub fn os_clap_search_paths(os: Os, home: Option<PathBuf>, common_program_files: Option<PathBuf>, local_app_data: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    match os {
+        Os::MacOs => {
+            if let Some(h) = home {
+                v.push(h.join("Library/Audio/Plug-Ins/CLAP"));
+            }
+            v.push(PathBuf::from("/Library/Audio/Plug-Ins/CLAP"));
+        }
+        Os::Windows => {
+            if let Some(c) = common_program_files {
+                v.push(c.join("CLAP"));
+            }
+            if let Some(l) = local_app_data {
+                v.push(l.join("Programs").join("Common").join("CLAP"));
+            }
+        }
+        Os::Unix => {
+            if let Some(h) = home {
+                v.push(h.join(".clap"));
+            }
+            v.push(PathBuf::from("/usr/lib/clap"));
+        }
     }
     v
 }
 
-/// The OS-specific standard locations, given the relevant environment values.
+/// The OS-specific standard VST3 locations, given the relevant environment values.
 pub fn os_search_paths(os: Os, home: Option<PathBuf>, common_program_files: Option<PathBuf>, local_app_data: Option<PathBuf>) -> Vec<PathBuf> {
     let mut v = Vec::new();
     match os {
@@ -82,16 +129,36 @@ pub fn os_search_paths(os: Os, home: Option<PathBuf>, common_program_files: Opti
 
 /// True when the path names a VST3 plugin (`*.vst3`, case-insensitive).
 pub fn is_vst3_path(p: &Path) -> bool {
-    p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case("vst3"))
+    has_extension(p, "vst3")
 }
 
-/// Recursively collects `.vst3` bundles and files under `dirs` (missing directories are skipped).
-/// A `.vst3` directory is a bundle and is not descended into. The result is sorted and deduplicated.
+/// True when the path names a CLAP plugin (`*.clap`, case-insensitive).
+pub fn is_clap_path(p: &Path) -> bool {
+    has_extension(p, "clap")
+}
+
+fn has_extension(p: &Path, ext: &str) -> bool {
+    p.extension().and_then(std::ffi::OsStr::to_str).is_some_and(|e| e.eq_ignore_ascii_case(ext))
+}
+
+/// The plugin format a path names by its extension (`.vst3` or `.clap`), if either.
+pub fn format_of(p: &Path) -> Option<Format> {
+    if is_vst3_path(p) {
+        Some(Format::Vst3)
+    } else if is_clap_path(p) {
+        Some(Format::Clap)
+    } else {
+        None
+    }
+}
+
+/// Recursively collects `.vst3` and `.clap` bundles and files under `dirs` (missing directories
+/// are skipped). A plugin bundle is not descended into. The result is sorted and deduplicated.
 pub fn find_bundles(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut budget = MAX_ENTRIES;
     for d in dirs {
-        if is_vst3_path(d) && d.exists() {
+        if format_of(d).is_some() && d.exists() {
             out.push(d.clone());
         } else {
             walk(d, 0, &mut out, &mut budget);
@@ -116,7 +183,7 @@ fn walk(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, budget: &mut usize) {
         let p = entry.path();
         // `metadata` follows symlinks (plugins are often symlinked in); errors are skipped.
         let Ok(md) = std::fs::metadata(&p) else { continue };
-        if is_vst3_path(&p) {
+        if format_of(&p).is_some() {
             out.push(p);
         } else if md.is_dir() {
             walk(&p, depth + 1, out, budget);
@@ -216,6 +283,20 @@ pub fn is_instrument<S: AsRef<str>>(subs: &[S]) -> bool {
     subs.first().is_some_and(|f| f.as_ref().eq_ignore_ascii_case("Instrument"))
 }
 
+/// Instrument or effect, from a CLAP plugin's features (`instrument`, `audio-effect`,
+/// `analyzer`, ...). An analyzer processes audio, so it is an effect; note effects and note
+/// detectors (MIDI-only plugins) are other, as tracks can't host those yet.
+pub fn category_from_features<S: AsRef<str>>(features: &[S]) -> Category {
+    let has = |f: &str| features.iter().any(|x| x.as_ref().eq_ignore_ascii_case(f));
+    if has("instrument") {
+        Category::Instrument
+    } else if has("audio-effect") || has("analyzer") {
+        Category::Effect
+    } else {
+        Category::Other
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,9 +318,15 @@ mod tests {
         std::fs::create_dir_all(d.join("c.vst3/Contents/MacOS")).unwrap();
         std::fs::write(d.join("c.vst3/Contents/MacOS/c"), b"x").unwrap();
         std::fs::write(d.join("c.vst3/Contents/inner.vst3"), b"x").unwrap();
+        std::fs::write(d.join("vendor/D.clap"), b"x").unwrap();
+        std::fs::create_dir_all(d.join("E.clap/Contents/MacOS")).unwrap();
+        std::fs::write(d.join("E.clap/Contents/MacOS/E"), b"x").unwrap();
+        std::fs::write(d.join("E.clap/Contents/inner.vst3"), b"x").unwrap();
         let found = find_bundles(&[d.clone(), d.join("missing")]);
         let names: Vec<String> = found.iter().map(|p| p.strip_prefix(&d).unwrap().to_string_lossy().replace('\\', "/")).collect();
-        assert_eq!(names, vec!["a.vst3", "c.vst3", "vendor/sub/B.VST3"]);
+        assert_eq!(names, vec!["E.clap", "a.vst3", "c.vst3", "vendor/D.clap", "vendor/sub/B.VST3"], "both formats, not inside bundles");
+        assert_eq!(find_bundles(&[d.join("vendor/D.clap")]), vec![d.join("vendor/D.clap")]);
+        assert_eq!((format_of(&d.join("x.CLAP")), format_of(&d.join("x.vst3")), format_of(&d.join("x.component"))), (Some(Format::Clap), Some(Format::Vst3), None));
         assert_eq!(find_bundles(&[d.join("a.vst3")]), vec![d.join("a.vst3")]);
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -291,6 +378,27 @@ mod tests {
         let unix = os_search_paths(Os::Unix, Some("/home/u".into()), None, None);
         assert_eq!(unix, vec![PathBuf::from("/home/u/.vst3"), PathBuf::from("/usr/lib/vst3"), PathBuf::from("/usr/local/lib/vst3")]);
         assert!(!default_search_paths().is_empty());
+    }
+
+    #[test]
+    fn clap_paths_are_the_ones_clap_names() {
+        let mac = os_clap_search_paths(Os::MacOs, Some("/Users/u".into()), None, None);
+        assert_eq!(mac, vec![PathBuf::from("/Users/u/Library/Audio/Plug-Ins/CLAP"), PathBuf::from("/Library/Audio/Plug-Ins/CLAP")]);
+        let win = os_clap_search_paths(Os::Windows, None, Some("C:/CPF".into()), Some("C:/LAD".into()));
+        assert_eq!(win, vec![PathBuf::from("C:/CPF").join("CLAP"), PathBuf::from("C:/LAD").join("Programs").join("Common").join("CLAP")]);
+        let unix = os_clap_search_paths(Os::Unix, Some("/home/u".into()), None, None);
+        assert_eq!(unix, vec![PathBuf::from("/home/u/.clap"), PathBuf::from("/usr/lib/clap")]);
+        let all = default_search_paths();
+        assert!(all.iter().any(|p| p.ends_with("CLAP") || p.ends_with("clap") || p.ends_with(".clap")), "{all:?}");
+    }
+
+    #[test]
+    fn clap_features_map_to_categories() {
+        assert_eq!(category_from_features(&["instrument", "synthesizer", "stereo"]), Category::Instrument);
+        assert_eq!(category_from_features(&["audio-effect", "reverb"]), Category::Effect);
+        assert_eq!(category_from_features(&["analyzer"]), Category::Effect);
+        assert_eq!(category_from_features(&["note-effect", "arpeggiator"]), Category::Other);
+        assert_eq!(category_from_features::<&str>(&[]), Category::Other);
     }
 
     #[test]
