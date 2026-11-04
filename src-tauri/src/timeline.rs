@@ -2437,12 +2437,12 @@ mod tests {
     }
 
     #[test]
-    fn midi_clips_are_sent_to_the_player_and_played_on_their_frames() {
+    fn a_tracks_midi_clips_build_a_set_that_plays_on_their_frames() {
         use tunekore_engine::{Buffers, Device, Event, Events, Transport};
         let rig = rig();
         let keys = instrument_track(&rig, "Keys");
         rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 1.0, 2.0, Some(vec![note(60, 0.0, 0.5), note(62, 1.5, 4.0)]))], vec![])).unwrap();
-        // The set the player got, played on a player of its own.
+        // The set the Timeline builds for the track, played on a player of its own.
         let set = midi::build(&lock(&rig.state.doc).midi[&keys]);
         let (mut player, mut feed) = clip::midi::player();
         player.prepare(FALLBACK_RATE, 4096);
@@ -2530,7 +2530,7 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_plays_through_the_tracks_player() {
+    fn the_keyboard_needs_an_instrument_track() {
         let rig = rig();
         let keys = instrument_track(&rig, "Keys");
         assert!(rig.state.preview(keys, Some((60, 100, true))).is_ok());
@@ -2559,4 +2559,72 @@ mod tests {
         assert!(lock(&rig.state.doc).midi.is_empty());
     }
 
+    /// An instrument that notes what it hears: (key, on).
+    struct Heard(Arc<Mutex<Vec<(u8, bool)>>>);
+    impl tunekore_engine::Device for Heard {
+        fn process(&mut self, _: &tunekore_engine::ProcessContext, events: &mut tunekore_engine::Events, _: tunekore_engine::Buffers<'_>) {
+            for e in events.as_slice() {
+                match *e {
+                    tunekore_engine::Event::NoteOn { key, .. } => lock(&self.0).push((key, true)),
+                    tunekore_engine::Event::NoteOff { key, .. } => lock(&self.0).push((key, false)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edits_undo_redo_and_the_keyboard_reach_the_tracks_own_player() {
+        let rig = rig();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let keys = {
+            let mut a = lock(rig.audio);
+            let m = a.engine.mixer();
+            let id = m.add_track("Keys").unwrap();
+            m.set_kind(id, TrackKind::Instrument).unwrap();
+            m.set_source(id, Some(Box::new(Heard(heard.clone())))).unwrap();
+            id
+        };
+        {
+            let mut doc = lock(&rig.state.doc);
+            rig.state.adopt(&mut doc);
+            rig.state.sync(&doc, Resend::Stale);
+        }
+        // The engine's own graph, as an output runs it, with the player in the track's notes slot.
+        let mut graph = lock(rig.audio).engine.mixer().start(FALLBACK_RATE);
+        let mut clock = tunekore_engine::Transport::new(FALLBACK_RATE);
+        let shared = rig.state.transport.clone();
+        let mut run = |blocks: usize| {
+            for _ in 0..blocks {
+                graph.run(&mut clock, &shared, 512);
+                lock(rig.audio).engine.mixer().collect();
+            }
+        };
+        let take = || std::mem::take(&mut *lock(&heard));
+        // A beat at 120 BPM is about 47 blocks.
+        rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 0.0, 4.0, Some(vec![note(60, 0.0, 1.0)]))], vec![])).unwrap();
+        rig.state.transport.play();
+        run(100);
+        assert_eq!(take(), [(60, true), (60, false)], "the edit reached the player");
+        rig.state.undo().unwrap();
+        rig.state.transport.seek(0.0);
+        run(100);
+        assert_eq!(take(), [], "and the undo did");
+        rig.state.redo().unwrap();
+        rig.state.transport.seek(0.0);
+        run(100);
+        assert_eq!(take(), [(60, true), (60, false)], "and the redo");
+        // The keyboard, with the transport stopped.
+        rig.state.transport.stop();
+        run(2);
+        take();
+        rig.state.preview(keys, Some((72, 100, true))).unwrap();
+        run(1);
+        rig.state.preview(keys, Some((72, 0, false))).unwrap();
+        run(1);
+        assert_eq!(take(), [(72, true), (72, false)]);
+        drop(run);
+        drop(graph);
+        assert!(lock(rig.audio).engine.mixer().stopped());
+    }
 }
