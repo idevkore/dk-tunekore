@@ -479,8 +479,9 @@ fn on_a_track_it_plays_the_instrument_after_it_on_the_frame() {
     let t = mixer.add_track("Keys").unwrap();
     let (player, mut feed) = player();
     let mut graph = mixer.start(RATE);
-    mixer.set_source(t, Some(Box::new(player))).unwrap();
-    mixer.insert(t, 0, Box::new(Held([false; KEYS]))).unwrap();
+    // The player in the notes slot, ahead of the instrument in the source slot.
+    mixer.set_notes(t, Some(Box::new(player))).unwrap();
+    mixer.set_source(t, Some(Box::new(Held([false; KEYS])))).unwrap();
     let shared = TransportShared::default();
     let mut clock = Transport::new(RATE);
     feed.publish(MidiClipSet::new(vec![clip(1.0, 2.0, vec![note(60, 0.0, 0.5)])]));
