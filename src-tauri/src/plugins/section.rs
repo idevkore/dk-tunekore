@@ -8,6 +8,10 @@
 //!     { "id": 1, "track": 2, "role": "instrument", "bypass": false,
 //!       "plugin": { "format": "vst3", "name": "Serum 2", "vendor": "Xfer Records",
 //!                   "version": "2.1.5", "classId": "…", "path": "/Library/Audio/Plug-Ins/VST3/Serum2.vst3" },
+//!       "state": "<base64 of the plugin's own state>" },
+//!     { "id": 2, "track": 2, "role": "effect", "bypass": false,
+//!       "plugin": { "format": "clap", "name": "…", "vendor": "…", "version": "…",
+//!                   "classId": "<the CLAP plugin id>", "path": "/Library/Audio/Plug-Ins/CLAP/….clap" },
 //!       "state": "<base64 of the plugin's own state>" }
 //!   ]
 //! }
@@ -26,7 +30,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager};
-use tunekore_engine::plugins::{vst3, Category, Format, PluginInfo};
+use tunekore_engine::plugins::{load as load_plugin, Category, Format, PluginInfo};
 use tunekore_engine::{PluginRole, TrackId, TrackKind, PADS, SAMPLER_TRACK};
 
 use super::{base64, kind_of, lock, make_device, mark_pad, placeholder, plugin_folders, publish, refresh_params, remove_at, resolve, state_of, with_doc, Doc, Loaded, Plugins, Role, MAX_STATE};
@@ -215,7 +219,7 @@ fn apply(app: &AppHandle, doc: &mut Doc, next: u64, devices: Vec<Read>) -> Vec<S
         slot.saved = state.clone();
         // Only from the scan's list or a plugin folder: a project file can't
         // point tuneKore at code anywhere else.
-        let loaded = resolve(catalog.as_ref(), &named, &folders).and_then(|info| vst3::load(&info).map(|c| (info, c)).map_err(|e| e.to_string()));
+        let loaded = resolve(catalog.as_ref(), &named, &folders).and_then(|info| load_plugin(&info).map(|c| (info, c)).map_err(|e| e.to_string()));
         match loaded {
             Ok((info, mut controller)) => {
                 slot.info = info;
@@ -367,6 +371,21 @@ mod tests {
         bad["state"] = json!("not base64!");
         assert!(read_file(Some(&json!({ "devices": [bad] }))).is_err());
         assert!(read_file(Some(&json!({ "devices": [{ "id": 1 }] }))).is_err());
+    }
+
+    #[test]
+    fn a_clap_device_keeps_its_format() {
+        let mut d = device(4, 2, "effect");
+        d["plugin"] = json!({ "format": "clap", "name": "Fixture CLAP Gain", "vendor": "tuneKore tests", "version": "1.2.3", "classId": "dev.tunekore.fixture.gain", "path": "/Library/Audio/Plug-Ins/CLAP/Fixture.clap" });
+        let (_, read) = read_file(Some(&json!({ "devices": [d] }))).unwrap();
+        let plugin = &read[0].file.plugin;
+        assert_eq!((plugin.format, plugin.class_id.as_str()), (Format::Clap, "dev.tunekore.fixture.gain"));
+        assert_eq!(plugin.info(Role::Effect).format, Format::Clap, "and loads as CLAP");
+        let back = serde_json::to_value(&read[0].file).unwrap();
+        assert_eq!(back["plugin"]["format"], "clap");
+        let mut odd = device(5, 2, "effect");
+        odd["plugin"]["format"] = json!("au");
+        assert!(read_file(Some(&json!({ "devices": [odd] }))).is_err(), "only formats tuneKore hosts");
     }
 
     #[test]
