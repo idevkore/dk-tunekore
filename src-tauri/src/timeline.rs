@@ -9,10 +9,13 @@
 //! project like the Sampler's samples.
 //!
 //! Tracks say what they are ([`TrackKind`], saved by the `tracks` section).
-//! The Timeline shows them all; its clips go on audio tracks only, whose
+//! The Timeline shows them all; its audio clips go on audio tracks only, whose
 //! source is a [`tunekore_engine::ClipPlayer`], and it puts a player only
 //! into an audio track's empty source slot, so a device another module put
-//! there stays. After each edit the track's clips go to
+//! there stays. MIDI clips (#38, [`midi`]) go on instrument tracks, played by
+//! a [`tunekore_engine::clip::MidiPlayer`] in the track's notes slot, ahead of
+//! the instrument the plugins module put in its source slot; the Timeline
+//! owns that slot. After each edit the track's clips go to
 //! it as a new [`ClipSet`], their audio decoded with the Analyzer's decoder
 //! and resampled to the output's rate here, off the audio thread. Decoded
 //! files stay in memory (long files are not streamed from disk yet), with
@@ -23,7 +26,8 @@
 //! the output reopens at another rate or loses its devices.
 //!
 //! Lock order: the project's `busy` (the tick thread's refeeding runs under
-//! `project::exclusive`), then the document, then the feeds, then any of the
+//! `project::exclusive`), then the document, then the feeds (the audio
+//! clips', then, never both at once, the MIDI clips'), then any of the
 //! sources, the meters and the audio engine, which take no other lock while held.
 
 use std::collections::{BTreeMap, HashMap};
@@ -37,11 +41,16 @@ use serde_json::Value;
 use tauri::async_runtime::spawn_blocking;
 use tauri::{AppHandle, Emitter, Manager};
 use tunekore_analyzer::decode_file;
+use tunekore_engine::clip::{MidiFeed, Preview};
 use tunekore_engine::track::TRACK_SLOTS;
 use tunekore_engine::{clip, resample, ClipFeed, ClipSet, ClipSpec, Peaks, Track, TrackId, TrackKind, TrackMeter, TrackMix, TransportShared, SAMPLER_TRACK};
 
 use crate::project::{self, Apply, Section};
 use crate::Audio;
+
+mod midi;
+
+use midi::{MidiClip, MidiClipFile, MidiClipIn, MidiClipView};
 
 /// Undo steps kept.
 const UNDO_LIMIT: usize = 200;
@@ -223,6 +232,7 @@ impl ViewState {
 struct Snapshot {
     tracks: Vec<TrackMeta>,
     clips: BTreeMap<TrackId, Vec<Clip>>,
+    midi: BTreeMap<TrackId, Vec<MidiClip>>,
     mixes: Vec<(TrackId, String, TrackMix, TrackKind)>,
     /// The tracks whose name or mix the step changed.
     touched: Vec<TrackId>,
@@ -238,7 +248,10 @@ struct History {
 struct Doc {
     /// In the order the Timeline shows them; the Sampler's first.
     tracks: Vec<TrackMeta>,
+    /// Audio clips, on audio tracks.
     clips: BTreeMap<TrackId, Vec<Clip>>,
+    /// MIDI clips, on instrument tracks. Clip ids are shared with the audio clips'.
+    midi: BTreeMap<TrackId, Vec<MidiClip>>,
     next_clip: u64,
     view: ViewState,
     history: History,
@@ -254,6 +267,7 @@ impl Default for Doc {
         Self {
             tracks: vec![TrackMeta { id: SAMPLER_TRACK, colour: 0, height: DEFAULT_HEIGHT }],
             clips: BTreeMap::new(),
+            midi: BTreeMap::new(),
             next_clip: 1,
             view: ViewState::default(),
             history: History::default(),
@@ -290,6 +304,10 @@ impl Doc {
 
     fn find(&self, id: u64) -> Option<(TrackId, &Clip)> {
         self.clips.iter().find_map(|(t, list)| list.iter().find(|c| c.id == id).map(|c| (*t, c)))
+    }
+
+    fn find_midi(&self, id: u64) -> Option<(TrackId, &MidiClip)> {
+        self.midi.iter().find_map(|(t, list)| list.iter().find(|c| c.id == id).map(|c| (*t, c)))
     }
 
     fn next_colour(&self) -> u8 {
@@ -355,8 +373,8 @@ struct Fed {
 /// Which tracks [`TimelineState::sync`] sends their clips to again.
 enum Resend<'a> {
     All,
-    /// Those whose clips differ from these.
-    Changed(&'a BTreeMap<TrackId, Vec<Clip>>),
+    /// Those whose clips differ from these (audio, then MIDI).
+    Changed(&'a BTreeMap<TrackId, Vec<Clip>>, &'a BTreeMap<TrackId, Vec<MidiClip>>),
     /// Only those whose player was replaced or changed rate.
     Stale,
 }
@@ -384,12 +402,13 @@ pub struct ClipView {
 pub struct TrackView {
     id: TrackId,
     name: String,
-    /// "sampler", "audio" or "instrument". Clips go on audio tracks.
+    /// "sampler", "audio" or "instrument". Audio clips go on audio tracks, MIDI clips on instrument tracks.
     kind: &'static str,
     colour: u8,
     height: u32,
     mix: TrackMix,
     clips: Vec<ClipView>,
+    midi: Vec<MidiClipView>,
 }
 
 /// A file the clips play: its length, for drawing, and whether it is missing.
@@ -457,6 +476,9 @@ pub struct Edit {
     /// The kind of edit, so a run of the same kind undoes as one step.
     key: String,
     clips: Vec<ClipIn>,
+    /// MIDI clips to add or change.
+    midi: Vec<MidiClipIn>,
+    /// Clips of either kind.
     delete: Vec<u64>,
 }
 
@@ -485,6 +507,8 @@ pub struct TimelineState {
     doc: Mutex<Doc>,
     sources: Mutex<HashMap<PathBuf, Arc<Source>>>,
     feeds: Mutex<HashMap<TrackId, Fed>>,
+    /// Each instrument track's MIDI clip player.
+    midi_feeds: Mutex<HashMap<TrackId, MidiFeed>>,
     meters: Mutex<Vec<(TrackId, TrackMeter)>>,
     /// The document's revision, readable without its lock.
     revision: AtomicU64,
@@ -513,6 +537,7 @@ impl TimelineState {
             doc: Mutex::default(),
             sources: Mutex::default(),
             feeds: Mutex::default(),
+            midi_feeds: Mutex::default(),
             meters: Mutex::default(),
             revision: AtomicU64::new(0),
             reads: AtomicU64::new(0),
@@ -587,10 +612,8 @@ impl TimelineState {
             .iter()
             .filter_map(|m| tracks.iter().find(|t| t.id == m.id).map(|t| (t.id, t.name.clone(), t.mix, t.kind)))
             .collect();
-        Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), mixes, touched: Vec::new() }
+        Snapshot { tracks: doc.tracks.clone(), clips: doc.clips.clone(), midi: doc.midi.clone(), mixes, touched: Vec::new() }
     }
-
-
 
     /// The engine's tracks and what each is.
     fn kinds(&self) -> HashMap<TrackId, TrackKind> {
@@ -600,6 +623,11 @@ impl TimelineState {
     /// Whether clips can go on track `id`: it is listed and it is an audio track.
     fn is_audio(&self, doc: &Doc, id: TrackId) -> bool {
         doc.tracks.iter().any(|t| t.id == id) && self.kinds().get(&id) == Some(&TrackKind::Audio)
+    }
+
+    /// Whether MIDI clips can go on track `id`: it is listed and it is an instrument track.
+    fn is_instrument(&self, doc: &Doc, id: TrackId) -> bool {
+        doc.tracks.iter().any(|t| t.id == id) && self.kinds().get(&id) == Some(&TrackKind::Instrument)
     }
 
     /// Tracks the engine can still take.
@@ -641,23 +669,73 @@ impl TimelineState {
             let rate = f.feed.rate();
             let changed = all || match what {
                 Resend::All => true,
-                Resend::Changed(before) => before.get(id) != doc.clips.get(id),
+                Resend::Changed(before, _) => before.get(id) != doc.clips.get(id),
                 Resend::Stale => false,
             };
             // A player at a new rate whose clips this edit didn't touch waits for
             // the refeed, which resamples with the document free.
-            let stale = f.rate != rate && !matches!(what, Resend::Changed(_));
+            let stale = f.rate != rate && !matches!(what, Resend::Changed(..));
             if rate > 0 && (changed || stale) {
                 f.feed.publish(self.build(doc.clips.get(id).map_or(&[][..], Vec::as_slice), rate));
                 f.rate = rate;
             }
         }
         drop(feeds);
+        self.sync_midi(doc, &kinds, &what);
         let mut meters = lock(&self.meters);
         if meters.iter().map(|(id, _)| *id).ne(doc.tracks.iter().map(|t| t.id)) {
             let a = lock(self.audio);
             *meters = doc.tracks.iter().filter_map(|t| a.engine.track_meter(t.id).map(|m| (t.id, m))).collect();
         }
+    }
+
+    /// Gives every instrument track a MIDI clip player in its notes slot
+    /// (again, when it was lost with the output), and sends the tracks `what`
+    /// names their clips. A new player gets its track's clips whatever `what` says.
+    fn sync_midi(&self, doc: &Doc, kinds: &HashMap<TrackId, TrackKind>, what: &Resend<'_>) {
+        let ids: Vec<TrackId> = doc.tracks.iter().map(|t| t.id).filter(|id| kinds.get(id) == Some(&TrackKind::Instrument)).collect();
+        let mut feeds = lock(&self.midi_feeds);
+        feeds.retain(|id, _| ids.contains(id));
+        let lost: Vec<TrackId> = ids.iter().copied().filter(|id| feeds.get(id).is_none_or(|f| !f.is_attached())).collect();
+        let mut fresh = Vec::new();
+        if !lost.is_empty() {
+            let mut a = lock(self.audio);
+            let mixer = a.engine.mixer();
+            for id in lost {
+                feeds.remove(&id);
+                let (player, feed) = clip::midi::player();
+                // Not an edit: the project saves clips, not players.
+                if mixer.restore_notes(id, Box::new(player)).is_ok() {
+                    feeds.insert(id, feed);
+                    fresh.push(id);
+                }
+            }
+        }
+        for id in &ids {
+            let Some(f) = feeds.get_mut(id) else { continue };
+            f.collect();
+            let changed = match what {
+                Resend::All => true,
+                Resend::Changed(_, before) => before.get(id) != doc.midi.get(id),
+                Resend::Stale => false,
+            };
+            if changed || fresh.contains(id) {
+                f.publish(midi::build(doc.midi.get(id).map_or(&[][..], Vec::as_slice)));
+            }
+        }
+    }
+
+    /// Plays a note on an instrument track's instrument by hand (the note
+    /// editor's keyboard), or lets go of it; `None` lets go of every one.
+    pub fn preview(&self, track: TrackId, note: Option<(u8, u8, bool)>) -> Result<(), String> {
+        let mut feeds = lock(&self.midi_feeds);
+        let f = feeds.get_mut(&track).ok_or(format!("track {} has no instrument to play", track.0))?;
+        let p = match note {
+            Some((key, velocity, true)) => Preview::On { key: key.min(127), velocity: f32::from(velocity.clamp(1, 127)) / 127.0 },
+            Some((key, _, false)) => Preview::Off { key: key.min(127) },
+            None => Preview::AllOff,
+        };
+        f.preview(p).then_some(()).ok_or_else(|| "too many notes at once".into())
     }
 
     /// Lists the engine's tracks the document doesn't know yet (made by the
@@ -677,6 +755,7 @@ impl TimelineState {
             }
         }
         doc.clips.retain(|id, _| tracks.iter().any(|t| t.id == *id && t.kind == TrackKind::Audio));
+        doc.midi.retain(|id, _| tracks.iter().any(|t| t.id == *id && t.kind == TrackKind::Instrument));
     }
 
     fn view(&self, doc: &Doc) -> View {
@@ -704,6 +783,7 @@ impl TimelineState {
                         height: m.height,
                         mix: t.mix,
                         clips: doc.clips.get(&m.id).into_iter().flatten().map(clip_view).collect(),
+                        midi: doc.midi.get(&m.id).into_iter().flatten().map(midi::view).collect(),
                     })
                 })
                 .collect(),
@@ -750,7 +830,7 @@ impl TimelineState {
         f(self, &mut doc)?;
         before.touched = std::mem::take(&mut doc.touching);
         doc.checkpoint(key, before.clone());
-        self.sync(&doc, Resend::Changed(&before.clips));
+        self.sync(&doc, Resend::Changed(&before.clips, &before.midi));
         self.note_revision(&doc);
         Ok(self.view(&doc))
     }
@@ -899,12 +979,32 @@ impl TimelineState {
                     return Err(format!("{} can't be read", file_stem(&p)));
                 }
             }
+            for m in &edit.midi {
+                if !s.is_instrument(doc, TrackId(m.track)) {
+                    return Err(match s.kinds().get(&TrackId(m.track)) {
+                        Some(TrackKind::Sampler) => "the Sampler's track plays its pattern; put MIDI clips on an instrument track".into(),
+                        Some(TrackKind::Audio) => "that's an audio track; put MIDI clips on an instrument track".into(),
+                        _ => format!("there is no track {}", m.track),
+                    });
+                }
+                if let Some(id) = m.id {
+                    if doc.find_midi(id).is_none() {
+                        return Err(format!("there is no MIDI clip {id}"));
+                    }
+                }
+            }
+            // What the changed MIDI clips were, for what an edit leaves out (their notes, their name).
+            let olds: HashMap<u64, MidiClip> = edit.midi.iter().filter_map(|m| m.id).filter_map(|id| doc.find_midi(id).map(|(_, c)| (id, c.clone()))).collect();
+            let names: HashMap<TrackId, String> = lock(s.audio).engine.tracks().into_iter().map(|t| (t.id, t.name)).collect();
             let new_track = match edit.clips.iter().find(|c| c.track == 0) {
                 Some(c) => Some(s.new_track(doc, &file_stem(Path::new(&c.path)))?),
                 None => None,
             };
-            let gone: Vec<u64> = edit.delete.iter().copied().chain(edit.clips.iter().filter_map(|c| c.id)).collect();
+            let gone: Vec<u64> = edit.delete.iter().copied().chain(edit.clips.iter().filter_map(|c| c.id)).chain(edit.midi.iter().filter_map(|m| m.id)).collect();
             for list in doc.clips.values_mut() {
+                list.retain(|c| !gone.contains(&c.id));
+            }
+            for list in doc.midi.values_mut() {
                 list.retain(|c| !gone.contains(&c.id));
             }
             for c in &edit.clips {
@@ -929,10 +1029,23 @@ impl TimelineState {
                 .sane(seconds.get(&path).copied().flatten());
                 doc.clips.entry(track).or_default().push(clip);
             }
+            for m in &edit.midi {
+                let track = TrackId(m.track);
+                let id = match m.id {
+                    Some(id) => id,
+                    None => doc.take_id(),
+                };
+                let clip = m.clip(id, olds.get(&id), names.get(&track).map_or("MIDI", String::as_str));
+                doc.midi.entry(track).or_default().push(clip);
+            }
             for list in doc.clips.values_mut() {
                 list.sort_by(|a, b| a.start.total_cmp(&b.start));
             }
+            for list in doc.midi.values_mut() {
+                list.sort_by(|a, b| a.start.total_cmp(&b.start));
+            }
             doc.clips.retain(|_, l| !l.is_empty());
+            doc.midi.retain(|_, l| !l.is_empty());
             Ok(())
         })
     }
@@ -945,8 +1058,24 @@ impl TimelineState {
         // The player's own count of frames, through the same tempo map, at its rate.
         let map = self.transport.tempo_map(self.rate());
         self.edit("split", |_, doc| {
-            let Doc { clips, next_clip, .. } = doc;
+            let Doc { clips, midi, next_clip, .. } = doc;
             let mut done = 0;
+            for list in midi.values_mut() {
+                let mut out = Vec::with_capacity(list.len() + 1);
+                for c in list.drain(..) {
+                    let here = (ids.is_empty() || ids.contains(&c.id)) && c.start < beat && beat < c.end();
+                    match here.then(|| c.split(beat, *next_clip)).flatten() {
+                        Some((left, right)) => {
+                            out.push(left);
+                            out.push(right);
+                            *next_clip += 1;
+                            done += 1;
+                        }
+                        None => out.push(c),
+                    }
+                }
+                *list = out;
+            }
             for list in clips.values_mut() {
                 let mut out = Vec::with_capacity(list.len() + 1);
                 for c in list.drain(..) {
@@ -1105,10 +1234,14 @@ impl TimelineState {
             }
         }
         let before = std::mem::replace(&mut doc.clips, snap.clips);
+        let before_midi = std::mem::replace(&mut doc.midi, snap.midi);
         doc.tracks = snap.tracks;
+        // An instrument track removed since (with its plugins) doesn't come back with its clips.
+        let kinds = self.kinds();
+        doc.midi.retain(|id, _| kinds.get(id) == Some(&TrackKind::Instrument));
         doc.revision += 1;
         doc.history.last = None;
-        self.sync(doc, Resend::Changed(&before));
+        self.sync(doc, Resend::Changed(&before, &before_midi));
         Ok(())
     }
 
@@ -1135,10 +1268,15 @@ impl TimelineState {
     /// Frees what the players handed back; true when one was lost or changed
     /// rate and needs [`refeed`](Self::refeed). Takes only the feeds' lock.
     fn needs_refeed(&self) -> bool {
-        lock(&self.feeds).values_mut().fold(false, |stale, f| {
+        let audio = lock(&self.feeds).values_mut().fold(false, |stale, f| {
             f.feed.collect();
             stale || !f.feed.is_attached() || f.feed.rate() != f.rate
-        })
+        });
+        let notes = lock(&self.midi_feeds).values_mut().fold(false, |lost, f| {
+            f.collect();
+            lost || !f.is_attached()
+        });
+        audio || notes
     }
 
     /// Puts the clips back on players that were lost or changed rate. The
@@ -1270,6 +1408,9 @@ struct TimelineFile {
     tracks: Vec<TrackMeta>,
     /// Each audio track's clips, by track id.
     clips: BTreeMap<String, Vec<ClipFile>>,
+    /// Each instrument track's MIDI clips, by track id. Left out when there are none.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    midi: BTreeMap<String, Vec<MidiClipFile>>,
     view: ViewState,
 }
 
@@ -1312,6 +1453,7 @@ struct Reading {
 struct Read {
     tracks: Vec<TrackMeta>,
     clips: BTreeMap<TrackId, Vec<Clip>>,
+    midi: BTreeMap<TrackId, Vec<MidiClip>>,
     view: ViewState,
 }
 
@@ -1342,7 +1484,8 @@ impl TimelineState {
                 (id.0.to_string(), list)
             })
             .collect();
-        serde_json::to_value(TimelineFile { tracks: doc.tracks.clone(), clips, view: doc.view }).unwrap_or(Value::Null)
+        let midi = doc.midi.iter().filter(|(_, l)| !l.is_empty()).map(|(id, list)| (id.0.to_string(), list.iter().map(midi::to_file).collect())).collect();
+        serde_json::to_value(TimelineFile { tracks: doc.tracks.clone(), clips, midi, view: doc.view }).unwrap_or(Value::Null)
     }
 
     /// Reads and checks the section, and decodes its files (slow; no lock
@@ -1389,11 +1532,24 @@ impl TimelineState {
                 clips.entry(track).or_default().push(clip);
             }
         }
+        let mut midi: BTreeMap<TrackId, Vec<MidiClip>> = BTreeMap::new();
+        for (key, list) in f.midi {
+            let track = key.parse::<u32>().ok().filter(|&t| t != 0).map(TrackId).ok_or(format!("the project's Timeline has MIDI clips on a track called {key}"))?;
+            for c in list {
+                if !ids.insert(c.id) {
+                    return Err(format!("the project's Timeline has two clips numbered {}", c.id));
+                }
+                midi.entry(track).or_default().push(midi::from_file(c));
+            }
+        }
         for list in clips.values_mut() {
             list.sort_by(|a, b| a.start.total_cmp(&b.start));
         }
+        for list in midi.values_mut() {
+            list.sort_by(|a, b| a.start.total_cmp(&b.start));
+        }
         let tracks = f.tracks.into_iter().map(|t| TrackMeta { colour: t.colour % COLOURS, height: t.height.clamp(MIN_HEIGHT, MAX_HEIGHT), ..t }).collect();
-        Ok(Read { tracks, clips, view: f.view.sane() })
+        Ok(Read { tracks, clips, midi, view: f.view.sane() })
     }
 
     /// Replaces the document with what was read. The tracks are already the
@@ -1406,20 +1562,26 @@ impl TimelineState {
         let mut seen = std::collections::HashSet::new();
         let tracks: Vec<TrackMeta> = read.tracks.into_iter().filter(|t| kinds.contains_key(&t.id) && seen.insert(t.id)).collect();
         let mut clips = read.clips;
-        // Clips go on audio tracks only.
+        let mut midi = read.midi;
+        // Audio clips go on audio tracks only, MIDI clips on instrument tracks.
         let orphans: Vec<u32> = clips.keys().filter(|id| kinds.get(id) != Some(&TrackKind::Audio)).map(|id| id.0).collect();
         let lost: usize = orphans.iter().map(|id| clips.remove(&TrackId(*id)).map_or(0, |l| l.len())).sum();
-        let next_clip = clips.values().flatten().map(|c| c.id).max().unwrap_or(0) + 1;
+        let orphans: Vec<u32> = midi.keys().filter(|id| kinds.get(id) != Some(&TrackKind::Instrument)).map(|id| id.0).collect();
+        let lost_midi: usize = orphans.iter().map(|id| midi.remove(&TrackId(*id)).map_or(0, |l| l.len())).sum();
+        let next_clip = clips.values().flatten().map(|c| c.id).chain(midi.values().flatten().map(|c| c.id)).max().unwrap_or(0) + 1;
         let revision = doc.revision + 1;
         // The last project's files go; this one's were decoded as it was read.
         lock(&self.sources).retain(|p, _| clips.values().flatten().any(|c| c.path == *p));
-        *doc = Doc { tracks, clips, next_clip, view: read.view, history: History::default(), revision, touching: Vec::new() };
+        *doc = Doc { tracks, clips, midi, next_clip, view: read.view, history: History::default(), revision, touching: Vec::new() };
         self.adopt(&mut doc);
         self.apply_loop(&doc.view);
         self.sync(&doc, Resend::All);
         self.note_revision(&doc);
         if lost > 0 {
             return Err(format!("{lost} clip(s) were on tracks the project doesn't have as audio tracks"));
+        }
+        if lost_midi > 0 {
+            return Err(format!("{lost_midi} MIDI clip(s) were on tracks the project doesn't have as instrument tracks"));
         }
         Ok(())
     }
@@ -1506,6 +1668,8 @@ pub fn tracks_changed(app: &AppHandle) {
     let v = {
         let mut doc = lock(&s.doc);
         s.adopt(&mut doc);
+        // A new instrument track gets its MIDI clip player.
+        s.sync(&doc, Resend::Stale);
         s.view(&doc)
     };
     publish(app, v);
@@ -1611,6 +1775,25 @@ pub async fn timeline_play(playing: bool, app: AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// Plays `key` on an instrument track's instrument from the note editor's
+/// keyboard (`on`), or lets go of it; with no `key`, lets go of every note
+/// played that way. A start waits for the output to open (as play does) and
+/// is dropped when it can't, so starts never pile up to play in a burst
+/// later; an end goes straight to the player. With the editor sending each
+/// preview once the last has landed, an end never overtakes its start.
+#[tauri::command]
+pub async fn timeline_preview(track: u32, key: Option<u8>, velocity: Option<u8>, on: bool, app: AppHandle) -> Result<(), String> {
+    let s = shared(&app);
+    spawn_blocking(move || {
+        if on {
+            lock(s.audio).ensure_open()?;
+        }
+        s.preview(TrackId(track), key.map(|k| (k, velocity.unwrap_or(midi::DEFAULT_VELOCITY), on)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// A file's waveform peaks at `level` (see `tunekore_engine::PEAK_LEVELS`):
 /// min then max of each bucket, as signed bytes.
 #[tauri::command]
@@ -1677,6 +1860,7 @@ pub fn commands() -> crate::Commands {
         timeline_loop,
         timeline_seek,
         timeline_play,
+        timeline_preview,
         timeline_peaks,
     ]
 }
@@ -1816,7 +2000,7 @@ mod tests {
         // It can still be moved.
         let c = &vox.clips[0];
         rig.state
-            .apply_edit(Edit { key: "move".into(), clips: vec![ClipIn { id: Some(7), track: 5, path: c.path.clone(), start: 3.0, offset: c.offset, content: c.content, phase: 0.0, length: c.length, fade_in: 0.0, fade_out: 0.0, gain_db: 0.0 }], delete: vec![] })
+            .apply_edit(Edit { key: "move".into(), clips: vec![ClipIn { id: Some(7), track: 5, path: c.path.clone(), start: 3.0, offset: c.offset, content: c.content, phase: 0.0, length: c.length, fade_in: 0.0, fade_out: 0.0, gain_db: 0.0 }], delete: vec![], ..Default::default() })
             .unwrap();
         assert_eq!(rig.state.current().tracks[1].clips[0].start, 3.0);
     }
@@ -1869,7 +2053,7 @@ mod tests {
         let c = v.tracks[1].clips[0].clone();
         rig.state.set_track(TrackId(2), TrackChange { mix: Some(TrackMix { volume: 0.5, ..Default::default() }), ..Default::default() }).unwrap();
         let mv = ClipIn { id: Some(c.id), track: 2, path: c.path.clone(), start: 4.0, offset: c.offset, content: c.content, phase: 0.0, length: c.length, fade_in: 0.0, fade_out: 0.0, gain_db: 0.0 };
-        rig.state.apply_edit(Edit { key: "move".into(), clips: vec![mv], delete: vec![] }).unwrap();
+        rig.state.apply_edit(Edit { key: "move".into(), clips: vec![mv], delete: vec![], ..Default::default() }).unwrap();
         // A fader ridden outside the Timeline (MIDI, the Mixer) after the move.
         let ridden = TrackMix { volume: 0.25, pan: 0.5, ..Default::default() };
         lock(rig.audio).engine.mixer().set_mix(SAMPLER_TRACK, ridden).unwrap();
@@ -1907,16 +2091,16 @@ mod tests {
         // Move it, and put a copy on a new track; the copy's offset is past the file's end.
         let v = rig
             .state
-            .apply_edit(Edit { key: "move".into(), clips: vec![input(Some(c.id), 2, 2.0, 0.0, 1.0), input(None, 0, 2.0, 5.0, 0.5)], delete: vec![] })
+            .apply_edit(Edit { key: "move".into(), clips: vec![input(Some(c.id), 2, 2.0, 0.0, 1.0), input(None, 0, 2.0, 5.0, 0.5)], delete: vec![], ..Default::default() })
             .unwrap();
         assert_eq!(v.tracks[1].clips[0].start, 2.0);
         let copy = &v.tracks[2].clips[0];
         assert!(copy.offset < 1.0 && copy.offset + copy.content <= 1.0 + 1e-9, "inside the file: {copy:?}");
         assert_ne!(copy.id, c.id);
         // A looped clip: longer than its content.
-        let v = rig.state.apply_edit(Edit { key: "loop".into(), clips: vec![input(Some(c.id), 2, 2.0, 0.0, 3.5)], delete: vec![] }).unwrap();
+        let v = rig.state.apply_edit(Edit { key: "loop".into(), clips: vec![input(Some(c.id), 2, 2.0, 0.0, 3.5)], delete: vec![], ..Default::default() }).unwrap();
         assert_eq!(v.tracks[1].clips[0].length, 3.5);
-        let v = rig.state.apply_edit(Edit { key: "delete".into(), clips: vec![], delete: vec![copy.id] }).unwrap();
+        let v = rig.state.apply_edit(Edit { key: "delete".into(), clips: vec![], delete: vec![copy.id], ..Default::default() }).unwrap();
         assert!(v.tracks[2].clips.is_empty());
         assert!(rig.state.apply_edit(Edit { clips: vec![input(None, 1, 0.0, 0.0, 1.0)], ..Default::default() }).unwrap_err().contains("Sampler"));
         assert!(rig.state.apply_edit(Edit { clips: vec![input(Some(999), 2, 0.0, 0.0, 1.0)], ..Default::default() }).is_err());
@@ -2181,5 +2365,265 @@ mod tests {
         assert_eq!(c.length, MIN_LENGTH);
         assert!(c.fade_in + c.fade_out <= c.length + 1e-12);
         assert_eq!(c.gain_db, MAX_GAIN_DB);
+    }
+
+    // ---- MIDI clips ----
+
+    /// Adds an instrument track with a stand-in instrument in its source
+    /// slot, as the plugins module does, and tells the Timeline (as
+    /// `tracks_changed` does).
+    fn instrument_track(rig: &Rig, name: &str) -> TrackId {
+        let id = {
+            let mut a = lock(rig.audio);
+            let m = a.engine.mixer();
+            let id = m.add_track(name).unwrap();
+            m.set_kind(id, TrackKind::Instrument).unwrap();
+            m.set_source(id, Some(Box::new(Instrument(Arc::new(AtomicBool::new(false)))))).unwrap();
+            id
+        };
+        let mut doc = lock(&rig.state.doc);
+        rig.state.adopt(&mut doc);
+        rig.state.sync(&doc, Resend::Stale);
+        id
+    }
+
+    fn note(key: u8, start: f64, length: f64) -> midi::Note {
+        midi::Note { id: 0, key, start, length, velocity: 100 }
+    }
+
+    fn midi_in(id: Option<u64>, track: TrackId, start: f64, length: f64, notes: Option<Vec<midi::Note>>) -> MidiClipIn {
+        MidiClipIn { id, track: track.0, name: None, start, offset: 0.0, content: length, phase: 0.0, length, notes }
+    }
+
+    fn midi_edit(key: &str, clips: Vec<MidiClipIn>, delete: Vec<u64>) -> Edit {
+        Edit { key: key.into(), midi: clips, delete, ..Default::default() }
+    }
+
+    #[test]
+    fn midi_clips_go_on_instrument_tracks_and_every_edit_undoes() {
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        assert!(lock(&rig.state.midi_feeds).get(&keys).is_some_and(|f| f.is_attached()), "a player in the track's notes slot");
+        // An empty clip, as a double-click on the lane makes.
+        let v = rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 4.0, 4.0, None)], vec![])).unwrap();
+        let t = v.tracks.iter().find(|t| t.id == keys).unwrap();
+        assert_eq!((t.kind, t.midi.len(), t.midi[0].name.as_str(), t.midi[0].notes.len()), ("instrument", 1, "Keys", 0));
+        let id = t.midi[0].id;
+        // Notes written in the note editor.
+        let notes = vec![note(60, 0.0, 1.0), note(64, 1.0, 0.5), note(67, 2.0, 2.0)];
+        rig.state.apply_edit(midi_edit("notes", vec![midi_in(Some(id), keys, 4.0, 4.0, Some(notes))], vec![])).unwrap();
+        // Moved on the Timeline: the notes stay with it, though the move didn't send them.
+        let v = rig.state.apply_edit(midi_edit("move", vec![midi_in(Some(id), keys, 8.0, 4.0, None)], vec![])).unwrap();
+        let c = &v.tracks.iter().find(|t| t.id == keys).unwrap().midi[0];
+        assert_eq!((c.start, c.notes.len()), (8.0, 3));
+        let v = rig.state.apply_edit(midi_edit("delete", vec![], vec![id])).unwrap();
+        assert!(v.tracks.iter().find(|t| t.id == keys).unwrap().midi.is_empty());
+        // Each step undoes on its own.
+        let starts = |v: &View| v.tracks.iter().find(|t| t.id == keys).unwrap().midi.iter().map(|c| (c.start, c.notes.len())).collect::<Vec<_>>();
+        assert_eq!(starts(&rig.state.undo().unwrap()), [(8.0, 3)]);
+        assert_eq!(starts(&rig.state.undo().unwrap()), [(4.0, 3)]);
+        assert_eq!(starts(&rig.state.undo().unwrap()), [(4.0, 0)]);
+        assert_eq!(starts(&rig.state.undo().unwrap()), []);
+        assert_eq!(starts(&rig.state.redo().unwrap()), [(4.0, 0)]);
+        // Not on the Sampler's track, nor an audio one; and no changing a clip that isn't there.
+        let audio = { rig.state.add_track().unwrap(); TrackId(rig.engine_tracks().into_iter().max().unwrap()) };
+        assert!(rig.state.apply_edit(midi_edit("add", vec![midi_in(None, SAMPLER_TRACK, 0.0, 4.0, None)], vec![])).unwrap_err().contains("Sampler"));
+        assert!(rig.state.apply_edit(midi_edit("add", vec![midi_in(None, audio, 0.0, 4.0, None)], vec![])).unwrap_err().contains("audio track"));
+        assert!(rig.state.apply_edit(midi_edit("move", vec![midi_in(Some(999), keys, 0.0, 4.0, None)], vec![])).unwrap_err().contains("no MIDI clip"));
+        // And an audio clip can't go on the instrument track.
+        let a = rig.state.add_files(&[rig.file("kick.wav")], Some(keys), 0.0).unwrap();
+        assert!(a.tracks.iter().find(|t| t.id == keys).unwrap().clips.is_empty(), "a new audio track instead");
+    }
+
+    #[test]
+    fn a_tracks_midi_clips_build_a_set_that_plays_on_their_frames() {
+        use tunekore_engine::{Buffers, Device, Event, Events, Transport};
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 1.0, 2.0, Some(vec![note(60, 0.0, 0.5), note(62, 1.5, 4.0)]))], vec![])).unwrap();
+        // The set the Timeline builds for the track, played on a player of its own.
+        let set = midi::build(&lock(&rig.state.doc).midi[&keys]);
+        let (mut player, mut feed) = clip::midi::player();
+        player.prepare(FALLBACK_RATE, 4096);
+        feed.publish(set);
+        let shared = TransportShared::default();
+        shared.play();
+        let mut clock = Transport::new(FALLBACK_RATE);
+        let (mut l, mut r) = (vec![0.0f32; 512], vec![0.0f32; 512]);
+        let mut events = Events::with_capacity(64);
+        let mut got = Vec::new();
+        for b in 0..200u64 {
+            clock.run(&shared, 512, |ctx, off| {
+                events.clear();
+                player.process(ctx, &mut events, Buffers { left: &mut l[off..off + ctx.frames], right: &mut r[off..off + ctx.frames] });
+                for e in events.as_slice() {
+                    let at = b * 512 + off as u64 + u64::from(e.frame());
+                    got.push(match *e {
+                        Event::NoteOn { key, velocity, .. } => (key, at, (velocity * 127.0).round() as u8),
+                        _ => (0, at, 0),
+                    });
+                }
+            });
+        }
+        // Beat 1 is frame 24,000 at 120 BPM; the last note stops at the clip's end (beat 3).
+        assert_eq!(got, [(60, 24_000, 100), (0, 36_000, 0), (62, 60_000, 100), (0, 72_000, 0)]);
+    }
+
+    #[test]
+    fn midi_clips_round_trip_through_the_project_file() {
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        let looped = MidiClipIn { offset: 0.5, content: 2.0, phase: 0.25, length: 8.0, name: Some("Riff".into()), ..midi_in(None, keys, 4.0, 0.0, Some(vec![note(60, 0.5, 0.25), midi::Note { velocity: 31, ..note(67, 1.0, 0.5) }])) };
+        rig.state.apply_edit(midi_edit("add", vec![looped, midi_in(None, keys, 16.0, 4.0, None)], vec![])).unwrap();
+        let file = rig.dir.path().join("song.tunek");
+        rig.project.save(&(), Some(file.clone())).unwrap();
+        let text: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(text["tracks"][1]["kind"], "instrument");
+        let saved = &text["timeline"]["midi"][keys.0.to_string()];
+        assert_eq!(saved[0]["name"], "Riff");
+        assert_eq!(saved[0]["notes"][1], serde_json::json!({ "key": 67, "start": 1.0, "length": 0.5, "velocity": 31 }));
+        assert_eq!(saved[1]["notes"], serde_json::json!([]));
+        let before = rig.state.current();
+
+        rig.project.new_project(&()).unwrap();
+        assert_eq!(rig.state.current().tracks.len(), 1, "only the Sampler");
+        rig.project.open(&(), &file, Some(file.clone()), false).unwrap();
+        let back = rig.state.current();
+        assert_eq!(back.tracks, before.tracks, "the same clips and notes, the note ids too");
+        assert!(lock(&rig.state.midi_feeds).get(&keys).is_some_and(|f| f.is_attached()), "and a player for them");
+        assert!(!rig.project.is_dirty(&()));
+        let again: Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(rig.state.save_file(&file), again["timeline"], "what opened is what saves");
+        // A project with no MIDI clips writes no `midi` at all, as older builds wrote it.
+        rig.project.new_project(&()).unwrap();
+        assert!(rig.state.save_file(&file).get("midi").is_none());
+    }
+
+    #[test]
+    fn midi_clips_on_a_track_that_isnt_an_instrument_open_the_project_in_part() {
+        let rig = rig();
+        let text = serde_json::json!({
+            "format": "tunekore-project", "version": 2,
+            "tracks": [{ "id": 1, "name": "Sampler" }, { "id": 2, "name": "Drums" }],
+            "timeline": { "midi": { "2": [{ "id": 1, "start": 0.0, "content": 4.0, "length": 4.0, "notes": [{ "key": 36, "start": 0.0, "length": 0.25 }] }] } }
+        });
+        let err = rig.project.open_text(&(), &text.to_string(), &rig.dir.path().join("a.tunek"), None, false).unwrap_err();
+        assert!(err.contains("opened only in part") && err.contains("instrument tracks"), "{err}");
+        let twice = serde_json::json!({ "format": "tunekore-project", "version": 2, "timeline": {
+            "clips": { "2": [{ "id": 1, "file": "kick.wav", "start": 0.0, "offset": 0.0, "content": 1.0, "length": 1.0 }] },
+            "midi": { "3": [{ "id": 1, "start": 0.0, "content": 4.0, "length": 4.0 }] } } });
+        assert!(rig.project.open_text(&(), &twice.to_string(), &rig.dir.path().join("b.tunek"), None, false).unwrap_err().contains("two clips numbered 1"));
+    }
+
+    #[test]
+    fn a_midi_clip_splits_at_the_playhead_and_undoes() {
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 0.0, 4.0, Some(vec![note(60, 0.0, 3.0), note(64, 3.0, 1.0)]))], vec![])).unwrap();
+        let v = rig.state.split(&[], 2.0).unwrap();
+        let clips = &v.tracks.iter().find(|t| t.id == keys).unwrap().midi;
+        assert_eq!(clips.iter().map(|c| (c.start, c.length, c.offset, c.notes.len())).collect::<Vec<_>>(), [(0.0, 2.0, 0.0, 1), (2.0, 2.0, 2.0, 2)]);
+        assert_ne!(clips[0].id, clips[1].id);
+        rig.state.undo().unwrap();
+        assert_eq!(rig.state.current().tracks.iter().find(|t| t.id == keys).unwrap().midi.len(), 1);
+    }
+
+    #[test]
+    fn the_keyboard_needs_an_instrument_track() {
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        assert!(rig.state.preview(keys, Some((60, 100, true))).is_ok());
+        assert!(rig.state.preview(keys, Some((60, 0, false))).is_ok());
+        assert!(rig.state.preview(keys, None).is_ok());
+        assert!(rig.state.preview(SAMPLER_TRACK, Some((60, 100, true))).unwrap_err().contains("no instrument"));
+    }
+
+    #[test]
+    fn an_instrument_track_removed_takes_its_midi_clips_with_it() {
+        let rig = rig();
+        let keys = instrument_track(&rig, "Keys");
+        rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 0.0, 4.0, None)], vec![])).unwrap();
+        // The plugins module removes the track, then tells the Timeline.
+        lock(rig.audio).engine.mixer().remove_track(keys).unwrap();
+        {
+            let mut doc = lock(&rig.state.doc);
+            rig.state.adopt(&mut doc);
+            rig.state.sync(&doc, Resend::Stale);
+        }
+        assert!(lock(&rig.state.doc).midi.is_empty());
+        assert!(lock(&rig.state.midi_feeds).is_empty());
+        // Undoing the clip's adding doesn't bring it back onto a track that's gone.
+        rig.state.undo().unwrap();
+        rig.state.redo().unwrap();
+        assert!(lock(&rig.state.doc).midi.is_empty());
+    }
+
+    /// An instrument that notes what it hears: (key, on).
+    struct Heard(Arc<Mutex<Vec<(u8, bool)>>>);
+    impl tunekore_engine::Device for Heard {
+        fn process(&mut self, _: &tunekore_engine::ProcessContext, events: &mut tunekore_engine::Events, _: tunekore_engine::Buffers<'_>) {
+            for e in events.as_slice() {
+                match *e {
+                    tunekore_engine::Event::NoteOn { key, .. } => lock(&self.0).push((key, true)),
+                    tunekore_engine::Event::NoteOff { key, .. } => lock(&self.0).push((key, false)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn edits_undo_redo_and_the_keyboard_reach_the_tracks_own_player() {
+        let rig = rig();
+        let heard = Arc::new(Mutex::new(Vec::new()));
+        let keys = {
+            let mut a = lock(rig.audio);
+            let m = a.engine.mixer();
+            let id = m.add_track("Keys").unwrap();
+            m.set_kind(id, TrackKind::Instrument).unwrap();
+            m.set_source(id, Some(Box::new(Heard(heard.clone())))).unwrap();
+            id
+        };
+        {
+            let mut doc = lock(&rig.state.doc);
+            rig.state.adopt(&mut doc);
+            rig.state.sync(&doc, Resend::Stale);
+        }
+        // The engine's own graph, as an output runs it, with the player in the track's notes slot.
+        let mut graph = lock(rig.audio).engine.mixer().start(FALLBACK_RATE);
+        let mut clock = tunekore_engine::Transport::new(FALLBACK_RATE);
+        let shared = rig.state.transport.clone();
+        let mut run = |blocks: usize| {
+            for _ in 0..blocks {
+                graph.run(&mut clock, &shared, 512);
+                lock(rig.audio).engine.mixer().collect();
+            }
+        };
+        let take = || std::mem::take(&mut *lock(&heard));
+        // A beat at 120 BPM is about 47 blocks.
+        rig.state.apply_edit(midi_edit("add", vec![midi_in(None, keys, 0.0, 4.0, Some(vec![note(60, 0.0, 1.0)]))], vec![])).unwrap();
+        rig.state.transport.play();
+        run(100);
+        assert_eq!(take(), [(60, true), (60, false)], "the edit reached the player");
+        rig.state.undo().unwrap();
+        rig.state.transport.seek(0.0);
+        run(100);
+        assert_eq!(take(), [], "and the undo did");
+        rig.state.redo().unwrap();
+        rig.state.transport.seek(0.0);
+        run(100);
+        assert_eq!(take(), [(60, true), (60, false)], "and the redo");
+        // The keyboard, with the transport stopped.
+        rig.state.transport.stop();
+        run(2);
+        take();
+        rig.state.preview(keys, Some((72, 100, true))).unwrap();
+        run(1);
+        rig.state.preview(keys, Some((72, 0, false))).unwrap();
+        run(1);
+        assert_eq!(take(), [(72, true), (72, false)]);
+        drop(run);
+        drop(graph);
+        assert!(lock(rig.audio).engine.mixer().stopped());
     }
 }

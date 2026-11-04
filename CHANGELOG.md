@@ -5,6 +5,26 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.22: MIDI clips and the note editor
+
+idevkore/dk-tunekore#38
+
+- **MIDI clips on instrument tracks.** Double-click an instrument track's
+  lane (or press "+ MIDI clip") for an empty clip a bar long. Move, copy,
+  trim, loop, split, duplicate and delete them as you do audio clips; they
+  play the track's instrument on the beat, through tempo changes, seeks and
+  the loop, and every note stops when it should, with none left hanging.
+- **The note editor.** Select a MIDI clip and its notes open under the
+  tracks. Double-click to add a note (or switch on Draw, B), drag to move it
+  (⌥ copies) or to make it longer or shorter, drag a box to select, and drag
+  the stems along the bottom for velocity. Q quantizes to the editor's grid,
+  the arrows move notes (⇧ by an octave or a bar), ⌘D duplicates them. The
+  keyboard on the left plays the instrument, and notes sound as you drag
+  them. The brace over the notes is the clip's loop. Every change undoes.
+- **Saved with the project**, notes and all.
+- MIDI clips can't go on the Sampler's track yet, and recording MIDI comes
+  with audio recording.
+
 ## 0.1.21: export the project
 
 idevkore/dk-tunekore#44

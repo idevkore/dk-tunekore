@@ -1,6 +1,8 @@
-// The Timeline view (idevkore/dk-tunekore#36): tracks and audio clips on the
+// The Timeline view (idevkore/dk-tunekore#36): tracks and their clips on the
 // transport's beat grid, the same clock the Sampler plays on. The Sampler's
-// track comes first, with its mix; every other track is an audio track.
+// track comes first, with its mix; then audio tracks with audio clips, and
+// instrument tracks with MIDI clips (#38), whose notes the note editor
+// writes when one is selected.
 //
 // Layout: the top bar (the view switch, play, the playhead's position, the
 // tempo, the loop, the grid, zoom), the Library on the left (the Sampler's,
@@ -17,7 +19,8 @@
 // Timeline's edits, ⌫ deletes the selected clips, ⌘D duplicates them, ⌘E
 // splits at the playhead, ⌘L loops the selection, ⌘A selects every clip,
 // = and - zoom, Home goes back to the start. A focused track header takes
-// F2 or Enter to rename it.
+// F2 or Enter to rename it. While the note editor has focus its own keys
+// (NoteEditor.tsx) act on notes; Space and ⌘Z stay the Timeline's.
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen } from "@tauri-apps/api/event";
@@ -30,6 +33,8 @@ import { onMeter } from "../engine";
 import * as api from "./api";
 import { AUDIO_EXTENSIONS, subscribe, type Edit, type Snap, type Tick, type TimelineView } from "./api";
 import { barBeats, clipEnd, gridStep, position, secondsPerBeat, snapBeat, toInput } from "./edits";
+import { midiEnd, toMidiInput } from "./midi";
+import NoteEditor from "./NoteEditor";
 import { beatToX, type Ghost, type Lane } from "./draw";
 import Lanes from "./Lanes";
 import Ruler from "./Ruler";
@@ -193,7 +198,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   // A selection holds only clips that still exist.
   useEffect(() => {
     if (!view) return;
-    const ids = new Set(view.tracks.flatMap((t) => t.clips.map((c) => c.id)));
+    const ids = new Set(view.tracks.flatMap((t) => [...t.clips.map((c) => c.id), ...t.midi.map((c) => c.id)]));
     setSelected((s) => ([...s].every((id) => ids.has(id)) ? s : new Set([...s].filter((id) => ids.has(id)))));
   }, [view]);
 
@@ -250,7 +255,8 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   const step = gridStep(snap, bar);
   const loop = useMemo(() => ({ on: view?.loopOn ?? false, start: view?.loopStart ?? 0, end: view?.loopEnd ?? 16 }), [view]);
   const allClips = useMemo(() => lanes.flatMap((l) => l.track.clips.map((c) => ({ clip: c, track: l.track.id }))), [lanes]);
-  const songEnd = Math.max(loop.end, ...allClips.map(({ clip }) => clipEnd(clip, tempo)), 0);
+  const allMidi = useMemo(() => lanes.flatMap((l) => l.track.midi.map((c) => ({ clip: c, track: l.track.id }))), [lanes]);
+  const songEnd = Math.max(loop.end, ...allClips.map(({ clip }) => clipEnd(clip, tempo)), ...allMidi.map(({ clip }) => midiEnd(clip)), 0);
   const contentBeats = songEnd + 32 * bar;
 
   // The horizontal scrollbar follows the scroll, and moves it.
@@ -355,21 +361,31 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   }, [fail]);
 
   const selectedClips = useCallback(() => allClips.filter(({ clip }) => selected.has(clip.id)), [allClips, selected]);
+  const selectedMidi = useCallback(() => allMidi.filter(({ clip }) => selected.has(clip.id)), [allMidi, selected]);
+  /** Where the selected clips of both kinds start and end, in beats, or null with none. */
+  const selectedSpan = useCallback(() => {
+    const spans = [...selectedClips().map(({ clip }) => [clip.start, clipEnd(clip, tempo)]), ...selectedMidi().map(({ clip }) => [clip.start, midiEnd(clip)])];
+    return spans.length ? [Math.min(...spans.map((x) => x[0])), Math.max(...spans.map((x) => x[1]))] : null;
+  }, [selectedClips, selectedMidi, tempo]);
 
   const deleteSelected = useCallback(() => {
     if (selected.size) void send({ key: "delete", clips: [], delete: [...selected] }).catch(() => {});
   }, [selected, send]);
 
   const duplicate = useCallback(() => {
-    const picked = selectedClips();
-    if (!picked.length) return;
-    const from = Math.min(...picked.map(({ clip }) => clip.start));
-    const to = Math.max(...picked.map(({ clip }) => clipEnd(clip, tempo)));
-    const before = new Set(allClips.map(({ clip }) => clip.id));
-    void send({ key: "duplicate", clips: picked.map(({ clip, track }) => ({ ...toInput({ ...clip, start: clip.start + (to - from) }, track), id: null })), delete: [] })
-      .then((v) => setSelected(new Set(v.tracks.flatMap((t) => t.clips.map((c) => c.id)).filter((id) => !before.has(id)))))
+    const span = selectedSpan();
+    if (!span) return;
+    const d = span[1] - span[0];
+    const before = new Set([...allClips, ...allMidi].map(({ clip }) => clip.id));
+    void send({
+      key: "duplicate",
+      clips: selectedClips().map(({ clip, track }) => ({ ...toInput({ ...clip, start: clip.start + d }, track), id: null })),
+      midi: selectedMidi().map(({ clip, track }) => ({ ...toMidiInput({ ...clip, start: clip.start + d }, track, true), id: null })),
+      delete: [],
+    })
+      .then((v) => setSelected(new Set(v.tracks.flatMap((t) => [...t.clips, ...t.midi].map((c) => c.id)).filter((id) => !before.has(id)))))
       .catch(() => {});
-  }, [selectedClips, allClips, tempo, send]);
+  }, [selectedSpan, selectedClips, selectedMidi, allClips, allMidi, send]);
 
   const split = useCallback(() => {
     api.split([...selected], playhead()).then(take).catch(fail);
@@ -378,10 +394,24 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   const setLoop = useCallback((l: { on: boolean; start: number; end: number }) => api.setLoop(l.on, l.start, l.end).then(take).catch(fail), [take, fail]);
 
   const loopSelection = useCallback(() => {
-    const picked = selectedClips();
-    if (!picked.length) return;
-    void setLoop({ on: true, start: Math.min(...picked.map(({ clip }) => clip.start)), end: Math.max(...picked.map(({ clip }) => clipEnd(clip, tempo))) });
-  }, [selectedClips, tempo, setLoop]);
+    const span = selectedSpan();
+    if (span) void setLoop({ on: true, start: span[0], end: span[1] });
+  }, [selectedSpan, setLoop]);
+
+  /** An empty MIDI clip a bar long on instrument track `trackId` at `beat`, selected so its notes can be written. */
+  const createMidi = useCallback(
+    (trackId: number, beat: number) => {
+      const before = new Set(allMidi.map(({ clip }) => clip.id));
+      const length = barBeats(signature);
+      void send({ key: "add", clips: [], midi: [{ track: trackId, start: Math.max(0, beat), offset: 0, content: length, phase: 0, length }], delete: [] })
+        .then((v) => {
+          const made = v.tracks.find((t) => t.id === trackId)?.midi.find((c) => !before.has(c.id));
+          if (made) setSelected(new Set([made.id]));
+        })
+        .catch(() => {});
+    },
+    [allMidi, signature, send],
+  );
 
   const undo = useCallback(() => api.undo().then(take).catch(fail), [take, fail]);
   const redo = useCallback(() => api.redo().then(take).catch(fail), [take, fail]);
@@ -438,6 +468,8 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
       const k = e.key.toLowerCase();
       const cmd = e.metaKey || e.ctrlKey;
       const el = e.target as HTMLElement | null;
+      // The note editor's keys are its own, but for play and undo.
+      if (el?.closest?.(".tl-notes") && !(e.key === " " && !cmd) && !(cmd && k === "z")) return;
       if (e.key === " " && !cmd && !e.altKey) {
         // The Sampler stays mounted with a Space handler of its own: while the
         // Timeline shows, Space is the Timeline's, so it never sees it.
@@ -463,7 +495,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
         if (k === "d") return run(duplicate);
         if (k === "e") return run(split);
         if (k === "l") return run(loopSelection);
-        if (k === "a") return run(() => setSelected(new Set(allClips.map(({ clip }) => clip.id))));
+        if (k === "a") return run(() => setSelected(new Set([...allClips, ...allMidi].map(({ clip }) => clip.id))));
         return;
       }
       if (e.altKey) return;
@@ -479,7 +511,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [togglePlay, undo, redo, duplicate, split, loopSelection, deleteSelected, zoomBy, seek, allClips, selected]);
+  }, [togglePlay, undo, redo, duplicate, split, loopSelection, deleteSelected, zoomBy, seek, allClips, allMidi, selected]);
 
   // ---- Drops: from the Library and from Finder ----
 
@@ -593,9 +625,11 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
   }
 
   const one = selected.size === 1 ? allClips.find(({ clip }) => selected.has(clip.id)) : undefined;
+  const oneMidi = selected.size === 1 ? allMidi.find(({ clip }) => selected.has(clip.id)) : undefined;
   const selectedTrack = view.tracks.find((t) => t.id === track) ?? null;
   const contentPx = contentBeats * zoom + size.w;
-  const empty = allClips.length === 0;
+  const empty = allClips.length === 0 && allMidi.length === 0;
+  const instrumentTrack = selectedTrack?.kind === "instrument" ? selectedTrack : null;
 
   return (
     <div className={`app timeline${libDrag?.moving ? " dragging" : ""}`} hidden={!active}>
@@ -678,6 +712,14 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
         </button>
         <button className="btn small" onClick={() => setPickInstrument(true)} title="Add an instrument track with a plugin instrument on it">
           + Instrument
+        </button>
+        <button
+          className="btn small"
+          disabled={!instrumentTrack}
+          onClick={() => instrumentTrack && createMidi(instrumentTrack.id, Math.floor(playhead() / barBeats(signature) + 1e-9) * barBeats(signature))}
+          title={instrumentTrack ? `Add an empty MIDI clip on ${instrumentTrack.name} at the playhead's bar (or double-click its lane)` : "Select an instrument track to add a MIDI clip to it"}
+        >
+          + MIDI clip
         </button>
         <span className="grow" />
         <div className="group-btns">
@@ -781,6 +823,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
                     ghost={ghost}
                     onSelect={(ids) => setSelected(new Set(ids))}
                     onTrack={setTrack}
+                    onCreate={createMidi}
                     onSeek={seek}
                     onEdit={send}
                     onZoom={zoomBy}
@@ -800,7 +843,19 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
           <div className="tl-hscroll" ref={hscroll} style={{ marginLeft: HEADER_W }} onScroll={(e) => setScroll(e.currentTarget.scrollLeft / zoom)} aria-hidden="true">
             <div style={{ width: contentPx, height: 1 }} />
           </div>
-          {one ? (
+          {oneMidi ? (
+            <NoteEditor
+              key={oneMidi.track}
+              clip={oneMidi.clip}
+              track={view.tracks.find((t) => t.id === oneMidi.track)!}
+              signature={signature}
+              playhead={playhead}
+              playing={playing}
+              onEdit={(clip, key) => send({ key, clips: [], midi: [clip], delete: [] })}
+              onDelete={deleteSelected}
+              onClose={() => setSelected(new Set())}
+            />
+          ) : one ? (
             <ClipInspector
               clip={one.clip}
               tempo={tempo}
@@ -829,7 +884,7 @@ export default function Timeline({ active, switcher, message, onMessage }: Props
         </Dialog>
       )}
       <StatusBar message={message} onDismiss={() => onMessage(null)}>
-        <kbd>Space</kbd> play · drag samples onto tracks · <kbd>⌥</kbd>-drag copies · <kbd>{mod}</kbd>-drag ignores the grid · <kbd>{mod}E</kbd> split · <kbd>{mod}D</kbd> duplicate · <kbd>⌫</kbd> delete · <kbd>{mod}Z</kbd> undo · <kbd>{mod}1</kbd> Sampler
+        <kbd>Space</kbd> play · drag samples onto tracks · double-click an instrument track for a MIDI clip · <kbd>⌥</kbd>-drag copies · <kbd>{mod}</kbd>-drag ignores the grid · <kbd>{mod}E</kbd> split · <kbd>{mod}D</kbd> duplicate · <kbd>⌫</kbd> delete · <kbd>{mod}Z</kbd> undo · <kbd>{mod}1</kbd> Sampler
       </StatusBar>
     </div>
   );

@@ -1,5 +1,7 @@
 //! Audio clips on the Timeline (idevkore/dk-tunekore#36): the player an audio
 //! track has in its source slot, and the main thread's handle that feeds it.
+//! MIDI clips (#38) are in [`midi`]: a player in an instrument track's notes
+//! slot that hands its notes to the instrument after it.
 //!
 //! A clip sits on the beat grid at `start` and plays a span of a file at the
 //! file's own speed (clips follow the tempo once Warp lands, Phase 8). Where
@@ -35,6 +37,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use rtrb::{Consumer, Producer, PushError, RingBuffer};
+
+pub mod midi;
+
+pub use midi::{MidiClipSet, MidiClipSpec, MidiFeed, MidiNote, MidiPlayer, Preview};
 
 use crate::device::{Buffers, Device, Events};
 use crate::player::Track;

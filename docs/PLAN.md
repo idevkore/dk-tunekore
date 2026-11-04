@@ -177,13 +177,14 @@ rather than edit the same ones.
   block at the map's next change, so each context keeps one tempo. Recording
   (#38, #40) uses the loop range already there; its count-in belongs here
   too, as a pre-roll before the start position.
-- **Tracks and the graph** (`engine/src/track.rs`, `engine/src/graph.rs`).
-  A track has an id (saved in projects; the Sampler's is 1), a name, a
-  source slot, a chain of devices after it, volume, pan, mute, solo and a
-  peak meter. Tracks sum into the master, then the master level and the
-  limiter. For now the tracks run one after another on the audio thread;
-  the worker pool comes later. The main thread's `Mixer` owns the track list
-  and the devices; while no output is open the devices sit there.
+- **Tracks and the graph** (`engine/src/track.rs`, `engine/src/graph.rs`). A
+  track has an id (saved in projects; the Sampler's is 1), a name, a notes
+  slot (a MIDI clip player, #38), a source slot, a chain of devices after
+  it, volume, pan, mute, solo and a peak meter. Tracks sum into the master,
+  then the master level and the limiter. For now the tracks run one after
+  another on the audio thread; the worker pool comes later. The main
+  thread's `Mixer` owns the track list and the devices; while no output is
+  open the devices sit there.
 - **Track kinds** (`TrackKind` in `engine/src/track.rs`, #36). A track says
   what it is, so each module knows its own: `sampler` (track 1, always),
   `audio` (the Timeline's clips; the default) or `instrument` (a plugin
@@ -194,17 +195,19 @@ rather than edit the same ones.
   own so the `tracks` list keeps the shape older builds read, which keep it
   as an unknown section) saves the id the next new track gets, and Open and
   New set it (from the file, or past the highest track), so a MIDI mapping
-  or a plugin reference to a deleted track can't land on a new one. The Timeline
-  shows every track, puts clips on audio tracks only, and puts its clip
-  player only into an audio track's empty source slot, so a device another
-  module put on a track stays.
+  or a plugin reference to a deleted track can't land on a new one. The
+  Timeline shows every track, puts audio clips on audio tracks and MIDI
+  clips on instrument tracks, and puts its clip player only into an audio
+  track's empty source slot, so a device another module put on a track
+  stays; an instrument track's notes slot is the Timeline's.
 - **Devices** (`engine/src/device.rs`). The `Device` trait: `prepare(rate,
   max_frames)` on the main thread (it may allocate), `process(ctx, events,
   buffers)` on the audio thread (real-time safe), `latency()`. A track runs
-  its source, then its chain, over the same stereo buffers and the same
-  `Events` list: a source adds sound (an instrument) or notes (a clip
-  player, the keyboard), and the devices after it read the notes and change
-  the sound.
+  its notes slot, its source, then its chain, over the same stereo buffers
+  and the same `Events` list: a notes device (a MIDI clip player) adds
+  notes, a source adds sound (an instrument) or notes (the Sampler, for its
+  plugin pads), and the devices after it read the notes and change the
+  sound.
 - **Snapshots** (`engine/src/snapshot.rs`). After each edit the `Mixer` puts
   an immutable snapshot of the tracks in a one-slot, latest-wins mailbox,
   with the devices to install alongside it (prepared on the main thread), so
@@ -283,45 +286,63 @@ rather than edit the same ones.
   behind the Timeline; `src/timeline/Timeline.tsx` is the Timeline's.
 
 - **The Timeline** (#36, `engine/src/clip.rs`, `src-tauri/src/timeline.rs`,
-  `src/timeline/`). An audio track's source is a `ClipPlayer`. A clip starts at a beat and plays a span of its
-  file at the file's own speed (Warp, Phase 8, makes clips follow the
-  tempo): `offset`, `content` (the span it loops over), `phase`, `length`
-  and fades in seconds. Where a clip is in its file is the time the tempo
-  map puts between its start beat and the beat playing (`clip::frames_into`,
-  through `TempoMap::frames_between`, the one place that conversion
-  happens; `ProcessContext` carries the map), worked out from the beat alone
-  as the Sampler's steps are, so it lands on the exact frame at its edges,
-  its own loop and the transport's loop wrap. Today's map has one tempo and
-  no history, so the player remembers where each tempo change it heard
-  while playing landed and counts time through them: a playing clip's file
-  runs on through a tempo change, and a clip that hasn't started yet starts
-  on its beat at the new tempo. A jump (play, a seek, the loop's wrap) or an
-  edit places clips by the map again. Once the tempo lane makes the map a
-  list of changes, the map itself counts through them. Each clip edge gets a
-  1.5 ms declick unless the next clip carries on with the next frame of the
-  same file at the same gain and with no fade at the cut (a split), and a
-  looped clip's seam is crossfaded into what follows its content in the file,
-  or dipped when nothing does. At a jump what was playing fades out from its
-  level at that moment while the new position fades in, so a second jump
-  during a fade never clicks. The shell sends a track's clips to its player as a
-  `ClipSet` through the player's own one-slot mailbox, with a queue back for
-  freeing, so edits never go through `Mixer::set_source`. Files are decoded
-  with the Analyzer's decoder and resampled to the output's rate in the
-  shell, and kept in memory (streaming long files from disk comes later).
-  The `timeline` section saves each track's colour and height, the clips by
+  `src/timeline/`). An audio track's source is a `ClipPlayer`. A clip starts
+  at a beat and plays a span of its file at the file's own speed (Warp,
+  Phase 8, makes clips follow the tempo): `offset`, `content` (the span it
+  loops over), `phase`, `length` and fades in seconds. Where a clip is in
+  its file is the time the tempo map puts between its start beat and the
+  beat playing (`clip::frames_into`, through `TempoMap::frames_between`, the
+  one place that conversion happens; `ProcessContext` carries the map),
+  worked out from the beat alone as the Sampler's steps are, so it lands on
+  the exact frame at its edges, its own loop and the transport's loop wrap.
+  Today's map has one tempo and no history, so the player remembers where
+  each tempo change it heard while playing landed and counts time through
+  them: a playing clip's file runs on through a tempo change, and a clip
+  that hasn't started yet starts on its beat at the new tempo. A jump (play,
+  a seek, the loop's wrap) or an edit places clips by the map again. Once
+  the tempo lane makes the map a list of changes, the map itself counts
+  through them. Each clip edge gets a 1.5 ms declick unless the next clip
+  carries on with the next frame of the same file at the same gain and with
+  no fade at the cut (a split), and a looped clip's seam is crossfaded into
+  what follows its content in the file, or dipped when nothing does. At a
+  jump what was playing fades out from its level at that moment while the
+  new position fades in, so a second jump during a fade never clicks. The
+  shell sends a track's clips to its player as a `ClipSet` through the
+  player's own one-slot mailbox, with a queue back for freeing, so edits
+  never go through `Mixer::set_source`. Files are decoded with the
+  Analyzer's decoder and resampled to the output's rate in the shell, and
+  kept in memory (streaming long files from disk comes later). The
+  `timeline` section saves each track's colour and height, the clips by
   track id (paths relative to the project), the view and the loop; the
   `tracks` section keeps names, mix and kinds. When the output reopens at
   another rate, the Timeline's tick thread resamples with its document free
-  and sends the sets inside `project::exclusive`. MIDI clips (#38) can join as
-  another kind of clip set; plugins (#37) make instrument tracks, and an
-  audio track's effects go in its chain after the `ClipPlayer`.
+  and sends the sets inside `project::exclusive`. Plugins (#37) make
+  instrument tracks, and an audio track's effects go in its chain after the
+  `ClipPlayer`. **MIDI clips** (#38, `engine/src/clip/midi.rs`,
+  `src-tauri/src/timeline/midi.rs`, `src/timeline/NoteEditor.tsx`) go on
+  instrument tracks, all in beats so they follow the tempo: `start`,
+  `offset`, `content`, `phase` and `length` as an audio clip's, and notes
+  (key, start, length, velocity 1 to 127) in the clip's own time. A
+  `MidiPlayer` in the track's notes slot, ahead of the instrument, pushes
+  each note at the first frame at or after its beat and covers the beats
+  from where the last piece stopped, so a note plays once whatever the
+  blocks. It keeps every key's state (sounding; a clip's or the keyboard's),
+  so a key is never started twice or ended while silent: notes end at their
+  end, the loop's seam or the clip's end; every clip note ends at a stop or
+  a jump; an edit ends only the notes the new clips no longer hold. No
+  chasing: a note begun before the playhead got there isn't started. The
+  note editor's keyboard plays through the same player. The `timeline`
+  section saves them as `midi`, by track id, left out when there are none.
+  MIDI clips on the Sampler's track would need `SamplerDevice` to read the
+  track's notes.
 
 Where the next pieces go:
 
 | Work | Engine | Shell and UI |
 | --- | --- | --- |
 | Plugins in the app (#37, built) | `engine/src/plugin_device.rs`: a `PluginDevice` runs a plugin's audio half as an instrument (source slot), an effect (chain), or a pad's instrument (the Sampler track's chain, ahead of its effects). `prepare` only records the rate and asks the main thread, through the device's `PluginLink`, for a plugin activated at it; the link hands it over and takes back the old one. `process` maps `ProcessContext` to the plugin's transport and `Events` (plus live notes from the link) to its notes. The Sampler sends a plugin pad's hits as notes on the pad's channel (`SamplerShared::set_plugin_pad`). `Mixer::move_in_chain` reorders effects. | `src-tauri/src/plugins/`: the document of devices (main thread only), commands, editor windows, the `plugins` section, MIDI targets `plugin.<device>.<param>`, and the live-note route for a MIDI controller. `src/plugins/`: the device chain under the Timeline's tracks, the plugin picker, a pad's plugin in the Sampler's Inspector. |
-| Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player pushes `Events` for an instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
+| Timeline (#36) | `engine/src/clip.rs`: clip players as source devices that read `ProcessContext::beat`; a MIDI clip player (`clip/midi.rs`, built) in the notes slot
+(`Mixer::set_notes`) pushes `Events` for the instrument after it. New tracks through `Mixer::add_track`, loop and seek through `TransportShared`. | `src/timeline/`, its own module with `commands()` and a `timeline` section keyed by track id |
 | MIDI learn (#20, built) | none needed | `midi.rs` and `midi/`: the mappings are the `midi` section. Targets are ids such as `sampler.pad.selected.cutoff`, `sampler.pad.3.level`, `transport.tempo`, `master.level` and `track.1.volume`. A module adds its own by implementing `midi::Targets` for its prefix (`plugin.<id>.<param>` for #37) and calling `midi::register_targets` from its setup. |
 | Project export (#44, part 1, built) | `engine/src/graph/render.rs`: `Engine::start_render` renders the graph offline (see "Offline render"). | `src-tauri/src/export.rs`: the range (song end from the Timeline's clips and the Sampler's song), the files (`export/wav.rs`: 16-bit dithered, 24-bit, float; written on a thread of their own as `.part` and moved in place once all are done), real-time pace for projects with plugins until their offline mode is wired in, progress and cancel, File > Export Project… (⇧⌘R). `src/export/`: the dialog. Freeze, flatten and bounce to a clip are part 2. |
 
