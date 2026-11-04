@@ -5,6 +5,38 @@ Every pull request that adds to tuneKore bumps the patch number
 Weekly releases, once they start, bump the minor number (see `docs/PLAN.md`
 section 4).
 
+## 0.1.21: export the project
+
+idevkore/dk-tunekore#44
+
+- **Export Project.** File > Export Project… (⇧⌘R) renders the whole
+  project to WAV: every track through its plugins and effects, then the
+  master level and limiter, so the file is what you hear. The Sampler's own
+  export (⌘E) stays as it is.
+- **The whole song or the loop.** The song runs from the start to the end of
+  the last clip, or of the Sampler's song. The loop range is cut on its exact
+  first and last frames, so it loops cleanly.
+- **Stems.** One file per track, after its volume and pan and before the
+  master, in a folder beside the master; muted tracks are left out. Every file
+  starts on the same frame and is the same length, so they line up in any DAW
+  and add up to the master.
+- **The same every time.** An export plays the project, not the room: the
+  metronome, pads and keys played meanwhile and edits made meanwhile stay out,
+  and steps with a chance roll the same in every export, so stems exported
+  later still add up to the master.
+- **Tails.** Reverbs and delays ring out after the end, for up to 10 seconds,
+  and the files end once everything has gone quiet. Off by default for the
+  loop range.
+- **16-bit, 24-bit or 32-bit float**, at the project's rate; 16-bit is
+  dithered. If a stem goes above full scale in 16 or 24 bits, the message
+  says which.
+- **Fast, or in real time with plugins.** A project without plugins exports
+  much faster than it plays. One with plugins exports in real time for now,
+  so sampled instruments keep up; the dialog says so.
+- **Progress and Stop.** The dialog shows how far it has got. Stopping it, or
+  the audio output closing, leaves nothing half written, and any file that
+  was already there stays as it was. Playback stops while it exports.
+
 ## 0.1.20: CLAP plugins
 
 idevkore/dk-tunekore#39

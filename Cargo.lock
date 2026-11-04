@@ -4321,7 +4321,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "tunekore"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "midir",
  "objc2",
@@ -4340,7 +4340,7 @@ dependencies = [
 
 [[package]]
 name = "tunekore-analyzer"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "hound",
  "rustfft",
@@ -4352,7 +4352,7 @@ dependencies = [
 
 [[package]]
 name = "tunekore-engine"
-version = "0.1.20"
+version = "0.1.21"
 dependencies = [
  "cpal",
  "rtrb",

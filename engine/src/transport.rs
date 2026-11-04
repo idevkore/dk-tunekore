@@ -100,6 +100,10 @@ pub struct ProcessContext {
     /// Tempo and meter along the song, for turning beats into time: the
     /// Timeline's audio clips find their place in their files through it.
     pub map: TempoMap,
+    /// This piece is an offline render's (an export), not the output's: a
+    /// device leaves out what is played live (pads, MIDI keys), the
+    /// metronome, and anything else that isn't the project itself.
+    pub offline: bool,
 }
 
 impl ProcessContext {
@@ -124,6 +128,7 @@ impl ProcessContext {
             looping: false,
             loop_range: LoopRange::default(),
             map: TempoMap::constant(tempo, sig, sample_rate),
+            offline: false,
         }
     }
 
@@ -417,6 +422,8 @@ pub struct Transport {
     /// The loop wrapped at the very end of the last block: the next block's
     /// first piece starts the loop again and says so.
     wrap_pending: bool,
+    /// The clock of an offline render: every context says so.
+    offline: bool,
 }
 
 impl Transport {
@@ -432,7 +439,14 @@ impl Transport {
             continuous: 0,
             range: LoopRange::default(),
             wrap_pending: false,
+            offline: false,
         }
+    }
+
+    /// Makes this the clock of an offline render: every [`ProcessContext`]
+    /// it hands out has `offline` set.
+    pub fn set_offline(&mut self, on: bool) {
+        self.offline = on;
     }
 
     pub fn sample_rate(&self) -> u32 {
@@ -513,6 +527,7 @@ impl Transport {
                 looping,
                 loop_range: t.range,
                 map: t.map,
+                offline: t.offline,
             }
         };
 
@@ -772,6 +787,20 @@ mod tests {
             let first = p.iter().find(|(at, _)| *at == pass).unwrap().1;
             assert!(first.beat.abs() < 1e-9, "the loop starts on its first beat");
         }
+    }
+
+    #[test]
+    fn an_offline_clock_says_so_in_every_piece() {
+        let s = TransportShared::default();
+        s.set_loop(0.0, 0.1);
+        s.set_looping(true);
+        let mut t = Transport::new(RATE);
+        assert!(pieces(&mut t, &s, 512, 512).iter().all(|(_, c)| !c.offline), "the output's clock is live");
+        t.set_offline(true);
+        s.play();
+        let p = pieces(&mut t, &s, 9_000, 512);
+        assert!(p.len() > 18 && p.iter().all(|(_, c)| c.offline), "stopped, playing and across loop wraps");
+        assert!(!ProcessContext::stopped(RATE, 64).offline);
     }
 
     #[test]

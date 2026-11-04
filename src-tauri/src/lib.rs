@@ -21,6 +21,7 @@ pub(crate) use commands;
 
 mod analyzer;
 mod display;
+mod export;
 mod midi;
 mod plugins;
 mod project;
@@ -248,6 +249,7 @@ pub fn run() {
     let commands = vec![
         analyzer::commands(),
         display::commands(),
+        export::commands(),
         midi::commands(),
         plugins::commands(),
         project::commands(),
@@ -261,8 +263,16 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         // Windows reopen at the size, place and display they were left at.
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        .menu(display::menu)
-        .on_menu_event(|app, event| display::on_menu(app, event.id().as_ref()))
+        // Each module's menu items and their handling, one line each, in alphabetical order.
+        .menu(|app| {
+            let menu = display::menu(app)?;
+            export::menu(app, &menu)?;
+            Ok(menu)
+        })
+        .on_menu_event(|app, event| {
+            display::on_menu(app, event.id().as_ref());
+            export::on_menu(app, event.id().as_ref());
+        })
         .manage(analyzer::Analyzer::default())
         .manage(audio)
         .manage(display::Zoom::default())
